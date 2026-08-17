@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (Ubuntu, system GDAL)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The geo stack comes from apt, not pip: GDAL's Python bindings have no
+      # reliable wheel, and an apt GDAL alongside a pip rasterio (which bundles
+      # its own) is a recipe for loader conflicts. This matches how the library
+      # is actually deployed.
+      - name: Install geo stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-gdal python3-rasterio python3-numpy gdal-bin
+
+      - name: Install pysent
+        run: |
+          python3 -m pip install --break-system-packages --no-deps -e .
+          python3 -m pip install --break-system-packages pytest owslib
+
+      - name: Show environment
+        run: |
+          python3 -c "import pysent, rasterio; from osgeo import gdal; \
+            print('pysent', pysent.__version__, '| GDAL', gdal.__version__, \
+                  '| rasterio', rasterio.__version__)"
+
+      - name: Run tests
+        run: python3 -m pytest -q
+
+  lint:
+    name: packaging metadata
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m pip install --break-system-packages build twine
+      # Catches a malformed pyproject or an unreadable README before it reaches
+      # anyone trying to install the package.
+      - name: Build and check the distribution
+        run: |
+          python3 -m build
+          python3 -m twine check dist/*

@@ -1,0 +1,108 @@
+{
+  "csw_endpoint": "https://nbs.csw.met.no",
+  "generated_by": "scripts/make_test_data.py",
+  "products": {
+    "S1": {
+      "artifacts": {
+        "Amplitude_VH": {
+          "bands": 1,
+          "bytes": 313087,
+          "crs": null,
+          "dtype": "UInt16",
+          "path": "s1_vh_window.tif",
+          "polarization": "VH",
+          "size": [
+            512,
+            512
+          ],
+          "source_member": "measurement/s1d-iw-grd-vh-20260810t052300-20260810t052325-004059-007650-002.tiff",
+          "src_window": [
+            6387,
+            3911,
+            512,
+            512
+          ],
+          "stats_band1": {
+            "max": 315.0,
+            "mean": 115.29,
+            "min": 13.0
+          }
+        },
+        "Amplitude_VV": {
+          "bands": 1,
+          "bytes": 362101,
+          "crs": null,
+          "dtype": "UInt16",
+          "path": "s1_vv_window.tif",
+          "polarization": "VV",
+          "size": [
+            512,
+            512
+          ],
+          "source_member": "measurement/s1d-iw-grd-vv-20260810t052300-20260810t052325-004059-007650-001.tiff",
+          "src_window": [
+            6387,
+            3911,
+            512,
+            512
+          ],
+          "stats_band1": {
+            "max": 823.0,
+            "mean": 217.78,
+            "min": 18.0
+          }
+        }
+      },
+      "download_url": "https://nbstds.met.no/thredds/fileServer/nbsArchive/S1D/2026/08/10/IW/S1D_IW_GRDH_1SDV_20260810T052300_20260810T052325_004059_007650_5857.zip",
+      "identifier": "22d63164-a661-4fed-96c9-e8902ac8f527",
+      "modified": "2026-08-10T06:41:27+00:00",
+      "title": "S1D_IW_GRDH_1SDV_20260810T052300_20260810T052325_004059_007650_5857"
+    },
+    "S2": {
+      "artifacts": {
+        "rgb": {
+          "band_order": [
+            "B4",
+            "B3",
+            "B2"
+          ],
+          "bands": 3,
+          "bytes": 1343028,
+          "crs": "WGS 84 / UTM zone 35N",
+          "dtype": "UInt16",
+          "path": "s2_rgb_window.tif",
+          "size": [
+            512,
+            512
+          ],
+          "source_subdataset": "10m",
+          "src_window": [
+            2489,
+            2489,
+            512,
+            512
+          ],
+          "stats_band1": {
+            "max": 10302.0,
+            "mean": 1515.24,
+            "min": 1033.0
+          }
+        }
+      },
+      "download_url": "https://nbstds.met.no/thredds/fileServer/nbsArchive/S2C/2026/08/10/S2C_MSIL2A_20260810T092031_N0512_R093_T35VPE_20260810T124910.zip",
+      "identifier": "920793aa-0e04-4ee0-889a-edbc779ffd99",
+      "modified": "2026-08-10T14:31:19+00:00",
+      "title": "S2C_MSIL2A_20260810T092031_N0512_R093_T35VPE_20260810T124910"
+    }
+  },
+  "search": {
+    "bbox": [
+      4.0,
+      57.0,
+      32.0,
+      72.0
+    ],
+    "days": 7,
+    "window_px": 512
+  }
+}

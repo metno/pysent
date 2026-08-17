@@ -7,6 +7,11 @@ dist/
 .pytest_cache/
 .ipynb_checkpoints/
 
+# Notebook run outputs (the fixtures under tests/data/ ARE committed).
+docs/notebooks/_output/
+docs/notebooks/_qa_output/
+executed/
+
 # Local editor/tool state - never publish.
 # Anchored to the repo root so these can never shadow a source directory of the
 # same name (e.g. a future src/pysent/memory/).

@@ -1,0 +1,90 @@
+name: Docs image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "src/**"
+      - "scripts/**"
+      - "tests/data/**"
+      - "pyproject.toml"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "src/**"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/pysent-docs
+
+jobs:
+  build-and-execute:
+    name: build image and execute notebooks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the docs image
+        run: docker build -f docs/Dockerfile -t "${IMAGE}:ci" .
+
+      # The point of the exercise: every notebook is executed for real, in the
+      # image, against the committed fixtures. A notebook that no longer runs
+      # fails the build instead of quietly rotting in the repository.
+      - name: Execute notebooks
+        run: |
+          mkdir -p executed
+          status=0
+          for nb in docs/notebooks/0*.ipynb; do
+            name="$(basename "$nb")"
+            echo "::group::$name"
+            if docker run --rm \
+                 -v "$PWD/executed:/out" \
+                 -w /opt/pysent/docs/notebooks \
+                 "${IMAGE}:ci" \
+                 papermill "$name" "/out/$name" \
+                   --kernel python3 \
+                   -p OUTPUT_DIR /tmp/nb-output; then
+              echo "$name OK"
+            else
+              echo "::error file=$nb::$name failed to execute"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: Upload executed notebooks
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: executed-notebooks
+          path: executed/
+          if-no-files-found: warn
+
+      # Only publish from main: a pull request proves the notebooks still run,
+      # but must not overwrite the image other people are pulling.
+      - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the image
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          docker tag "${IMAGE}:ci" "${IMAGE}:main"
+          docker tag "${IMAGE}:ci" "${IMAGE}:${GITHUB_SHA::7}"
+          docker push "${IMAGE}:main"
+          docker push "${IMAGE}:${GITHUB_SHA::7}"

@@ -70,6 +70,29 @@ but prefer the system or conda package.
 
 Verified against GDAL 3.8, rasterio 1.5, numpy 1.26 on Python 3.12.
 
+## Documentation
+
+The docs are **executable notebooks**, all of which CI runs on every push:
+
+| Notebook | Covers |
+|---|---|
+| [01_quickstart](docs/notebooks/01_quickstart.ipynb) | the three processing stages, first output |
+| [02_sentinel1](docs/notebooks/02_sentinel1.ipynb) | polarisations, the GCP warp, stretch percentiles |
+| [03_sentinel2](docs/notebooks/03_sentinel2.ipynb) | band combinations, min/max vs percentile |
+| [04_benchmarks](docs/notebooks/04_benchmarks.ipynb) | time and memory per step, stretch quality |
+
+They run with no Sentinel data at all (using the small committed fixtures), or
+against a mounted archive for the full pipeline:
+
+```bash
+docker run --rm -p 8888:8888 -v /path/to/nbsArchive:/data/nbsArchive:ro \
+    ghcr.io/metno/pysent-docs:main
+```
+
+See [docs/README.md](docs/README.md) for details, and
+[docs/tuning-and-roadmap.md](docs/tuning-and-roadmap.md) for the measured
+baseline and what is worth changing next.
+
 ## Development
 
 ```bash
@@ -79,7 +102,19 @@ pytest
 ```
 
 The suite runs without any SAFE product: processing tests build synthetic
-rasters, and the GDAL-dependent ones skip cleanly when `osgeo` is absent.
+rasters, real-scene tests use the committed fixtures under `tests/data/`, and
+the GDAL-dependent ones skip cleanly when `osgeo` is absent.
+
+To refresh the fixtures from a newer scene:
+
+```bash
+python scripts/make_test_data.py --days 7
+```
+
+This queries the NBS catalogue for recent Sentinel-1 GRD and Sentinel-2 products
+over Norway and cuts a window from each **directly out of the remote archive**
+using HTTP range requests, so a few hundred KB crosses the network rather than
+the full 1–8 GB product. `tests/data/manifest.json` records the provenance.
 
 ## Configuration
 
