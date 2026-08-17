@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Local editor/tool state - never publish.
+# Anchored to the repo root so these can never shadow a source directory of the
+# same name (e.g. a future src/pysent/memory/).
+/.claude/
+/.cursor/
+/.aider*
+/AGENT/
+/memory/
+/scratchpad/

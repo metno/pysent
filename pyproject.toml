@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pysent"
+version = "0.1.0"
+description = "Sentinel-1/Sentinel-2 SAFE to GeoTIFF quicklook processing (warp, stretch, overviews)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Massimo Di Stefano", email = "massimodisasha@gmail.com" }]
+keywords = ["sentinel", "sentinel-1", "sentinel-2", "SAFE", "geotiff", "gdal", "remote-sensing"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Intended Audience :: Science/Research",
+]
+
+# NOTE ON THE GEO STACK
+# `osgeo` (GDAL Python bindings) is deliberately NOT a hard dependency: it has no
+# reliable wheel and is normally supplied by the platform (apt `python3-gdal`,
+# conda `gdal`). Installing pysent into an environment without it raises a clear
+# ImportError at first use. Use the `gdal` extra only if you really want pip to
+# try to build it. See README "Installing the geo stack".
+dependencies = [
+    "numpy>=1.24",
+    "rasterio>=1.3",
+]
+
+[project.optional-dependencies]
+# CSW record lookup (pysent.csw) - resolving a product UUID to an archive path.
+csw = ["owslib>=0.29"]
+# Benchmark/quality harness (pysent.qa) - the notebook-facing tooling.
+qa = ["pandas>=2.0", "matplotlib>=3.7"]
+# Optional numba fast path for the Sentinel-1 grayscale stretch.
+numba = ["numba>=0.58"]
+# Only if you want pip to build the GDAL bindings; prefer the system package.
+gdal = ["GDAL>=3.6"]
+test = ["pytest>=8,<9"]
+all = ["pysent[csw,qa,numba]"]
+
+[project.urls]
+Homepage = "https://github.com/metno/pysent"
+Source = "https://github.com/metno/pysent"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
