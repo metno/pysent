@@ -34,8 +34,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: docker/setup-buildx-action@v3
+
+      # Loaded into the local daemon so the notebooks can be executed below,
+      # before anything is published.
       - name: Build the docs image
-        run: docker build -f docs/Dockerfile -t "${IMAGE}:ci" .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docs/Dockerfile
+          tags: pysent-docs:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # The point of the exercise: every notebook is executed for real, in the
       # image, against the committed fixtures. A notebook that no longer runs
@@ -50,7 +61,7 @@ jobs:
             if docker run --rm \
                  -v "$PWD/executed:/out" \
                  -w /opt/pysent/docs/notebooks \
-                 "${IMAGE}:ci" \
+                 pysent-docs:ci \
                  papermill "$name" "/out/$name" \
                    --kernel python3 \
                    -p OUTPUT_DIR /tmp/nb-output; then
@@ -81,10 +92,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Both tags are published by a single buildx invocation (a cache hit on the
+      # build above, so this is quick). Pushing tags one at a time with plain
+      # `docker push` makes GHCR reject the second with "unknown blob", because
+      # it re-mounts blobs the registry has not finalised yet.
       - name: Push the image
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        run: |
-          docker tag "${IMAGE}:ci" "${IMAGE}:main"
-          docker tag "${IMAGE}:ci" "${IMAGE}:${GITHUB_SHA::7}"
-          docker push "${IMAGE}:main"
-          docker push "${IMAGE}:${GITHUB_SHA::7}"
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docs/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:main
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
