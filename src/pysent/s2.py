@@ -4,13 +4,15 @@ from __future__ import annotations
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import numpy as np
 import rasterio
 from osgeo import gdal
 from rasterio.enums import ColorInterp, Resampling
+
+from ._safe import find_safe_member, resolve_safe_root
 
 
 S2_SAFE_IMPLEMENTATION = "sentinel_s2_safe_quicklook"
@@ -36,6 +38,9 @@ S2_SUPPORTED_BANDS: tuple[str, ...] = (
     "B11",
     "B12",
 )
+# Product metadata GDAL's SENTINEL2 driver opens: MTD_MSIL1C.xml / MTD_MSIL2A.xml,
+# or S2A_OPER_MTD_SAFL1C_*.xml in pre-2016 (PSD < 14) products.
+_S2_METADATA_XML = re.compile(r"MTD_MSIL\w+\.xml|S2\w_\w+_MTD_SAFL\w+\.xml")
 
 
 def _sanitize_name_fragment(value: str) -> str:
@@ -154,11 +159,17 @@ def _resolve_sentinel_s2_dataset_ref(input_dataset: str) -> str:
         raise ValueError("input_dataset is required")
     if dataset_ref.startswith("SENTINEL2_"):
         return dataset_ref
-    if dataset_ref.startswith("/vsizip/"):
+    normalized = dataset_ref.rstrip("/")
+    if _S2_METADATA_XML.fullmatch(PurePosixPath(normalized).name):
         return dataset_ref
-    if dataset_ref.endswith(".zip"):
-        return f"/vsizip/{dataset_ref}"
-    if dataset_ref.endswith(".SAFE") or dataset_ref.endswith("MTD_MSIL1C.xml") or dataset_ref.endswith("MTD_MSIL2A.xml"):
+    # GDAL opens the metadata XML, not the zip or .SAFE directory around it.
+    if normalized.endswith(".SAFE") or normalized.lower().endswith(".zip"):
+        safe_root = resolve_safe_root(normalized)
+        metadata_xml = find_safe_member(safe_root, _S2_METADATA_XML)
+        if metadata_xml is None:
+            raise RuntimeError(f"No Sentinel-2 metadata XML (MTD_MSIL*.xml) found in {safe_root}")
+        return metadata_xml
+    if dataset_ref.startswith("/vsizip/"):
         return dataset_ref
     raise ValueError(f"Unsupported Sentinel-2 SAFE dataset reference: {dataset_ref}")
 
