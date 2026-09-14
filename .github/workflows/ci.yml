@@ -32,6 +32,12 @@ jobs:
           python3 -m pip install --break-system-packages --no-deps -e .
           python3 -m pip install --break-system-packages pytest owslib
 
+      # The optional numba fast path has its own failure modes (thread safety,
+      # cache location), so test with it installed. Pinned to the releases that
+      # match apt's numpy 1.26; --no-deps keeps pip from replacing that numpy.
+      - name: Install numba
+        run: python3 -m pip install --break-system-packages --no-deps numba==0.60.0 llvmlite==0.43.0
+
       - name: Show environment
         run: |
           python3 -c "import pysent, rasterio; from osgeo import gdal; \
