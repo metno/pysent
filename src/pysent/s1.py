@@ -14,6 +14,8 @@ import rasterio
 from osgeo import gdal
 from rasterio.enums import ColorInterp, Resampling
 
+from ._safe import resolve_safe_root
+
 try:
     from numba import njit, prange  # type: ignore[reportMissingImports]
 
@@ -128,20 +130,11 @@ def _resolve_safe_manifest_path(input_dataset: str) -> str:
 
     if dataset_ref.endswith("manifest.safe"):
         return dataset_ref
-    if dataset_ref.startswith("/vsizip/"):
-        normalized = dataset_ref.rstrip("/")
-        if normalized.endswith(".SAFE"):
-            return f"{normalized}/manifest.safe"
-        if ".zip/" in normalized:
-            return normalized
-        if normalized.endswith(".zip"):
-            safe_dir = Path(normalized).stem
-            return f"{normalized}/{safe_dir}.SAFE/manifest.safe"
-    if dataset_ref.endswith(".SAFE"):
-        return f"{dataset_ref.rstrip('/')}/manifest.safe"
-    if dataset_ref.endswith(".zip"):
-        safe_dir = Path(dataset_ref).stem
-        return f"/vsizip/{dataset_ref}/{safe_dir}.SAFE/manifest.safe"
+    normalized = dataset_ref.rstrip("/")
+    if normalized.endswith(".SAFE") or normalized.lower().endswith(".zip"):
+        return f"{resolve_safe_root(normalized)}/manifest.safe"
+    if normalized.startswith("/vsizip/") and ".zip/" in normalized:
+        return normalized
     raise ValueError(f"Unsupported Sentinel-1 SAFE dataset reference: {dataset_ref}")
 
 
