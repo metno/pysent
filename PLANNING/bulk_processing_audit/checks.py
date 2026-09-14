@@ -49,9 +49,14 @@ def cachemax():
     print("initial", gdal.GetCacheMax() // 2**20, "MB")
     gdal.Open(str(synth(tmp / "c.tif", 1, "uint16", np.ones((64, 64), "uint16")))).ReadAsArray()
     os.environ["GDAL_CACHEMAX"] = "64"
-    from pysent.s2 import _configure_gdal_runtime
-    _configure_gdal_runtime()
-    print("after _configure_gdal_runtime(GDAL_CACHEMAX=64):", gdal.GetCacheMax() // 2**20, "MB")
+    try:
+        from pysent.s2 import _configure_gdal_runtime  # before the phase 1 fix
+        _configure_gdal_runtime()
+        print("after _configure_gdal_runtime(GDAL_CACHEMAX=64):", gdal.GetCacheMax() // 2**20, "MB")
+    except ImportError:
+        from pysent._runtime import gdal_runtime, resolve_gdal_runtime
+        with gdal_runtime(**resolve_gdal_runtime({}, None, "1")):
+            print("during a processing call with GDAL_CACHEMAX=64:", gdal.GetCacheMax() // 2**20, "MB")
 
 
 def numba_threads():

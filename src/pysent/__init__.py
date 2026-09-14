@@ -8,6 +8,9 @@ Submodules:
 ``pysent.s2``
     Sentinel-2 RGB band-combination products from SAFE: stacked-VRT warp,
     per-band stretch, tiled+compressed 8-bit RGB with overviews.
+``pysent.errors``
+    ``EmptySceneError`` and ``PartialFailure``, for callers that need to tell
+    an empty scene or a partly failed call from other errors.
 ``pysent.profiles``
     Platform detection (S1 vs S2) and per-platform profile defaults.
 ``pysent.archive``
@@ -44,6 +47,7 @@ __all__ = [
     # submodules
     "archive",
     "csw",
+    "errors",
     "profiles",
     "qa",
     "s1",
@@ -62,12 +66,15 @@ __all__ = [
     "normalize_sentinel_s2_product_map",
     "process_sentinel_s2_safe",
     "stretch_sentinel_s2_rgb",
+    # errors
+    "EmptySceneError",
+    "PartialFailure",
     # platform / archive
     "detect_nbs_sentinel_platform",
     "resolve_safe_archive_from_uuid",
 ]
 
-_SUBMODULES = {"archive", "csw", "profiles", "qa", "s1", "s2"}
+_SUBMODULES = {"archive", "csw", "errors", "profiles", "qa", "s1", "s2"}
 
 _EXPORTS = {
     "S1_SUPPORTED_AMPLITUDE_VARIABLES": "s1",
@@ -82,6 +89,8 @@ _EXPORTS = {
     "normalize_sentinel_s2_product_map": "s2",
     "process_sentinel_s2_safe": "s2",
     "stretch_sentinel_s2_rgb": "s2",
+    "EmptySceneError": "errors",
+    "PartialFailure": "errors",
     "detect_nbs_sentinel_platform": "profiles",
     "resolve_safe_archive_from_uuid": "archive",
 }
