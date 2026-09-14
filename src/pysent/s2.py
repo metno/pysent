@@ -1,9 +1,9 @@
 """Dedicated Sentinel-2 SAFE to GeoTIFF RGB product conversion helpers."""
 from __future__ import annotations
 
+import math
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -12,7 +12,18 @@ import rasterio
 from osgeo import gdal
 from rasterio.enums import ColorInterp, Resampling
 
+from ._runtime import (
+    SERIAL_MODES,
+    atomic_output,
+    available_cpus,
+    gdal_errors,
+    resolve_gdal_runtime,
+    resolve_work_dir,
+    run_product_jobs,
+    scratch_dir,
+)
 from ._safe import find_safe_member, resolve_safe_root
+from .errors import EmptySceneError
 
 
 S2_SAFE_IMPLEMENTATION = "sentinel_s2_safe_quicklook"
@@ -115,7 +126,7 @@ def _resolve_product_workers(requested_workers: object, output_count: int) -> in
     if output_count <= 1:
         return 1
     if requested_workers in (None, "", 0, "0"):
-        return min(output_count, max(1, os.cpu_count() or 1))
+        return min(output_count, available_cpus())
     return min(output_count, _coerce_positive_int(requested_workers, 1))
 
 
@@ -130,9 +141,12 @@ def _resolve_gdal_num_threads(requested_threads: object, product_workers: int) -
             return "1"
         return str(max(1, parsed))
 
-    total_cpus = max(1, os.cpu_count() or 1)
-    per_product = max(1, total_cpus // max(1, product_workers))
-    return str(per_product)
+    # Every product gets all usable CPUs rather than an equal share: a product
+    # keeps its threads only partly busy (I/O, single-threaded stretch), so on
+    # the benchmark scenes sharing beat splitting by 20-40 % in wall time with
+    # identical output (PLANNING/TODO_PLANNING_bulk_processing.md, phase 1 log).
+    # Bulk runners that start several calls at once pass an explicit value.
+    return str(available_cpus())
 
 
 def _resolve_warp_memory_limit_mb(requested_limit: object) -> float | None:
@@ -145,12 +159,6 @@ def _resolve_warp_memory_limit_mb(requested_limit: object) -> float | None:
     except Exception:
         return None
     return parsed if parsed > 0 else None
-
-
-def _configure_gdal_runtime() -> None:
-    cachemax_mb = os.environ.get("GDAL_CACHEMAX")
-    if cachemax_mb:
-        gdal.SetConfigOption("GDAL_CACHEMAX", str(cachemax_mb))
 
 
 def _resolve_sentinel_s2_dataset_ref(input_dataset: str) -> str:
@@ -254,20 +262,22 @@ def _build_sentinel_s2_stack_vrt(
     try:
         for position, source in enumerate(selected_sources, start=1):
             single_vrt = vrt_path.with_name(f"{vrt_path.stem}.{position}.{str(source['band_name']).lower()}.vrt")
-            translated = gdal.Translate(
-                str(single_vrt),
-                str(source["subdataset_name"]),
-                options=gdal.TranslateOptions(format="VRT", bandList=[int(source["band_index"])]),
-            )
+            with gdal_errors():
+                translated = gdal.Translate(
+                    str(single_vrt),
+                    str(source["subdataset_name"]),
+                    options=gdal.TranslateOptions(format="VRT", bandList=[int(source["band_index"])]),
+                )
             if translated is None:
                 raise RuntimeError(f"Unable to build Sentinel-2 VRT for {source['band_name']}")
             translated = None
             single_band_vrts.append(single_vrt)
-        stacked = gdal.BuildVRT(
-            str(vrt_path),
-            [str(path) for path in single_band_vrts],
-            options=gdal.BuildVRTOptions(separate=True, resolution="highest", srcNodata=0, VRTNodata=0),
-        )
+        with gdal_errors():
+            stacked = gdal.BuildVRT(
+                str(vrt_path),
+                [str(path) for path in single_band_vrts],
+                options=gdal.BuildVRTOptions(separate=True, resolution="highest", srcNodata=0, VRTNodata=0),
+            )
         if stacked is None:
             raise RuntimeError(f"Unable to build Sentinel-2 RGB VRT for {', '.join(band_names)}")
         stacked = None
@@ -295,31 +305,35 @@ def _warp_sentinel_s2_rgb(
     effective_epsg = (target_epsg or resolved_epsg or "").strip() or None
     effective_resolution = float(target_resolution or resolved_resolution or 10.0)
     try:
-        warped = gdal.Warp(
-            str(warped_path),
-            str(vrt_path),
-            options=gdal.WarpOptions(
-                format="GTiff",
-                dstSRS=effective_epsg,
-                xRes=effective_resolution,
-                yRes=effective_resolution,
-                srcNodata=0,
-                dstNodata=0,
-                multithread=True,
-                resampleAlg=resample_alg,
-                outputType=gdal.GDT_UInt16,
-                warpOptions=[f"NUM_THREADS={gdal_num_threads}"],
-                warpMemoryLimit=warp_memory_limit_mb,
-                creationOptions=[
-                    "COMPRESS=LZW",
-                    "TILED=YES",
-                    f"BLOCKXSIZE={block_size}",
-                    f"BLOCKYSIZE={block_size}",
-                    "BIGTIFF=IF_SAFER",
-                    "INTERLEAVE=PIXEL",
-                ],
-            ),
-        )
+        try:
+            with gdal_errors():
+                warped = gdal.Warp(
+                    str(warped_path),
+                    str(vrt_path),
+                    options=gdal.WarpOptions(
+                        format="GTiff",
+                        dstSRS=effective_epsg,
+                        xRes=effective_resolution,
+                        yRes=effective_resolution,
+                        srcNodata=0,
+                        dstNodata=0,
+                        multithread=True,
+                        resampleAlg=resample_alg,
+                        outputType=gdal.GDT_UInt16,
+                        warpOptions=[f"NUM_THREADS={gdal_num_threads}"],
+                        warpMemoryLimit=warp_memory_limit_mb,
+                        creationOptions=[
+                            "COMPRESS=LZW",
+                            "TILED=YES",
+                            f"BLOCKXSIZE={block_size}",
+                            f"BLOCKYSIZE={block_size}",
+                            "BIGTIFF=IF_SAFER",
+                            "INTERLEAVE=PIXEL",
+                        ],
+                    ),
+                )
+        except RuntimeError as exc:
+            raise RuntimeError(f"GDAL Sentinel-2 warp failed for {', '.join(band_names)}: {exc}") from exc
         if warped is None:
             raise RuntimeError(f"GDAL Sentinel-2 warp failed for {', '.join(band_names)}")
         warped = None
@@ -372,29 +386,44 @@ def _translate_sentinel_s2_rgb(
     block_size: int,
     overview_factors: tuple[int, ...],
 ) -> None:
-    translated = gdal.Translate(
-        str(output_path),
-        str(warped_path),
-        options=gdal.TranslateOptions(
-            format="GTiff",
-            creationOptions=[
-                f"COMPRESS={compression}",
-                "TILED=YES",
-                f"BLOCKXSIZE={block_size}",
-                f"BLOCKYSIZE={block_size}",
-                "BIGTIFF=IF_SAFER",
-                "INTERLEAVE=PIXEL",
-            ],
-        ),
-    )
-    if translated is None:
-        raise RuntimeError(f"Unable to translate Sentinel-2 RGB product to {output_path.name}")
-    translated = None
-    ds = gdal.Open(str(output_path), gdal.GA_Update)
-    if ds is not None and overview_factors:
-        ds.BuildOverviews("AVERAGE", list(overview_factors))
-    ds = None
+    with gdal_errors():
+        translated = gdal.Translate(
+            str(output_path),
+            str(warped_path),
+            options=gdal.TranslateOptions(
+                format="GTiff",
+                creationOptions=[
+                    f"COMPRESS={compression}",
+                    "TILED=YES",
+                    f"BLOCKXSIZE={block_size}",
+                    f"BLOCKYSIZE={block_size}",
+                    "BIGTIFF=IF_SAFER",
+                    "INTERLEAVE=PIXEL",
+                ],
+            ),
+        )
+        if translated is None:
+            raise RuntimeError(f"Unable to translate Sentinel-2 RGB product to {output_path.name}")
+        translated = None
+        ds = gdal.Open(str(output_path), gdal.GA_Update)
+        if ds is not None and overview_factors:
+            ds.BuildOverviews("AVERAGE", list(overview_factors))
+        ds = None
 
+
+def _band_min_max(band: gdal.Band, description: str) -> tuple[float, float]:
+    """Exact min/max of one band, ignoring NoData; :class:`EmptySceneError` if it has no valid pixel."""
+    try:
+        with gdal_errors():
+            result = band.ComputeRasterMinMax(False)
+    except RuntimeError as exc:
+        # GDAL: "Failed to compute min/max, no valid pixels found in sampling."
+        if "no valid pixels" in str(exc):
+            raise EmptySceneError(f"{description} has no valid pixels") from exc
+        raise
+    if result is None or not all(math.isfinite(value) for value in result):
+        raise EmptySceneError(f"{description} has no valid pixels")
+    return float(result[0]), float(result[1])
 
 
 def _write_stretched_sentinel_s2_rgb(
@@ -413,8 +442,11 @@ def _write_stretched_sentinel_s2_rgb(
     ``gdal.Translate`` scale params - so, unlike a bare ``scaleParams=[[]]``, the
     output is tiled + compressed (web/COG friendly) and the per-band src range is
     returned as ``{"p_low", "p_high", "method"}`` for the job record.
+
+    Raises :class:`pysent.errors.EmptySceneError` if a band has no valid pixel.
     """
-    source = gdal.Open(str(warped_path), gdal.GA_ReadOnly)
+    with gdal_errors():
+        source = gdal.Open(str(warped_path), gdal.GA_ReadOnly)
     if source is None:
         raise RuntimeError(f"Unable to open warped Sentinel-2 raster: {warped_path}")
     scale_params: list[list[float]] = []
@@ -422,7 +454,7 @@ def _write_stretched_sentinel_s2_rgb(
     p_high: list[float] = []
     for band_index in range(1, source.RasterCount + 1):
         band = source.GetRasterBand(band_index)
-        minimum, maximum = band.ComputeRasterMinMax(False)
+        minimum, maximum = _band_min_max(band, f"Sentinel-2 band {band_index}")
         if maximum <= minimum:
             maximum = minimum + 1.0
         scale_params.append([minimum, maximum, 0, 255])
@@ -430,31 +462,32 @@ def _write_stretched_sentinel_s2_rgb(
         p_high.append(float(maximum))
     source = None
 
-    translated = gdal.Translate(
-        str(output_path),
-        str(warped_path),
-        options=gdal.TranslateOptions(
-            format="GTiff",
-            outputType=gdal.GDT_Byte,
-            scaleParams=scale_params,
-            creationOptions=[
-                f"COMPRESS={compression}",
-                "TILED=YES",
-                f"BLOCKXSIZE={block_size}",
-                f"BLOCKYSIZE={block_size}",
-                "BIGTIFF=IF_SAFER",
-                "INTERLEAVE=PIXEL",
-            ],
-        ),
-    )
-    if translated is None:
-        raise RuntimeError(f"Unable to stretch Sentinel-2 RGB product to {output_path.name}")
-    translated = None
+    with gdal_errors():
+        translated = gdal.Translate(
+            str(output_path),
+            str(warped_path),
+            options=gdal.TranslateOptions(
+                format="GTiff",
+                outputType=gdal.GDT_Byte,
+                scaleParams=scale_params,
+                creationOptions=[
+                    f"COMPRESS={compression}",
+                    "TILED=YES",
+                    f"BLOCKXSIZE={block_size}",
+                    f"BLOCKYSIZE={block_size}",
+                    "BIGTIFF=IF_SAFER",
+                    "INTERLEAVE=PIXEL",
+                ],
+            ),
+        )
+        if translated is None:
+            raise RuntimeError(f"Unable to stretch Sentinel-2 RGB product to {output_path.name}")
+        translated = None
 
-    dataset = gdal.Open(str(output_path), gdal.GA_Update)
-    if dataset is not None and overview_factors:
-        dataset.BuildOverviews("AVERAGE", list(overview_factors))
-    dataset = None
+        dataset = gdal.Open(str(output_path), gdal.GA_Update)
+        if dataset is not None and overview_factors:
+            dataset.BuildOverviews("AVERAGE", list(overview_factors))
+        dataset = None
     return {"p_low": p_low, "p_high": p_high, "method": "minmax"}
 
 
@@ -505,6 +538,7 @@ def _process_sentinel_s2_product(
     product_name: str,
     band_names: tuple[str, str, str],
     output_path: str,
+    work_dir: str | None,
     target_epsg: str | None,
     target_resolution: float | None,
     resample_alg: str,
@@ -517,24 +551,28 @@ def _process_sentinel_s2_product(
     overview_factors: tuple[int, ...],
 ) -> dict[str, Any]:
     final_path = Path(output_path)
-    warped_path = final_path.with_name(f"{final_path.stem}.warp.tif")
-    effective_epsg, effective_resolution = _warp_sentinel_s2_rgb(
-        input_dataset,
-        band_names,
-        warped_path,
-        target_epsg=target_epsg,
-        target_resolution=target_resolution,
-        resample_alg=resample_alg,
-        block_size=block_size,
-        gdal_num_threads=gdal_num_threads,
-        warp_memory_limit_mb=warp_memory_limit_mb,
-    )
+    scratch_root = Path(work_dir) if work_dir else final_path.parent
     stretch_stats: dict[str, list[float]] | None = None
-    try:
+    # Intermediates live in a private scratch directory and the final file is
+    # moved into place only once complete, so a failure or a kill leaves neither
+    # stray intermediates nor a truncated output under the final name.
+    with scratch_dir(scratch_root) as scratch, atomic_output(final_path) as partial_path:
+        warped_path = scratch / f"{final_path.stem}.warp.tif"
+        effective_epsg, effective_resolution = _warp_sentinel_s2_rgb(
+            input_dataset,
+            band_names,
+            warped_path,
+            target_epsg=target_epsg,
+            target_resolution=target_resolution,
+            resample_alg=resample_alg,
+            block_size=block_size,
+            gdal_num_threads=gdal_num_threads,
+            warp_memory_limit_mb=warp_memory_limit_mb,
+        )
         if histogram_stretch:
             stretch_stats = _write_stretched_sentinel_s2_rgb(
                 warped_path,
-                final_path,
+                partial_path,
                 percentiles=percentiles,
                 block_size=block_size,
                 overview_factors=overview_factors,
@@ -543,21 +581,20 @@ def _process_sentinel_s2_product(
         else:
             _translate_sentinel_s2_rgb(
                 warped_path,
-                final_path,
+                partial_path,
                 compression=compression,
                 block_size=block_size,
                 overview_factors=overview_factors,
             )
-    finally:
         warped_path.unlink(missing_ok=True)
 
-    dataset = gdal.Open(str(final_path), gdal.GA_Update)
-    if dataset is not None:
-        for band_index, color in enumerate((gdal.GCI_RedBand, gdal.GCI_GreenBand, gdal.GCI_BlueBand), start=1):
-            band = dataset.GetRasterBand(band_index)
-            if band is not None:
-                band.SetColorInterpretation(color)
-    dataset = None
+        dataset = gdal.Open(str(partial_path), gdal.GA_Update)
+        if dataset is not None:
+            for band_index, color in enumerate((gdal.GCI_RedBand, gdal.GCI_GreenBand, gdal.GCI_BlueBand), start=1):
+                band = dataset.GetRasterBand(band_index)
+                if band is not None:
+                    band.SetColorInterpretation(color)
+        dataset = None
     return {
         "product_name": product_name,
         "bands": list(band_names),
@@ -589,6 +626,9 @@ def _resolve_sentinel_s2_processing_settings(
     resample_alg = str(processing.get("resample_alg") or "bilinear")
     compression = str(processing.get("compression") or "DEFLATE")
     parallel_mode = str(processing.get("parallel_mode") or os.environ.get("S2_PARALLEL_MODE") or "threads").strip().lower()
+    if parallel_mode not in SERIAL_MODES:
+        # S2 has only ever fanned out over threads; "processes" keeps meaning threads here.
+        parallel_mode = "threads"
     requested_parallel_workers = processing.get("parallel_workers")
     if requested_parallel_workers in (None, "", 0, "0"):
         requested_parallel_workers = os.environ.get("S2_PRODUCT_WORKERS")
@@ -612,6 +652,8 @@ def _resolve_sentinel_s2_processing_settings(
         "product_workers": product_workers,
         "gdal_num_threads": gdal_num_threads,
         "warp_memory_limit_mb": warp_memory_limit_mb,
+        "work_dir": resolve_work_dir(processing.get("work_dir")),
+        "runtime": resolve_gdal_runtime(processing, requested_gdal_threads, gdal_num_threads),
     }
 
 
@@ -623,32 +665,57 @@ def process_sentinel_s2_safe(
     output_names: dict[str, str],
     processing_options: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    """Generate RGB band-combination GeoTIFFs from a Sentinel-2 SAFE product.
+
+    Options for unattended and bulk runs, all in ``processing_options``:
+
+    ``work_dir``
+        Where intermediates are written (default: ``output_dir``). Each product
+        gets its own temporary directory there, removed on success and failure.
+        Outputs appear under their final name only once complete.
+    ``gdal_num_threads``
+        GDAL threads per product, for the warp and for decoding. Defaults to
+        the CPUs this process may use (affinity and cgroup quota), shared by
+        the products of the call. Set it when running several calls at once.
+    ``gdal_cachemax_mb``
+        GDAL block cache for the duration of the call (default: ``GDAL_CACHEMAX``).
+    ``parallel_mode``
+        ``threads`` (default) or ``serial``.
+
+    Every requested product is attempted. If one of several fails,
+    :class:`pysent.errors.PartialFailure` is raised after the rest finish. A
+    scene with no valid pixels raises :class:`pysent.errors.EmptySceneError`
+    when ``histogram_stretch`` is on.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
-    _configure_gdal_runtime()
     settings = _resolve_sentinel_s2_processing_settings(processing_options, output_count=len(output_names))
-    job_specs = [
-        {
-            "input_dataset": input_dataset,
-            "product_name": product_name,
-            "band_names": product_bands[product_name],
-            "output_path": str(output_dir / output_name),
-            "target_epsg": settings["target_epsg"],
-            "target_resolution": settings["target_resolution"],
-            "resample_alg": settings["resample_alg"],
-            "block_size": settings["block_size"],
-            "gdal_num_threads": settings["gdal_num_threads"],
-            "warp_memory_limit_mb": settings["warp_memory_limit_mb"],
-            "histogram_stretch": settings["histogram_stretch"],
-            "percentiles": settings["percentiles"],
-            "compression": settings["compression"],
-            "overview_factors": settings["overview_factors"],
-        }
+    jobs = [
+        (
+            product_name,
+            {
+                "input_dataset": input_dataset,
+                "product_name": product_name,
+                "band_names": product_bands[product_name],
+                "output_path": str(output_dir / output_name),
+                "work_dir": settings["work_dir"],
+                "target_epsg": settings["target_epsg"],
+                "target_resolution": settings["target_resolution"],
+                "resample_alg": settings["resample_alg"],
+                "block_size": settings["block_size"],
+                "gdal_num_threads": settings["gdal_num_threads"],
+                "warp_memory_limit_mb": settings["warp_memory_limit_mb"],
+                "histogram_stretch": settings["histogram_stretch"],
+                "percentiles": settings["percentiles"],
+                "compression": settings["compression"],
+                "overview_factors": settings["overview_factors"],
+            },
+        )
         for product_name, output_name in output_names.items()
     ]
-
-    if settings["product_workers"] <= 1 or settings["parallel_mode"] in {"none", "off", "serial"}:
-        return [_process_sentinel_s2_product(**spec) for spec in job_specs]
-
-    with ThreadPoolExecutor(max_workers=settings["product_workers"]) as executor:
-        futures = [executor.submit(_process_sentinel_s2_product, **spec) for spec in job_specs]
-        return [future.result() for future in futures]
+    return run_product_jobs(
+        _process_sentinel_s2_product,
+        jobs,
+        parallel_mode=settings["parallel_mode"],
+        workers=settings["product_workers"],
+        runtime=settings["runtime"],
+    )

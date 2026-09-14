@@ -123,15 +123,36 @@ environment variables below only supply defaults when an option is omitted.
 
 | Variable | Effect |
 |---|---|
-| `S1_PARALLEL_MODE`, `S2_PARALLEL_MODE` | `threads` / `processes` / `serial` fan-out across products |
+| `S1_PARALLEL_MODE`, `S2_PARALLEL_MODE` | `threads` / `processes` (S1 only) / `serial` fan-out across products |
 | `S1_PRODUCT_WORKERS`, `S2_PRODUCT_WORKERS` | Worker count for that fan-out |
-| `S1_GDAL_NUM_THREADS`, `S2_GDAL_NUM_THREADS` | GDAL warp `NUM_THREADS` |
+| `S1_GDAL_NUM_THREADS`, `S2_GDAL_NUM_THREADS` | GDAL threads per product: warp `NUM_THREADS` and `GDAL_NUM_THREADS` (JP2 decoding) |
 | `S1_WARP_MEMORY_LIMIT_MB`, `S2_WARP_MEMORY_LIMIT_MB` | GDAL `warpMemoryLimit` |
 | `S1_USE_NUMBA` | Enable the numba fast path for the S1 stretch |
-| `GDAL_CACHEMAX` | GDAL block cache size |
+| `GDAL_CACHEMAX` | GDAL block cache size, applied even if set after GDAL started |
+| `GDAL_NUM_THREADS` | Kept as the decoding thread count unless `gdal_num_threads` is given |
 | `NBS_ARCHIVE_ROOT` | Local mount of the archive (`pysent.archive`) |
 | `NBS_SENTINEL_CSW_ENDPOINT`, `CSW_ENDPOINT` | Catalogue endpoints (`pysent.csw`) |
 | `NBS_SENTINEL_PLATFORM_PROFILES_JSON` | Profile overrides when the caller supplies none |
+
+### Unattended and bulk runs
+
+- **`work_dir`** (processing option): where intermediates go, default
+  `output_dir`. Each product uses its own temporary directory, removed whether
+  it succeeds or fails. Outputs are written under a hidden temporary name and
+  renamed when complete, so a killed worker never leaves a truncated file under
+  the final name.
+- **`gdal_cachemax_mb`** (processing option): GDAL block cache during the call.
+  GDAL's default of 5 % of RAM applies *per process*.
+- **CPU budget:** defaults come from the CPUs the process may use (affinity
+  mask and cgroup quota, e.g. `docker --cpus` or Slurm), not the host total.
+  Each product of a call may use all of them, so when running several calls
+  side by side, set `gdal_num_threads` to each call's share.
+  `parallel_mode="processes"` runs serially inside a worker process. Its pool
+  uses `forkserver` or `spawn`, so guard scripts with `if __name__ == "__main__":`.
+- **Errors** (`pysent.errors`): every product of a call is attempted. If some
+  of several fail, `PartialFailure` carries `.results` (the finished products)
+  and `.errors`. An S2 scene without valid pixels raises `EmptySceneError`.
+  Both subclass `RuntimeError`, and GDAL's own message is included.
 
 ## Known tuning work
 
