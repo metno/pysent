@@ -22,12 +22,14 @@ Top-level names are resolved lazily, so importing :mod:`pysent.profiles` or
 :mod:`pysent.csw` does not require the GDAL bindings that :mod:`pysent.s1` and
 :mod:`pysent.s2` need.
 
+    >>> from pathlib import Path
     >>> from pysent.s2 import process_sentinel_s2_safe, S2_DEFAULT_PRODUCTS
+    >>> product = "true_color_vegetation"  # ("B4", "B3", "B2")
     >>> results = process_sentinel_s2_safe(
     ...     input_dataset="/archive/S2A_MSIL1C_....zip",
     ...     output_dir=Path("/out"),
-    ...     product_bands={"true_colour": S2_DEFAULT_PRODUCTS["true_colour"]},
-    ...     output_names={"true_colour": "scene_true_colour.tif"},
+    ...     product_bands={product: S2_DEFAULT_PRODUCTS[product]},
+    ...     output_names={product: "scene_true_color.tif"},
     ... )
 """
 from __future__ import annotations
