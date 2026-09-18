@@ -4,8 +4,7 @@ from __future__ import annotations
 import os
 import math
 import re
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from multiprocessing import current_process
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +13,16 @@ import rasterio
 from osgeo import gdal
 from rasterio.enums import ColorInterp, Resampling
 
+from ._runtime import (
+    atomic_output,
+    available_cpus,
+    gdal_errors,
+    in_child_process,
+    resolve_gdal_runtime,
+    resolve_work_dir,
+    run_product_jobs,
+    scratch_dir,
+)
 from ._safe import resolve_safe_root
 
 try:
@@ -47,8 +56,7 @@ S1_NETCDF_IMPLEMENTATION = "sentinel_s1_quicklook"
 S1_SAFE_IMPLEMENTATION = "sentinel_s1_safe_quicklook"
 
 
-@njit(cache=True, parallel=True)
-def _stretch_sentinel_s1_numba(
+def _stretch_sentinel_s1_kernel(
     data: np.ndarray,
     p_low: float,
     p_high: float,
@@ -80,6 +88,30 @@ def _stretch_sentinel_s1_numba(
             alpha[row, col] = np.uint8(255)
 
     return gray, alpha
+
+
+# numba's default "workqueue" threading layer aborts the whole process when two
+# threads enter a parallel=True function at once, so calls are serialised. The
+# kernel is parallel itself, so little is lost.
+_NUMBA_LOCK = threading.Lock()
+_numba_kernel = None
+
+
+def _get_numba_kernel():
+    """Compile the stretch kernel on first use rather than at import.
+
+    ``cache=True`` needs a writable cache location (the package's
+    ``__pycache__``, ``$HOME`` or ``NUMBA_CACHE_DIR``); without one, numba
+    raises when the function is decorated. Compile uncached in that case.
+    Call with ``_NUMBA_LOCK`` held.
+    """
+    global _numba_kernel
+    if _numba_kernel is None:
+        try:
+            _numba_kernel = njit(cache=True, parallel=True)(_stretch_sentinel_s1_kernel)
+        except RuntimeError:
+            _numba_kernel = njit(cache=False, parallel=True)(_stretch_sentinel_s1_kernel)
+    return _numba_kernel
 
 
 def _sanitize_name_fragment(value: str) -> str:
@@ -192,11 +224,15 @@ def detect_sentinel_s1_polarizations(input_dataset: str) -> list[str]:
 def _build_sentinel_s1_safe_vrt(input_dataset: str, variable: str, vrt_path: Path) -> str:
     manifest_path = _resolve_safe_manifest_path(input_dataset)
     band_index = _resolve_safe_band_index(manifest_path, variable)
-    translated = gdal.Translate(
-        str(vrt_path),
-        manifest_path,
-        options=gdal.TranslateOptions(format="VRT", bandList=[band_index]),
-    )
+    try:
+        with gdal_errors():
+            translated = gdal.Translate(
+                str(vrt_path),
+                manifest_path,
+                options=gdal.TranslateOptions(format="VRT", bandList=[band_index]),
+            )
+    except RuntimeError as exc:
+        raise RuntimeError(f"Unable to build Sentinel-1 SAFE VRT for {variable}: {exc}") from exc
     if translated is None:
         raise RuntimeError(f"Unable to build Sentinel-1 SAFE VRT for {variable}")
     translated = None
@@ -237,7 +273,7 @@ def _resolve_product_workers(requested_workers: object, output_count: int) -> in
     if output_count <= 1:
         return 1
     if requested_workers in (None, "", 0, "0"):
-        return min(output_count, max(1, os.cpu_count() or 1))
+        return min(output_count, available_cpus())
     return min(output_count, _coerce_positive_int(requested_workers, 1))
 
 
@@ -252,9 +288,12 @@ def _resolve_gdal_num_threads(requested_threads: object, product_workers: int) -
             return "1"
         return str(max(1, parsed))
 
-    total_cpus = max(1, os.cpu_count() or 1)
-    per_product = max(1, total_cpus // max(1, product_workers))
-    return str(per_product)
+    # Every product gets all usable CPUs rather than an equal share: a product
+    # keeps its threads only partly busy (I/O, single-threaded stretch), so on
+    # the benchmark scenes sharing beat splitting by 20-40 % in wall time with
+    # identical output (PLANNING/TODO_PLANNING_bulk_processing.md, phase 1 log).
+    # Bulk runners that start several calls at once pass an explicit value.
+    return str(available_cpus())
 
 
 def _resolve_warp_memory_limit_mb(requested_limit: object) -> float | None:
@@ -267,12 +306,6 @@ def _resolve_warp_memory_limit_mb(requested_limit: object) -> float | None:
     except Exception:
         return None
     return parsed if parsed > 0 else None
-
-
-def _configure_gdal_runtime() -> None:
-    cachemax_mb = os.environ.get("GDAL_CACHEMAX")
-    if cachemax_mb:
-        gdal.SetConfigOption("GDAL_CACHEMAX", str(cachemax_mb))
 
 
 def stretch_sentinel_s1_grayscale(
@@ -309,13 +342,14 @@ def stretch_sentinel_s1_grayscale(
 
     if use_numba and NUMBA_AVAILABLE:
         has_nodata = nodata is not None and math.isfinite(float(nodata))
-        gray, alpha = _stretch_sentinel_s1_numba(
-            data.astype(np.float32, copy=False),
-            float(p_low),
-            float(p_high),
-            float(nodata or 0.0),
-            has_nodata,
-        )
+        with _NUMBA_LOCK:
+            gray, alpha = _get_numba_kernel()(
+                data.astype(np.float32, copy=False),
+                float(p_low),
+                float(p_high),
+                float(nodata or 0.0),
+                has_nodata,
+            )
     else:
         scaled = np.clip((data.astype(np.float32, copy=False) - float(p_low)) / float(p_high - p_low), 0.0, 1.0)
         gray[valid] = np.round(scaled[valid] * 255.0).astype(np.uint8)
@@ -342,31 +376,35 @@ def _warp_sentinel_s1_amplitude(
     warp_memory_limit_mb: float | None = None,
 ) -> None:
     subdataset = _build_subdataset_path(input_dataset, variable)
-    warped = gdal.Warp(
-        str(warped_path),
-        subdataset,
-        options=gdal.WarpOptions(
-            format="GTiff",
-            dstSRS=target_epsg,
-            xRes=target_resolution,
-            yRes=target_resolution,
-            srcNodata=0,
-            dstNodata=0,
-            geoloc=True,
-            multithread=True,
-            resampleAlg=resample_alg,
-            outputType=gdal.GDT_Float32,
-            warpOptions=[f"NUM_THREADS={gdal_num_threads}"],
-            warpMemoryLimit=warp_memory_limit_mb,
-            creationOptions=[
-                "COMPRESS=LZW",
-                "TILED=YES",
-                f"BLOCKXSIZE={block_size}",
-                f"BLOCKYSIZE={block_size}",
-                "BIGTIFF=IF_SAFER",
-            ],
-        ),
-    )
+    try:
+        with gdal_errors():
+            warped = gdal.Warp(
+                str(warped_path),
+                subdataset,
+                options=gdal.WarpOptions(
+                    format="GTiff",
+                    dstSRS=target_epsg,
+                    xRes=target_resolution,
+                    yRes=target_resolution,
+                    srcNodata=0,
+                    dstNodata=0,
+                    geoloc=True,
+                    multithread=True,
+                    resampleAlg=resample_alg,
+                    outputType=gdal.GDT_Float32,
+                    warpOptions=[f"NUM_THREADS={gdal_num_threads}"],
+                    warpMemoryLimit=warp_memory_limit_mb,
+                    creationOptions=[
+                        "COMPRESS=LZW",
+                        "TILED=YES",
+                        f"BLOCKXSIZE={block_size}",
+                        f"BLOCKYSIZE={block_size}",
+                        "BIGTIFF=IF_SAFER",
+                    ],
+                ),
+            )
+    except RuntimeError as exc:
+        raise RuntimeError(f"GDAL warp failed for {variable}: {exc}") from exc
     if warped is None:
         raise RuntimeError(f"GDAL warp failed for {variable}")
     warped = None
@@ -388,34 +426,38 @@ def _warp_sentinel_s1_safe_amplitude(
     vrt_path = warped_path.with_name(f"{warped_path.stem}.{_normalize_variable_suffix(variable)}.vrt")
     _build_sentinel_s1_safe_vrt(input_dataset, variable, vrt_path)
     try:
-        warped = gdal.Warp(
-            str(warped_path),
-            str(vrt_path),
-            options=gdal.WarpOptions(
-                format="GTiff",
-                dstSRS=target_epsg,
-                xRes=target_resolution,
-                yRes=target_resolution,
-                srcNodata=0,
-                dstNodata=0,
-                # The SAFE band VRT is GCP-based: thin-plate-spline (tps) is
-                # accurate but the dominant warp cost; with use_tps=False GDAL
-                # falls back to the much faster polynomial GCP transform.
-                tps=use_tps,
-                multithread=True,
-                resampleAlg=resample_alg,
-                outputType=gdal.GDT_Float32,
-                warpOptions=[f"NUM_THREADS={gdal_num_threads}"],
-                warpMemoryLimit=warp_memory_limit_mb,
-                creationOptions=[
-                    "COMPRESS=LZW",
-                    "TILED=YES",
-                    f"BLOCKXSIZE={block_size}",
-                    f"BLOCKYSIZE={block_size}",
-                    "BIGTIFF=IF_SAFER",
-                ],
-            ),
-        )
+        try:
+            with gdal_errors():
+                warped = gdal.Warp(
+                    str(warped_path),
+                    str(vrt_path),
+                    options=gdal.WarpOptions(
+                        format="GTiff",
+                        dstSRS=target_epsg,
+                        xRes=target_resolution,
+                        yRes=target_resolution,
+                        srcNodata=0,
+                        dstNodata=0,
+                        # The SAFE band VRT is GCP-based: thin-plate-spline (tps) is
+                        # accurate but the dominant warp cost; with use_tps=False GDAL
+                        # falls back to the much faster polynomial GCP transform.
+                        tps=use_tps,
+                        multithread=True,
+                        resampleAlg=resample_alg,
+                        outputType=gdal.GDT_Float32,
+                        warpOptions=[f"NUM_THREADS={gdal_num_threads}"],
+                        warpMemoryLimit=warp_memory_limit_mb,
+                        creationOptions=[
+                            "COMPRESS=LZW",
+                            "TILED=YES",
+                            f"BLOCKXSIZE={block_size}",
+                            f"BLOCKYSIZE={block_size}",
+                            "BIGTIFF=IF_SAFER",
+                        ],
+                    ),
+                )
+        except RuntimeError as exc:
+            raise RuntimeError(f"GDAL SAFE warp failed for {variable}: {exc}") from exc
         if warped is None:
             raise RuntimeError(f"GDAL SAFE warp failed for {variable}")
         warped = None
@@ -474,11 +516,13 @@ def _write_quicklook_from_warped(
         }
 
 
-def _process_sentinel_s1_product(
+def _run_sentinel_s1_product(
+    warp,
     *,
     input_dataset: str,
     variable: str,
     output_path: str,
+    work_dir: str | None,
     target_epsg: str,
     target_resolution: float,
     resample_alg: str,
@@ -491,30 +535,34 @@ def _process_sentinel_s1_product(
     overview_factors: tuple[int, ...],
 ) -> dict[str, Any]:
     final_path = Path(output_path)
-    warped_path = final_path.with_name(f"{final_path.stem}.warp.tif")
-    _warp_sentinel_s1_amplitude(
-        input_dataset,
-        variable,
-        warped_path,
-        target_epsg=target_epsg,
-        target_resolution=target_resolution,
-        resample_alg=resample_alg,
-        block_size=block_size,
-        gdal_num_threads=gdal_num_threads,
-        warp_memory_limit_mb=warp_memory_limit_mb,
-    )
-    stats = _write_quicklook_from_warped(
-        warped_path,
-        final_path,
-        use_numba=use_numba,
-        percentiles=percentiles,
-        compression=compression,
-        block_size=block_size,
-        overview_factors=overview_factors,
-        target_epsg=target_epsg,
-        target_resolution=target_resolution,
-    )
-    warped_path.unlink(missing_ok=True)
+    scratch_root = Path(work_dir) if work_dir else final_path.parent
+    # Intermediates live in a private scratch directory and the final file is
+    # moved into place only once complete, so a failure or a kill leaves neither
+    # stray intermediates nor a truncated output under the final name.
+    with scratch_dir(scratch_root) as scratch, atomic_output(final_path) as partial_path:
+        warped_path = scratch / f"{final_path.stem}.warp.tif"
+        warp(
+            input_dataset,
+            variable,
+            warped_path,
+            target_epsg=target_epsg,
+            target_resolution=target_resolution,
+            resample_alg=resample_alg,
+            block_size=block_size,
+            gdal_num_threads=gdal_num_threads,
+            warp_memory_limit_mb=warp_memory_limit_mb,
+        )
+        stats = _write_quicklook_from_warped(
+            warped_path,
+            partial_path,
+            use_numba=use_numba,
+            percentiles=percentiles,
+            compression=compression,
+            block_size=block_size,
+            overview_factors=overview_factors,
+            target_epsg=target_epsg,
+            target_resolution=target_resolution,
+        )
     return {
         "variable": variable,
         "path": str(final_path),
@@ -523,53 +571,13 @@ def _process_sentinel_s1_product(
     }
 
 
-def _process_sentinel_s1_safe_product(
-    *,
-    input_dataset: str,
-    variable: str,
-    output_path: str,
-    target_epsg: str,
-    target_resolution: float,
-    resample_alg: str,
-    block_size: int,
-    gdal_num_threads: str,
-    warp_memory_limit_mb: float | None,
-    use_numba: bool,
-    percentiles: tuple[float, float],
-    compression: str,
-    overview_factors: tuple[int, ...],
-) -> dict[str, Any]:
-    final_path = Path(output_path)
-    warped_path = final_path.with_name(f"{final_path.stem}.warp.tif")
-    _warp_sentinel_s1_safe_amplitude(
-        input_dataset,
-        variable,
-        warped_path,
-        target_epsg=target_epsg,
-        target_resolution=target_resolution,
-        resample_alg=resample_alg,
-        block_size=block_size,
-        gdal_num_threads=gdal_num_threads,
-        warp_memory_limit_mb=warp_memory_limit_mb,
-    )
-    stats = _write_quicklook_from_warped(
-        warped_path,
-        final_path,
-        use_numba=use_numba,
-        percentiles=percentiles,
-        compression=compression,
-        block_size=block_size,
-        overview_factors=overview_factors,
-        target_epsg=target_epsg,
-        target_resolution=target_resolution,
-    )
-    warped_path.unlink(missing_ok=True)
-    return {
-        "variable": variable,
-        "path": str(final_path),
-        "output_file": final_path.name,
-        **stats,
-    }
+def _process_sentinel_s1_product(**spec: Any) -> dict[str, Any]:
+    # Looked up at call time so tests can substitute the warp.
+    return _run_sentinel_s1_product(_warp_sentinel_s1_amplitude, **spec)
+
+
+def _process_sentinel_s1_safe_product(**spec: Any) -> dict[str, Any]:
+    return _run_sentinel_s1_product(_warp_sentinel_s1_safe_amplitude, **spec)
 
 
 def _resolve_sentinel_s1_processing_settings(
@@ -588,8 +596,10 @@ def _resolve_sentinel_s1_processing_settings(
     compression = str(processing.get("compression") or "JPEG")
     use_numba = _env_bool("S1_USE_NUMBA", default=False) if processing.get("use_numba") is None else bool(processing.get("use_numba"))
     parallel_mode = str(processing.get("parallel_mode") or os.environ.get("S1_PARALLEL_MODE") or "threads").strip().lower()
-    if parallel_mode == "processes" and current_process().daemon:
-        parallel_mode = "threads"
+    if parallel_mode == "processes" and in_child_process():
+        # Already inside a worker process (a bulk runner's pool): a second pool
+        # per scene would multiply processes, and CPU oversubscription with them.
+        parallel_mode = "serial"
     requested_parallel_workers = processing.get("parallel_workers")
     if requested_parallel_workers in (None, "", 0, "0"):
         requested_parallel_workers = os.environ.get("S1_PRODUCT_WORKERS")
@@ -612,7 +622,39 @@ def _resolve_sentinel_s1_processing_settings(
         "product_workers": product_workers,
         "gdal_num_threads": gdal_num_threads,
         "warp_memory_limit_mb": warp_memory_limit_mb,
+        "work_dir": resolve_work_dir(processing.get("work_dir")),
+        "runtime": resolve_gdal_runtime(processing, requested_gdal_threads, gdal_num_threads),
     }
+
+
+def _sentinel_s1_jobs(
+    input_dataset: str,
+    output_dir: Path,
+    output_names: dict[str, str],
+    settings: dict[str, Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (
+            variable,
+            {
+                "input_dataset": input_dataset,
+                "variable": variable,
+                "output_path": str(output_dir / output_name),
+                "work_dir": settings["work_dir"],
+                "target_epsg": settings["target_epsg"],
+                "target_resolution": settings["target_resolution"],
+                "resample_alg": settings["resample_alg"],
+                "block_size": settings["block_size"],
+                "gdal_num_threads": settings["gdal_num_threads"],
+                "warp_memory_limit_mb": settings["warp_memory_limit_mb"],
+                "use_numba": settings["use_numba"],
+                "percentiles": settings["percentiles"],
+                "compression": settings["compression"],
+                "overview_factors": settings["overview_factors"],
+            },
+        )
+        for variable, output_name in output_names.items()
+    ]
 
 
 def process_sentinel_s1_netcdf(
@@ -622,40 +664,22 @@ def process_sentinel_s1_netcdf(
     output_names: dict[str, str],
     processing_options: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Generate stretched S1 quicklook GeoTIFFs for the requested amplitude variables."""
+    """Generate stretched S1 quicklook GeoTIFFs for the requested amplitude variables.
+
+    Every requested variable is attempted. If one of several fails,
+    :class:`pysent.errors.PartialFailure` is raised after the rest finish.
+    See :func:`process_sentinel_s1_safe` for the robustness options.
+    """
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    _configure_gdal_runtime()
     settings = _resolve_sentinel_s1_processing_settings(processing_options, output_count=len(output_names))
-
-    job_specs = [
-        {
-            "input_dataset": input_dataset,
-            "variable": variable,
-            "output_path": str(output_dir / output_name),
-            "target_epsg": settings["target_epsg"],
-            "target_resolution": settings["target_resolution"],
-            "resample_alg": settings["resample_alg"],
-            "block_size": settings["block_size"],
-            "gdal_num_threads": settings["gdal_num_threads"],
-            "warp_memory_limit_mb": settings["warp_memory_limit_mb"],
-            "use_numba": settings["use_numba"],
-            "percentiles": settings["percentiles"],
-            "compression": settings["compression"],
-            "overview_factors": settings["overview_factors"],
-        }
-        for variable, output_name in output_names.items()
-    ]
-
-    if settings["product_workers"] <= 1 or settings["parallel_mode"] in {"none", "off", "serial"}:
-        generated = [_process_sentinel_s1_product(**spec) for spec in job_specs]
-    else:
-        executor_cls = ThreadPoolExecutor if settings["parallel_mode"] == "threads" else ProcessPoolExecutor
-        with executor_cls(max_workers=settings["product_workers"]) as executor:
-            futures = [executor.submit(_process_sentinel_s1_product, **spec) for spec in job_specs]
-            generated = [future.result() for future in futures]
-
-    return generated
+    return run_product_jobs(
+        _process_sentinel_s1_product,
+        _sentinel_s1_jobs(input_dataset, output_dir, output_names, settings),
+        parallel_mode=settings["parallel_mode"],
+        workers=settings["product_workers"],
+        runtime=settings["runtime"],
+    )
 
 
 def process_sentinel_s1_safe(
@@ -665,10 +689,32 @@ def process_sentinel_s1_safe(
     output_names: dict[str, str],
     processing_options: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Generate stretched S1 quicklook GeoTIFFs from a SAFE archive or manifest path."""
+    """Generate stretched S1 quicklook GeoTIFFs from a SAFE archive or manifest path.
+
+    Options for unattended and bulk runs, all in ``processing_options``:
+
+    ``work_dir``
+        Where intermediates are written (default: ``output_dir``). Each product
+        gets its own temporary directory there, removed on success and failure.
+        Outputs appear under their final name only once complete.
+    ``gdal_num_threads``
+        GDAL threads per product for the warp and, when products run one at a
+        time (``serial``/``processes``), also ``GDAL_NUM_THREADS`` for
+        decoding and compression. Defaults to the CPUs this process may use
+        (affinity and cgroup quota). Set it when running several calls at once.
+    ``gdal_cachemax_mb``
+        GDAL block cache for the duration of the call (default: ``GDAL_CACHEMAX``).
+    ``parallel_mode``
+        ``threads`` (default), ``processes`` or ``serial``. ``processes`` runs
+        as ``serial`` inside a worker process, and its pool uses ``forkserver``
+        or ``spawn``, so scripts must guard their entry point with
+        ``if __name__ == "__main__":``.
+
+    Every requested polarisation is attempted. If one of several fails,
+    :class:`pysent.errors.PartialFailure` is raised after the rest finish.
+    """
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    _configure_gdal_runtime()
 
     # Only warp polarisations actually present in this product: an EW SDH product
     # has HH/HV (no VV/VH) and vice-versa. Dropping absent ones avoids a hard GDAL
@@ -684,32 +730,10 @@ def process_sentinel_s1_safe(
         output_names = present
 
     settings = _resolve_sentinel_s1_processing_settings(processing_options, output_count=len(output_names))
-
-    job_specs = [
-        {
-            "input_dataset": input_dataset,
-            "variable": variable,
-            "output_path": str(output_dir / output_name),
-            "target_epsg": settings["target_epsg"],
-            "target_resolution": settings["target_resolution"],
-            "resample_alg": settings["resample_alg"],
-            "block_size": settings["block_size"],
-            "gdal_num_threads": settings["gdal_num_threads"],
-            "warp_memory_limit_mb": settings["warp_memory_limit_mb"],
-            "use_numba": settings["use_numba"],
-            "percentiles": settings["percentiles"],
-            "compression": settings["compression"],
-            "overview_factors": settings["overview_factors"],
-        }
-        for variable, output_name in output_names.items()
-    ]
-
-    if settings["product_workers"] <= 1 or settings["parallel_mode"] in {"none", "off", "serial"}:
-        generated = [_process_sentinel_s1_safe_product(**spec) for spec in job_specs]
-    else:
-        executor_cls = ThreadPoolExecutor if settings["parallel_mode"] == "threads" else ProcessPoolExecutor
-        with executor_cls(max_workers=settings["product_workers"]) as executor:
-            futures = [executor.submit(_process_sentinel_s1_safe_product, **spec) for spec in job_specs]
-            generated = [future.result() for future in futures]
-
-    return generated
+    return run_product_jobs(
+        _process_sentinel_s1_safe_product,
+        _sentinel_s1_jobs(input_dataset, output_dir, output_names, settings),
+        parallel_mode=settings["parallel_mode"],
+        workers=settings["product_workers"],
+        runtime=settings["runtime"],
+    )

@@ -8,7 +8,7 @@ break or slow that use case.
 |---|---|
 | Branch / worktree | `feature/bulk-processing` → `../pysent.worktrees/bulk-processing` |
 | Base | `main` @ `c660cde` (2026-09-14) |
-| Status | Audit done (phase A). Phases 0–5 not started. |
+| Status | Audit done (phase A). Phase 1 done, PR #5 open (plus a crash fix, 2026-09-18). Phases 2–5 not started; union warp (P2+P4) prototyped. |
 | Audit evidence | [`bulk_processing_audit/`](bulk_processing_audit/): `run.sh checks`, `run.sh bench <DATA_DIR>` |
 
 ## Kick-off prompt
@@ -118,19 +118,19 @@ Phases run in order, one PR each. Phase 2 depends on the Phase 1 APIs (`work_dir
 error types). If Phase 1 slips, the examples can work around them, but that is not the plan.
 
 ### Phase 0: Session setup (every session)
-- [ ] Read memory, enter the worktree, rebase on `origin/main` (see kick-off prompt).
-- [ ] Build the audit image: `PLANNING/bulk_processing_audit/run.sh checks`. It should reproduce B1, B4, B5, B7, B8 and B9. B6 is masked there by `HOME=/tmp`: to see it, run `docker run --rm --user 12345:12345 -v $PWD:/src:ro pysent-audit:gdal38 python3 -c "import pysent.s1"`.
+- [x] Read memory, enter the worktree, rebase on `origin/main` (see kick-off prompt).
+- [x] Build the audit image: `PLANNING/bulk_processing_audit/run.sh checks`. It should reproduce B1, B4, B5, B7, B8 and B9. B6 is masked there by `HOME=/tmp`: to see it, run `docker run --rm --user 12345:12345 -v $PWD:/src:ro pysent-audit:gdal38 python3 -c "import pysent.s1"`.
 
 ### Phase 1: Library robustness (PR 1)
 Each item needs a regression test in `tests/`, using synthetic data like `tests/test_s2_processing.py`.
-- [ ] **B2/B3:** add a `work_dir` processing option (default `output_dir`). Create intermediates in `tempfile.mkdtemp(dir=work_dir)` and remove them in `finally` on every path. Write finals to a temp name in `output_dir`, then `os.replace` into place.
-- [ ] **B1:** make the numba call safe in threads: serialize it with a module lock, or use it only when not running in threads. Test: two threads, `use_numba=True`, run in a subprocess and assert exit code 0.
-- [ ] **B6:** don't fail at import. Compile lazily, and fall back to `cache=False` when no cache locator is available.
-- [ ] **B4/P3:** add `_available_cpus()` (`os.sched_getaffinity`, `os.process_cpu_count()` on 3.13+). Treat `parallel_mode="processes"` as serial in *any* child process. Apply `gdal_num_threads` as a thread-local `GDAL_NUM_THREADS` so JP2 decoding respects it too.
-- [ ] **B8:** replace the no-op with `gdal.SetCacheMax()`, driven by a new `gdal_cachemax_mb` option or the env var.
-- [ ] **B7/B10/B11:** add `pysent.errors` with `EmptySceneError` and a `PartialFailure(RuntimeError)` that carries `.results` (completed products) and `.errors`. Wait for all futures before raising. Run GDAL calls under `gdal.ExceptionMgr()` (GDAL ≥ 3.7, with a fallback for older versions) so the real cause ends up in the exception.
-- [ ] **B12:** give the internal process pool a `forkserver`/`spawn` context.
-- [ ] Full suite green in the CI container. PR opened.
+- [x] **B2/B3:** add a `work_dir` processing option (default `output_dir`). Create intermediates in `tempfile.mkdtemp(dir=work_dir)` and remove them in `finally` on every path. Write finals to a temp name in `output_dir`, then `os.replace` into place.
+- [x] **B1:** make the numba call safe in threads: serialize it with a module lock, or use it only when not running in threads. Test: two threads, `use_numba=True`, run in a subprocess and assert exit code 0.
+- [x] **B6:** don't fail at import. Compile lazily, and fall back to `cache=False` when no cache locator is available.
+- [x] **B4/P3:** add `_available_cpus()` (`os.sched_getaffinity`, `os.process_cpu_count()` on 3.13+). Treat `parallel_mode="processes"` as serial in *any* child process. Apply `gdal_num_threads` as a thread-local `GDAL_NUM_THREADS` so JP2 decoding respects it too.
+- [x] **B8:** replace the no-op with `gdal.SetCacheMax()`, driven by a new `gdal_cachemax_mb` option or the env var.
+- [x] **B7/B10/B11:** add `pysent.errors` with `EmptySceneError` and a `PartialFailure(RuntimeError)` that carries `.results` (completed products) and `.errors`. Wait for all futures before raising. Run GDAL calls under `gdal.ExceptionMgr()` (GDAL ≥ 3.7, with a fallback for older versions) so the real cause ends up in the exception.
+- [x] **B12:** give the internal process pool a `forkserver`/`spawn` context.
+- [x] Full suite green in the CI container. PR opened.
 
 ### Phase 2: `examples/` bulk processing (PR 2)
 Stdlib only, plus pysent. Must run on Python 3.10+; use `max_tasks_per_child` only when available (3.11+).
@@ -177,3 +177,43 @@ Recommendations in *italics*. Ask before the phase that needs the answer.
 
 ## Session log
 - **2026-09-14, audit session.** Worktree and branch created from `main` @ `c660cde`. Ran the audit and wrote this plan. Evidence scripts are in `bulk_processing_audit/`. The benchmark products were downloaded into the session scratchpad; get them again from the URLs in `tests/data/manifest.json`. No library code changed.
+- **2026-09-14, phase 0 + phase 1 session.** Branch was already at `origin/main` (`85661e3`), no rebase needed. `run.sh checks` reproduced B1, B4, B5, B6 (with `--user`), B7, B8 and B9.
+  - **What landed.** New private `pysent/_runtime.py` (CPU budget, GDAL settings, scratch dir, atomic output, product fan-out shared by S1 and S2) and public `pysent/errors.py`. Regression tests are in `tests/test_bulk_robustness.py`: 25 tests, 24 of which fail on `main` for the intended reason (the other checks the S1 success path). CI now installs `numba==0.60.0 llvmlite==0.43.0 --no-deps` so the B1/B6 tests run instead of skipping. Suite: 68 passed in the CI container with numba, 66 passed + 2 skipped without. All four docs notebooks execute against the branch (`pysent-docs:ci` with `src` mounted over `/opt/pysent/src`).
+  - **Deviation, B4/P3: `GDAL_NUM_THREADS` is process-wide for the call, not thread-local.** Measured in GDAL 3.8: a thread-local `GDAL_NUM_THREADS=1` does not reach the I/O thread of a `multithread=True` warp (JP2 decode CPU/wall stayed 4.4), while the global option does (1.07). `gdal_runtime()` sets it and restores the old value when the call returns (from the calling thread in serial/threads mode, in each worker in processes mode). A `GDAL_NUM_THREADS` the user already configured is kept unless `gdal_num_threads` is passed. Concurrent calls in one process with *different* settings interfere; this is documented.
+  - **Deviation, default threads per product = all usable CPUs, not CPUs ÷ product workers.** With the plan's split, fixing the CPU count made the defaults slower wherever `os.cpu_count()` had overcounted (containers): on 8 pinned cores S1 went 15.4 → 20 s, because `main` had silently used 16 ÷ 2 = 8 warp threads per product. Products keep their threads only partly busy, so sharing beats splitting. Wall time, same outputs (S1 VV+VH / S2 three products):
+
+    | Setting | `main` | split (cpus ÷ workers) | shared (landed) |
+    |---|---:|---:|---:|
+    | 8 pinned cores (`--cpuset-cpus`) | 15.4 / 64.2 s | 19.8 / 73.0 s | **12.6 / 46.6 s** |
+    | `--cpus=8` quota | 15.6 / 67.4 s | 20.0 / 73.2 s | **12.5 / 51.8 s** |
+    | 16 cores, unpinned | 13.7 / 55.0 s | 11.6 / 45.8 s | **8.7 / 32.9 s** |
+
+    Peak RSS: S1 about equal (2.4–3.3 GB vs 3.0–3.6 GB); **S2 three products up from ~4.2 to ~5.0 GB**. Outputs were checked pixel-for-pixel against `main` (pixels, profile, overviews, tags; S2 at 16 threads and on 8 cores, S1 on 8 cores): identical. Bulk runners must pass an explicit `gdal_num_threads` (Phase 2 does). Phase 5's sweep should revisit this.
+  - **B4 extras.** `available_cpus()` also reads the cgroup v2 `cpu.max` (own cgroup and ancestors) and the v1 CFS quota, because `docker --cpus` and Kubernetes limits don't change affinity. `processes` → `serial` whenever `multiprocessing.parent_process()` is set.
+  - **B8.** `gdal_cachemax_mb` option, else `GDAL_CACHEMAX` parsed with GDAL's rules (`%`, MB below 100000, else bytes), applied via `SetCacheMax` and restored after the call.
+  - **B1/B6.** Numba calls are serialised with a module lock (the kernel is parallel itself). The kernel is compiled on first use with `cache=True`, falling back to `cache=False` when numba raises. The B6 test simulates "no locator" by emptying `numba.core.caching.CacheImpl._locator_classes`, which also works as root. The real scenario (`--user 12345`, read-only package) was checked by hand. Observation, not changed: numba and numpy stretches differ by ≤1 grey level on ~6 ppm of pixels (float32 vs float64 rounding); the test allows it.
+  - **B7/B10/B11 decisions.** Every product runs, in serial mode too. A multi-product call raises `PartialFailure(.results, .errors)`; a single-product call re-raises the product's own exception, so `EmptySceneError` can be caught directly. `PartialFailure` pickles (runner workers will send it across processes). GDAL exceptions are enabled with `gdal.ExceptionMgr()` only around warp, translate, BuildVRT, overviews and min/max, not globally: probing `gdal.Open` calls keep their `None` semantics and the caller's GDAL exception state is untouched. Consequence: GDAL 3.8's `FutureWarning` is still printed once per process (it goes away only by calling `UseExceptions()`/`DontUseExceptions()` globally). `EmptySceneError` covers only S2 with `histogram_stretch`. **S1 with no valid pixels still writes a fully transparent file** (stats all 0); Phase 2/3 should decide whether to raise there too.
+  - **B12.** `forkserver` where available, else `spawn`. Scripts using `parallel_mode="processes"` now need an `if __name__ == "__main__":` guard (documented). S2's `processes` still means threads, as before.
+  - **Kept for compatibility.** `_warp_sentinel_s1_safe_amplitude`/`_warp_sentinel_s2_rgb` signatures are unchanged (the notebooks call them). `run.sh checks`' `cachemax` check now handles both old and new code.
+  - Benchmark products were reused from the audit session's scratchpad (`/tmp/claude-1000/-home-ubuntu-dev-services-pysent/249b80ef-…/scratchpad/data`); `/tmp` may be wiped.
+- **2026-09-18, memory report + batch tuning (PR #5 follow-up, commit `32c411e`).**
+  - **User report: "8 GB RAM for one S2 scene" on the old code (all 3 default products).** Plausible on a large node. Reproduced on `S2C_MSIL2A_20260901T100021_…_T34VEP`: 4.8 GB on 16 cores / 39 GB RAM. Peak memory scales with the thread count (the old code sizes it from `os.cpu_count()`) and with GDAL's default cache (5 % of RAM). Emulating the thread counts of a 64-core host gave 6.3 GB, plus a 256 GB-host cache 7.3 GB; `GDAL_CACHEMAX=256` gave 2.6 GB.
+  - **Crash found and fixed:** with `GDAL_NUM_THREADS` set and several products written from threads of one process, GDAL 3.8.4 segfaults in `GDALRasterBlock::Internalize()`; multi-threaded GeoTIFF DEFLATE workers were active (backtrace from the core). In a 2-worker batch, the branch crashed after 2 scenes and `main` with `GDAL_NUM_THREADS=8` in the environment after 4. `main` without it and the branch in serial mode each completed 16 of 16. **Fix:** threads mode no longer sets `GDAL_NUM_THREADS` and warns if the user set it; serial and process modes keep it. After the fix the same batch completed 16 of 16. A synthetic stress test did not reproduce the crash; it needs the full pipeline. The regression test covers the mechanism (no `GDAL_NUM_THREADS` while products run in threads).
+  - **This removes the phase 1 default speed-ups:** they came mostly from multi-threaded compression in threads mode. Defaults are now the same as `main` (8 pinned cores: S1 16.1 vs 15.9–18.7 s, S2 ×3 64.6 vs 63.8 s). The earlier "shared" table in this log is superseded.
+  - **Batch throughput** (16 cores / 39 GB, 2 real S2 scenes repeated, zips in page cache, 3 default products per scene):
+
+    | Code | Workers × mode × threads, cache | Scenes/h | Peak total RAM | Per worker |
+    |---|---|---:|---:|---:|
+    | PR #5 | 1 × parallel products × 16, default | 65 | 5.1 GB | 5.1 GB |
+    | PR #5 | 4 × parallel × 4, 512 MB | 150 | 12.5 GB | 3.5 GB |
+    | PR #5 | 4 × serial × 4, 256 MB | 92 | 5.4 GB | 1.5 GB |
+    | PR #5 | 8 × serial × 2, 256 MB | 133 | 8.3 GB | 1.1 GB |
+    | PR #5 | 16 × serial × 1, 128 MB | 148 | 6.9 GB | 0.5 GB |
+    | union prototype | 1 × 16, 256 MB | 92 | 2.7 GB | 2.7 GB |
+    | union prototype | 2 × 8, 256 MB | 153 | 3.5 GB | 1.9 GB |
+    | union prototype | 4 × 4, 256 MB | 220 | 5.1 GB | 1.5 GB |
+    | union prototype | 8 × 2, 256 MB | **280** | 7.6 GB | 1.1 GB |
+    | union prototype | 16 × 1, 128 MB | 261 | 6.8 GB | 0.5 GB |
+
+  - **Union-warp prototype (P2+P4 pulled forward, not yet in the library):** warp the 5-band union once per scene, uncompressed, then cut the 3 products from it. Outputs pixel-identical to the current pipeline (pixels, profile, overviews, colour interpretation). Single scene, serial, 16 threads: 39.7 s vs 103.8 s at the same ~1.8 GB. A bigger cache no longer helps (the 2 GB cache only paid off because the products re-decoded shared bands). Waiting for the user's go-ahead to implement it.
+  - **For Phase 2:** default the runner to serial products per worker, `gdal_cachemax_mb=256`, 2 threads per worker and workers ≈ cores / 2 (memory ~1.1 GB per worker). Use `max_tasks_per_child`: one process running 8 scenes in a row peaked at 7.8 GB vs 6.4 GB for one scene.
