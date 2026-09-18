@@ -11,6 +11,7 @@ import os
 import secrets
 import shutil
 import tempfile
+import warnings
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import contextmanager
@@ -262,7 +263,19 @@ def run_product_jobs(
                 for name, spec in jobs:
                     futures[name] = executor.submit(_call_in_worker, func, runtime, spec)
         else:
-            with gdal_runtime(**runtime), ThreadPoolExecutor(max_workers=workers) as executor:
+            # GDAL_NUM_THREADS also turns on multi-threaded GeoTIFF compression.
+            # With several products writing GeoTIFFs from threads of one process,
+            # GDAL 3.8 then segfaults in GDALRasterBlock::Internalize() within a
+            # few scenes, so concurrent products leave it unset. Serial and
+            # process modes write one output at a time per process and keep it.
+            if gdal.GetConfigOption("GDAL_NUM_THREADS") not in (None, ""):
+                warnings.warn(
+                    "GDAL_NUM_THREADS is set and products run in parallel threads: GDAL 3.8 can crash "
+                    "in this combination. Use parallel_mode='serial' or unset GDAL_NUM_THREADS.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+            with gdal_runtime(**{**runtime, "num_threads": None}), ThreadPoolExecutor(max_workers=workers) as executor:
                 for name, spec in jobs:
                     futures[name] = executor.submit(func, **spec)
         # Leaving the executor block waited for every job.

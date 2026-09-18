@@ -698,9 +698,10 @@ def process_sentinel_s1_safe(
         gets its own temporary directory there, removed on success and failure.
         Outputs appear under their final name only once complete.
     ``gdal_num_threads``
-        GDAL threads per product, for the warp and for decoding. Defaults to
-        the CPUs this process may use (affinity and cgroup quota), shared by
-        the products of the call. Set it when running several calls at once.
+        GDAL threads per product for the warp and, when products run one at a
+        time (``serial``/``processes``), also ``GDAL_NUM_THREADS`` for
+        decoding and compression. Defaults to the CPUs this process may use
+        (affinity and cgroup quota). Set it when running several calls at once.
     ``gdal_cachemax_mb``
         GDAL block cache for the duration of the call (default: ``GDAL_CACHEMAX``).
     ``parallel_mode``

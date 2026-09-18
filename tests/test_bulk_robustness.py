@@ -340,12 +340,30 @@ def test_gdal_threads_and_cache_apply_while_products_run(tmp_path, fake_s2_warp,
     monkeypatch.delenv("GDAL_NUM_THREADS", raising=False)
     cache_before = gdal.GetCacheMax()
     fake = fake_s2_warp()
-    run_s2(tmp_path / "out", S2_PRODUCTS, gdal_num_threads=3, gdal_cachemax_mb=37, parallel_workers=3)
+    run_s2(tmp_path / "out", S2_PRODUCTS, gdal_num_threads=3, gdal_cachemax_mb=37, parallel_mode="serial")
     assert [call["GDAL_NUM_THREADS"] for call in fake.calls] == ["3", "3", "3"]
     assert {call["cachemax"] for call in fake.calls} == {37 * 2**20}
     # Restored afterwards.
     assert gdal.GetConfigOption("GDAL_NUM_THREADS") is None
     assert gdal.GetCacheMax() == cache_before
+
+
+def test_products_in_parallel_threads_leave_gdal_num_threads_unset(tmp_path, fake_s2_warp, monkeypatch):
+    # GDAL_NUM_THREADS turns on multi-threaded GeoTIFF compression; with several
+    # products writing from threads of one process, GDAL 3.8 segfaults in
+    # GDALRasterBlock::Internalize() within a few real scenes.
+    monkeypatch.delenv("GDAL_NUM_THREADS", raising=False)
+    fake = fake_s2_warp()
+    run_s2(tmp_path / "out", S2_PRODUCTS, gdal_num_threads=3, gdal_cachemax_mb=37, parallel_workers=3)
+    assert [call["GDAL_NUM_THREADS"] for call in fake.calls] == [None, None, None]
+    assert {call["cachemax"] for call in fake.calls} == {37 * 2**20}
+
+
+def test_user_gdal_num_threads_with_parallel_products_warns(tmp_path, fake_s2_warp, monkeypatch):
+    monkeypatch.setenv("GDAL_NUM_THREADS", "4")
+    fake_s2_warp()
+    with pytest.warns(RuntimeWarning, match="GDAL_NUM_THREADS"):
+        run_s2(tmp_path / "out", S2_PRODUCTS, parallel_workers=3)
 
 
 def test_gdal_cachemax_env_set_after_gdal_started_is_honoured(tmp_path, fake_s2_warp, monkeypatch):
