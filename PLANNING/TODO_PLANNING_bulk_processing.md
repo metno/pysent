@@ -8,7 +8,7 @@ break or slow that use case.
 |---|---|
 | Branch / worktree | `feature/bulk-processing` → `../pysent.worktrees/bulk-processing` |
 | Base | `main` @ `c660cde` (2026-09-14) |
-| Status | Audit done (phase A). Phase 1 done, PR open. Phases 2–5 not started. |
+| Status | Audit done (phase A). Phase 1 done, PR #5 open (plus a crash fix, 2026-09-18). Phases 2–5 not started; union warp (P2+P4) prototyped. |
 | Audit evidence | [`bulk_processing_audit/`](bulk_processing_audit/): `run.sh checks`, `run.sh bench <DATA_DIR>` |
 
 ## Kick-off prompt
@@ -196,3 +196,24 @@ Recommendations in *italics*. Ask before the phase that needs the answer.
   - **B12.** `forkserver` where available, else `spawn`. Scripts using `parallel_mode="processes"` now need an `if __name__ == "__main__":` guard (documented). S2's `processes` still means threads, as before.
   - **Kept for compatibility.** `_warp_sentinel_s1_safe_amplitude`/`_warp_sentinel_s2_rgb` signatures are unchanged (the notebooks call them). `run.sh checks`' `cachemax` check now handles both old and new code.
   - Benchmark products were reused from the audit session's scratchpad (`/tmp/claude-1000/-home-ubuntu-dev-services-pysent/249b80ef-…/scratchpad/data`); `/tmp` may be wiped.
+- **2026-09-18, memory report + batch tuning (PR #5 follow-up, commit `32c411e`).**
+  - **User report: "8 GB RAM for one S2 scene" on the old code (all 3 default products).** Plausible on a large node. Reproduced on `S2C_MSIL2A_20260901T100021_…_T34VEP`: 4.8 GB on 16 cores / 39 GB RAM. Peak memory scales with the thread count (the old code sizes it from `os.cpu_count()`) and with GDAL's default cache (5 % of RAM). Emulating the thread counts of a 64-core host gave 6.3 GB, plus a 256 GB-host cache 7.3 GB; `GDAL_CACHEMAX=256` gave 2.6 GB.
+  - **Crash found and fixed:** with `GDAL_NUM_THREADS` set and several products written from threads of one process, GDAL 3.8.4 segfaults in `GDALRasterBlock::Internalize()`; multi-threaded GeoTIFF DEFLATE workers were active (backtrace from the core). In a 2-worker batch, the branch crashed after 2 scenes and `main` with `GDAL_NUM_THREADS=8` in the environment after 4. `main` without it and the branch in serial mode each completed 16 of 16. **Fix:** threads mode no longer sets `GDAL_NUM_THREADS` and warns if the user set it; serial and process modes keep it. After the fix the same batch completed 16 of 16. A synthetic stress test did not reproduce the crash; it needs the full pipeline. The regression test covers the mechanism (no `GDAL_NUM_THREADS` while products run in threads).
+  - **This removes the phase 1 default speed-ups:** they came mostly from multi-threaded compression in threads mode. Defaults are now the same as `main` (8 pinned cores: S1 16.1 vs 15.9–18.7 s, S2 ×3 64.6 vs 63.8 s). The earlier "shared" table in this log is superseded.
+  - **Batch throughput** (16 cores / 39 GB, 2 real S2 scenes repeated, zips in page cache, 3 default products per scene):
+
+    | Code | Workers × mode × threads, cache | Scenes/h | Peak total RAM | Per worker |
+    |---|---|---:|---:|---:|
+    | PR #5 | 1 × parallel products × 16, default | 65 | 5.1 GB | 5.1 GB |
+    | PR #5 | 4 × parallel × 4, 512 MB | 150 | 12.5 GB | 3.5 GB |
+    | PR #5 | 4 × serial × 4, 256 MB | 92 | 5.4 GB | 1.5 GB |
+    | PR #5 | 8 × serial × 2, 256 MB | 133 | 8.3 GB | 1.1 GB |
+    | PR #5 | 16 × serial × 1, 128 MB | 148 | 6.9 GB | 0.5 GB |
+    | union prototype | 1 × 16, 256 MB | 92 | 2.7 GB | 2.7 GB |
+    | union prototype | 2 × 8, 256 MB | 153 | 3.5 GB | 1.9 GB |
+    | union prototype | 4 × 4, 256 MB | 220 | 5.1 GB | 1.5 GB |
+    | union prototype | 8 × 2, 256 MB | **280** | 7.6 GB | 1.1 GB |
+    | union prototype | 16 × 1, 128 MB | 261 | 6.8 GB | 0.5 GB |
+
+  - **Union-warp prototype (P2+P4 pulled forward, not yet in the library):** warp the 5-band union once per scene, uncompressed, then cut the 3 products from it. Outputs pixel-identical to the current pipeline (pixels, profile, overviews, colour interpretation). Single scene, serial, 16 threads: 39.7 s vs 103.8 s at the same ~1.8 GB. A bigger cache no longer helps (the 2 GB cache only paid off because the products re-decoded shared bands). Waiting for the user's go-ahead to implement it.
+  - **For Phase 2:** default the runner to serial products per worker, `gdal_cachemax_mb=256`, 2 threads per worker and workers ≈ cores / 2 (memory ~1.1 GB per worker). Use `max_tasks_per_child`: one process running 8 scenes in a row peaked at 7.8 GB vs 6.4 GB for one scene.
