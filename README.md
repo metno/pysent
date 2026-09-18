@@ -125,11 +125,11 @@ environment variables below only supply defaults when an option is omitted.
 |---|---|
 | `S1_PARALLEL_MODE`, `S2_PARALLEL_MODE` | `threads` / `processes` (S1 only) / `serial` fan-out across products |
 | `S1_PRODUCT_WORKERS`, `S2_PRODUCT_WORKERS` | Worker count for that fan-out |
-| `S1_GDAL_NUM_THREADS`, `S2_GDAL_NUM_THREADS` | GDAL threads per product: warp `NUM_THREADS` and `GDAL_NUM_THREADS` (JP2 decoding) |
+| `S1_GDAL_NUM_THREADS`, `S2_GDAL_NUM_THREADS` | GDAL threads per product: warp `NUM_THREADS`, plus `GDAL_NUM_THREADS` (decoding, compression) when products run one at a time |
 | `S1_WARP_MEMORY_LIMIT_MB`, `S2_WARP_MEMORY_LIMIT_MB` | GDAL `warpMemoryLimit` |
 | `S1_USE_NUMBA` | Enable the numba fast path for the S1 stretch |
 | `GDAL_CACHEMAX` | GDAL block cache size, applied even if set after GDAL started |
-| `GDAL_NUM_THREADS` | Kept as the decoding thread count unless `gdal_num_threads` is given |
+| `GDAL_NUM_THREADS` | Kept unless `gdal_num_threads` is given. Don't combine it with `parallel_mode="threads"`: GDAL 3.8 can segfault (a warning is raised) |
 | `NBS_ARCHIVE_ROOT` | Local mount of the archive (`pysent.archive`) |
 | `NBS_SENTINEL_CSW_ENDPOINT`, `CSW_ENDPOINT` | Catalogue endpoints (`pysent.csw`) |
 | `NBS_SENTINEL_PLATFORM_PROFILES_JSON` | Profile overrides when the caller supplies none |
