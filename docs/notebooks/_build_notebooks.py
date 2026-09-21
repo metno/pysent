@@ -386,14 +386,16 @@ The library reaches bands through GDAL's `SENTINEL2` subdataset abstraction, so
 S2_STRETCH_NOTE = '''
 ## 5. Min/max versus percentile - a real trade-off
 
-The active ingestion path stretches each band by its **min/max**. It is fast and
-needs no sorting, but it is decided by the two most extreme pixels in the scene:
-a single sunlit cloud top compresses everything else into the bottom of the
-range.
+Stretching each band by its **min/max** is fast and needs no sorting, but it is
+decided by the two most extreme pixels in the scene: a single sunlit cloud top
+compresses everything else into the bottom of the range. On a hazy scene that
+renders a mean of 17 out of 255.
 
-A **percentile** clip ignores the tails and is almost always the better picture.
-`_write_stretched_sentinel_s2_rgb_percentile` implements it and is ready to be
-wired in - the comparison below is exactly the evidence needed to make that call.
+The library therefore clips the tails instead: **percentile 0.5-99.5 with a
+gamma of 0.7**, into `[1, 255]` so that 0 keeps meaning NoData and no valid
+pixel is ever drawn transparent. Pass `stretch_method="minmax"`,
+`stretch_percentiles=` or `stretch_gamma=` to compare for yourself - the figure
+below is that comparison.
 '''
 
 

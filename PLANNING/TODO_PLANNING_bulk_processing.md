@@ -8,7 +8,7 @@ break or slow that use case.
 |---|---|
 | Branch / worktree | `feature/bulk-processing` → `../pysent.worktrees/bulk-processing` |
 | Base | `main` @ `c660cde` (2026-09-14) |
-| Status | Audit done (phase A). Phases 1 and 2 done (PRs #5, #7); phase 4's P2+P4 done out of order (PR #6). Phases 3 and 5, and the rest of phase 4, not started. |
+| Status | Audit done (phase A). Phases 1, 2 and 3 done (PRs #5, #7, #8); phase 4's P2+P4+part of P7 done (PRs #6, #8). Phase 5 and the rest of phase 4 not started. |
 | Audit evidence | [`bulk_processing_audit/`](bulk_processing_audit/): `run.sh checks`, `run.sh bench <DATA_DIR>` |
 
 ## Kick-off prompt
@@ -149,16 +149,16 @@ Stdlib only, plus pysent. Must run on Python 3.10+; use `max_tasks_per_child` on
 - [x] Link the examples from `README.md`. PR opened.
 
 ### Phase 3: Output correctness and option plumbing (PR 3)
-- [ ] **B5:** stretch valid pixels to `[1,255]` and keep 0 for NoData, or write an alpha/mask band. Decide with the user (see open questions).
-- [ ] **B9:** expose `use_tps` and harmonise the stretch options. Accept both S1 and S2 spellings with a `DeprecationWarning`, and warn when `stretch_percentiles` has no effect.
-- [ ] **B13/B14:** document the S1 target CRS and fix the tuning doc.
+- [x] **B5:** stretch valid pixels to `[1,255]` and keep 0 for NoData, or write an alpha/mask band. Decide with the user (see open questions).
+- [x] **B9:** expose `use_tps` and harmonise the stretch options. Accept both S1 and S2 spellings with a `DeprecationWarning`, and warn when `stretch_percentiles` has no effect.
+- [x] **B13/B14:** document the S1 target CRS and fix the tuning doc.
 
 ### Phase 4: Performance (PR 4)
 Re-measure every item with `run.sh bench` and put before/after numbers in the PR.
 - [x] **P2:** uncompressed intermediates (`intermediate_compression`, default none). *Bypassing the warp when no reprojection is needed is still open.*
 - [ ] **P1:** a `quicklook` preset in the library (e.g. `processing_options={"preset": "quicklook"}`), used by the examples.
 - [x] **P4:** decode each needed S2 band once per scene (one warp per output grid; products are cut from that stack).
-- [ ] **P6/P7:** percentiles or min/max from a decimated read; lower peak RSS.
+- [x] **P7 (part):** S2 percentiles come from a decimated read (phase 3). *P6's lower peak RSS is still open.*
 - [ ] **P8:** `NUM_THREADS` creation option; evaluate the COG driver.
 - [ ] **P5:** measure S1 polynomial geolocation error against TPS on the benchmark scene and report it.
 
@@ -232,3 +232,10 @@ Recommendations in *italics*. Ask before the phase that needs the answer.
   - **Decisions.** Products run serially per worker: it is the best throughput per GB and it keeps off the GDAL 3.8 concurrent-write crash path. An `empty` scene gets a sidecar so a resume skips it. `run_bulk()` takes the parsed `args` namespace, so the CLI and the importable API cannot drift. `--preset quicklook` = 60 m (S2) / 160 m (S1); presets change nothing but resolution.
   - **Verified on the three real products** (2 S2 + 1 S1, 8 pinned cores): full preset 99 s for 3 scenes (109 scenes/h) with 2 workers × 4 threads, exit 0, scratch left empty; re-running skipped all three; `--preset quicklook` with 3 workers × 2 threads took 24 s (456 scenes/h). Sidecars carry options, per-product stretch stats, timings and pysent/GDAL/Python versions.
   - Phases 3 and 5 remain, plus phase 4's P1, P5, P6/P7 and P8.
+- **2026-09-21, phase 3: output correctness and option plumbing (PR #8).** PR #7 was rebase-merged (`4a0ede5`) first. **The user answered the two open questions** after reviewing a visual comparison of six renderings of two real scenes (artifact, private): percentile 0.5–99.5 with gamma 0.7, and valid pixels mapped to `[1,255]`.
+  - **B5 + open questions 1 and 2.** The S2 stretch is now `stretch_method="percentile"` (0.5–99.5) with `stretch_gamma=0.7`, scaled into `[1,255]`; **0 means NoData and nothing else**. Measured at 60 m: a hazy scene goes from mean 17/255 to 44/255, a bright one from 72 to 101, clipping 0.6 % of pixels (cloud tops). Verified on the real stack that the output's zero mask is *identical* to the source's fill mask and that the minimum on valid data is 1. Per-band fill at a swath edge still renders 0 in that band alone - a colour fringe, not transparency, and it reflects the source honestly.
+  - **Performance, twice over.** GDAL's exact `GetHistogram` cost about as much as the warp, so percentiles come from a **decimated read** (2048², nearest, NoData dropped; P7 partly done). And `gdal.Translate`'s `-exponent` runs a `pow()` per pixel: +28 s per scene. Replaced by a **per-band lookup table applied strip by strip** (`_write_stretched_with_lut`), which matches GDAL's own exponent within 1 DN and is *faster than the previous linear path*: a three-product scene is **39.4 s against 45.4 s on main**, peak RSS 1.37 vs 1.58 GB. A `Translate` fallback remains for source types a 16-bit LUT cannot cover. Benchmarked per 10980² 3-band raster: linear scale 4.2 s, scale+exponent 13.6 s, LUT-in-VRT 9.2 s, numpy LUT 3.4 s.
+  - **B9.** `use_tps` reaches `process_sentinel_s1_safe` (jobs carry per-input extras). Both stretch spellings work on both platforms - `stretch_percentiles` is canonical, `histogram_stretch={"percentiles": ...}` raises a `DeprecationWarning`. A `RuntimeWarning` fires when `stretch_percentiles` is passed with `minmax`, and when any stretch option is passed while `histogram_stretch` is off. An unknown `stretch_method` raises `ValueError`.
+  - **B13/B14.** The S1 target CRS (EPSG:32661 UPS North at 40 m, Nordic-specific) is documented in the docstring and README; `docs/tuning-and-roadmap.md` and the generated `03_sentinel2.ipynb` no longer describe a min/max stretch or a JPEG production default. Notebooks regenerated from `_build_notebooks.py` and all four still execute.
+  - **Defaults changed on purpose:** regenerated S2 products will not match older ones byte for byte. `stretch_method="minmax"`, `stretch_gamma=1.0` restores the old *range selection*, though valid pixels still start at 1.
+  - Suite: 108 tests. Remaining: phase 5, and phase 4's P1, P5, P6 and P8.

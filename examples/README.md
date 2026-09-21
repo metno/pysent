@@ -69,6 +69,19 @@ More workers with fewer threads each wins until memory runs out; the defaults
 preset (60 m for S2, 160 m for S1) is roughly 4× faster again: the three real
 benchmark scenes take 24 s instead of 99 s.
 
+## Changing how the images look
+
+The runner passes `histogram_stretch` on, so Sentinel-2 products get the library
+default: percentile 0.5–99.5 through a gamma of 0.7, into `[1,255]` with 0 kept
+for NoData. Any processing option can be overridden from the command line:
+
+```bash
+--option stretch_method=minmax        # the full range instead of percentiles
+--option stretch_gamma=1.0            # a straight linear ramp
+--option stretch_percentiles=1,99     # a wider or narrower clip
+--option compression=JPEG             # smaller, lossy output
+```
+
 ## Resuming, and what counts as done
 
 A scene is skipped when its sidecar JSON exists and every output it lists is

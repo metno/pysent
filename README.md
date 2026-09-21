@@ -30,7 +30,7 @@ results = process_sentinel_s2_safe(
 | Module | Contents |
 |---|---|
 | `pysent.s1` | Sentinel-1 amplitude quicklooks from SAFE or NetCDF: GCP warp (TPS or polynomial), percentile grayscale stretch + alpha, tiled/compressed GeoTIFF with overviews. Handles **VV/VH, HH/HV and single-pol** products. |
-| `pysent.s2` | Sentinel-2 RGB band combinations from SAFE: one stacked-VRT warp per scene, per-band stretch (min/max or percentile), tiled/compressed 8-bit RGB with overviews. |
+| `pysent.s2` | Sentinel-2 RGB band combinations from SAFE: one stacked-VRT warp per scene, per-band percentile stretch with gamma (or min/max), tiled/compressed 8-bit RGB with overviews. |
 | `pysent.profiles` | Platform detection (S1 vs S2) from any textual hint, plus per-platform profile defaults. |
 | `pysent.archive` | Catalogue download URL → local archive path; UUID → local SAFE resolution. |
 | `pysent.csw` | CSW record lookup (needs the `csw` extra). |
@@ -78,7 +78,7 @@ The docs are **executable notebooks**, all of which CI runs on every push:
 |---|---|
 | [01_quickstart](docs/notebooks/01_quickstart.ipynb) | the three processing stages, first output |
 | [02_sentinel1](docs/notebooks/02_sentinel1.ipynb) | polarisations, the GCP warp, stretch percentiles |
-| [03_sentinel2](docs/notebooks/03_sentinel2.ipynb) | band combinations, min/max vs percentile |
+| [03_sentinel2](docs/notebooks/03_sentinel2.ipynb) | band combinations, percentile vs min/max stretch |
 | [04_benchmarks](docs/notebooks/04_benchmarks.ipynb) | time and memory per step, stretch quality |
 
 They run with no Sentinel data at all (using the small committed fixtures), or
@@ -175,20 +175,37 @@ environment variables below only supply defaults when an option is omitted.
 - **A ready-made runner** with these settings, resume and failure isolation is
   in [`examples/bulk_convert.py`](examples/bulk_convert.py).
 
+## How Sentinel-2 products are rendered
+
+Each band is stretched from its **0.5–99.5 percentile** range through a **gamma of
+0.7** into `[1, 255]`, with **0 reserved for NoData** — so real fill stays
+transparent and no valid pixel ever is. On a hazy scene that lifts the mean from
+17/255 (plain min/max, which one bright cloud is enough to flatten) to 44/255,
+clipping 0.6 % of pixels, nearly all of them cloud tops.
+
+```python
+processing_options={
+    "histogram_stretch": True,
+    "stretch_method": "percentile",     # or "minmax" for the full range
+    "stretch_percentiles": (0.5, 99.5),
+    "stretch_gamma": 0.7,               # 1.0 for a straight linear ramp
+}
+```
+
+Sentinel-1 keeps its linear 2–98 percentile stretch and writes an explicit alpha
+band, so its NoData was never ambiguous.
+
 ## Known tuning work
 
-Carried over from the QA benchmarking; each is measurable with `pysent.qa` and
-none is shipped as the default yet:
+Carried over from the QA benchmarking; each is measurable with `pysent.qa`:
 
-- **S2 stretch is min/max**, which blows out on clouds/sunglint.
-  `_write_stretched_sentinel_s2_rgb_percentile` is the outlier-robust
-  alternative, pending A/B validation.
 - **S1 is stretched linearly.** SAR backscatter spans orders of magnitude, so
   `20*log10(amplitude)` before the percentile clip should give better contrast.
 - **The S1 warp dominates its cost** (~27 s of 31 s for an S1 GRD).
-  `use_tps=False` swaps TPS for the much faster polynomial GCP transform.
-  (Sentinel-2 now warps the bands its products need once per scene, which cut a
-  three-product scene from 128 s to 49 s with identical output.)
+  `use_tps=False` swaps TPS for the much faster polynomial GCP transform, at the
+  price of moving the output grid by a few pixels.
+- **S1 warps to EPSG:32661 (UPS North) at 40 m** by default, which suits the
+  Nordic archive; scenes further south want their own UTM zone via `target_epsg`.
 - Percentiles from a decimated read, and COG output, are both unexplored wins.
 
 ## Licence

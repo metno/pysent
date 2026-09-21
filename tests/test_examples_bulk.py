@@ -221,7 +221,7 @@ def test_workers_get_serial_products_and_the_thread_budget(tmp_path):
 def test_presets_and_extra_options(tmp_path):
     scenes = scene_paths(tmp_path, S2_NAME, S1_NAME)
     args = make_args(tmp_path / "out", workers=1, preset="quicklook")
-    args.option = ["compression=JPEG", "block_size=512"]
+    args.option = ["compression=JPEG", "block_size=512", "stretch_percentiles=1,99"]
 
     summary = bulk_convert.run_bulk(scenes, output_dir=tmp_path / "out", args=args, process=fake_ok, log=lambda m: None)
 
@@ -229,6 +229,7 @@ def test_presets_and_extra_options(tmp_path):
     assert options[S2_NAME]["target_resolution"] == 60.0
     assert options[S1_NAME]["target_resolution"] == 160.0
     assert options[S2_NAME]["compression"] == "JPEG" and options[S2_NAME]["block_size"] == 512
+    assert options[S2_NAME]["stretch_percentiles"] == (1.0, 99.0)
 
 
 # --------------------------------------------------------------------------- #

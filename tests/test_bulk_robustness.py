@@ -327,6 +327,56 @@ def test_failed_scene_warp_fails_every_product_of_that_grid(tmp_path, fake_s2_wa
 
 
 # --------------------------------------------------------------------------- #
+# B9: options that used to do nothing
+# --------------------------------------------------------------------------- #
+def _fake_s1_warp(recorder: list):
+    def warp(input_dataset, variable, warped_path, **kwargs):
+        recorder.append(kwargs)
+        _write_raster(Path(warped_path), np.random.default_rng(0).random((64, 64), dtype=np.float32) + 1)
+
+    return warp
+
+
+def run_s1_safe(output_dir: Path, monkeypatch, recorder: list, **options):
+    monkeypatch.setattr(s1, "_warp_sentinel_s1_safe_amplitude", _fake_s1_warp(recorder))
+    monkeypatch.setattr(s1, "detect_sentinel_s1_polarizations", lambda dataset: ["Amplitude_VV"])
+    return s1.process_sentinel_s1_safe(
+        input_dataset="unused.zip", output_dir=output_dir,
+        output_names={"Amplitude_VV": "vv.tif"}, processing_options=options,
+    )
+
+
+@pytest.mark.parametrize("use_tps", [True, False])
+def test_s1_use_tps_reaches_the_warp(tmp_path, monkeypatch, use_tps):
+    # B9b: the option existed on the warp but no caller could set it.
+    calls: list = []
+    run_s1_safe(tmp_path / "out", monkeypatch, calls, use_tps=use_tps)
+    assert calls[0]["use_tps"] is use_tps
+
+
+def test_s1_defaults_to_the_thin_plate_spline_warp(tmp_path, monkeypatch):
+    calls: list = []
+    run_s1_safe(tmp_path / "out", monkeypatch, calls)
+    assert calls[0]["use_tps"] is True
+
+
+def test_s1_accepts_either_stretch_spelling(tmp_path, monkeypatch):
+    # B9c: passing the Sentinel-2 spelling to S1 used to fall back to the defaults.
+    calls: list = []
+    results = run_s1_safe(tmp_path / "a", monkeypatch, calls, stretch_percentiles=(5.0, 95.0))
+    assert results[0]["stretch"]["p_low"] >= 0
+
+    settings = s1._resolve_sentinel_s1_processing_settings({"stretch_percentiles": (5.0, 95.0)}, output_count=1)
+    assert settings["percentiles"] == (5.0, 95.0)
+
+    with pytest.deprecated_call(match="stretch_percentiles"):
+        legacy = s1._resolve_sentinel_s1_processing_settings(
+            {"histogram_stretch": {"percentiles": (10.0, 90.0)}}, output_count=1
+        )
+    assert legacy["percentiles"] == (10.0, 90.0)
+
+
+# --------------------------------------------------------------------------- #
 # B1/B6: numba
 # --------------------------------------------------------------------------- #
 def _python_env(**overrides) -> dict[str, str]:
