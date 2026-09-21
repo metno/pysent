@@ -39,7 +39,8 @@ below name the library module to edit when pushing a change back (§6).
 - `_warp_sentinel_s2_rgb()` — builds a 3-band stacked VRT (`_build_sentinel_s2_stack_vrt`,
   one VRT per band then `BuildVRT(separate=True, resolution="highest")`), warps to
   the bands' native UTM, **UInt16**, `resampleAlg=bilinear`.
-- `stretch_sentinel_s2_rgb()` — per-band percentile (2–98) clip → uint8 RGB.
+- `stretch_sentinel_s2_rgb()` — per-band percentile clip → uint8 RGB (the numpy
+  reference; the shipped path stretches inside `gdal.Translate`).
   **The notebook uses this.**
 - `S2_DEFAULT_PRODUCTS` — the 3 shipped combos (see §5).
 - `S2_SUPPORTED_BANDS` — the validation allow-list used by
@@ -54,19 +55,15 @@ calls the same helpers, so the path the notebook gets is the path the ingestion
 pipeline feeds to GDAL. Archive layout:
 `<ARCHIVE_ROOT>/<platform>/YYYY/MM/DD/<PRODUCT>.zip`.
 
-### ⚠️ Two deliberate deviations from production (know these)
-1. **S2 stretch method.** The *active* ingestion path
-   (`_write_stretched_sentinel_s2_rgb`) stretches with **per-band min/max**, **not**
-   percentiles. (As of 2026-06-02 it computes the min/max explicitly and writes a
-   **tiled + compressed** 8-bit GeoTIFF returning the src range — previously it was a
-   bare `scaleParams=[[]]` that dropped tiling/compression and returned no stats; that
-   bug plus a `NameError` in the non-stretch branch are fixed. The percentile
-   reference impl lives in `_write_stretched_sentinel_s2_rgb_percentile`.) Min/max is
-   outlier-sensitive; percentile is almost always better. **A/B it in the notebook via
-   `S2_STRETCH_METHOD="minmax"` vs `"percentile"`** before switching production (§4.2).
-2. **Compression.** Notebook writes final as lossless **DEFLATE** so JPEG artifacts
-   don't confound QA; production defaults to lossy **JPEG**. Flip `compress=` in the
-   processing cell to compare delivery output.
+### ⚠️ One deliberate deviation from production (know this)
+1. **Compression.** The notebook writes the final product as lossless **DEFLATE** so
+   JPEG artifacts don't confound QA. The library default is **DEFLATE** as well; pass
+   `compression="JPEG"` to compare a lossy delivery output.
+
+*(Resolved 2026-09-21, phase 3: the S2 stretch used to be per-band min/max while this
+document described percentiles. It is now **percentile 0.5–99.5 with gamma 0.7**,
+scaled into `[1,255]` with 0 reserved for NoData — `stretch_method="minmax"` restores
+the old range selection. See §4.2.)*
 
 ---
 
@@ -110,10 +107,12 @@ Levers, roughly in impact order:
   overview factors / compression; measure `write_stretched` + `out_size_mb`.
 
 ### 4.2 Output quality
-- **Standardise S2 on percentile stretch** (vs the active min/max) — see §3 deviation 1.
-  Min/max blows out with a few bright pixels (clouds, sunglint). **A/B now via
-  `S2_STRETCH_METHOD`**; to ship, wire `_write_stretched_sentinel_s2_rgb_percentile` into
-  `_process_sentinel_s2_product`.
+- **S2 percentile stretch: shipped** (2026-09-21). Defaults are
+  `stretch_method="percentile"`, `stretch_percentiles=(0.5, 99.5)` and
+  `stretch_gamma=0.7`, applied by `gdal.Translate` (scale + exponent) rather than by
+  reading the bands into numpy. Measured on two real scenes, this lifts a hazy scene
+  from mean 17/255 to 44/255 while clipping 0.6 % of pixels; min/max left it nearly
+  black. Valid pixels now start at 1 so none of them can be mistaken for NoData.
 - **SAR should likely be stretched in dB.** S1 amplitude is currently stretched
   **linearly**; SAR backscatter spans orders of magnitude, so `20*log10(amplitude)`
   (or `10*log10(intensity)`) before percentile clip typically gives far better
@@ -198,9 +197,9 @@ the pipeline. Once a change proves out here:
 2. Port the stretch/warp/param change into the corresponding `pysent` function
    and add a test under `pysent/tests/` (the processing tests build synthetic
    rasters — no SAFE product needed). Run `pytest` in the library repo.
-3. For S2, decide whether to switch the active writer from min/max to percentile
-   (`_write_stretched_sentinel_s2_rgb` vs the reference
-   `_write_stretched_sentinel_s2_rgb_percentile` + `stretch_sentinel_s2_rgb`).
+3. For S2, the stretch is percentile + gamma by default; `_write_stretched_sentinel_s2_rgb`
+   takes `method`, `percentiles` and `gamma`, so an A/B is an option change, not a code
+   change. (`_write_stretched_sentinel_s2_rgb_percentile` remains the numpy reference.)
 4. New S2 combos → `S2_DEFAULT_PRODUCTS` in `pysent/s2.py` (+ tests in the app's
    `tests/test_datasets_api.py`, which already mocks `process_sentinel_s2_safe`).
 5. Re-run the notebook against the same UUID to confirm parity.

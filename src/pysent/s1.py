@@ -5,6 +5,7 @@ import os
 import math
 import re
 import threading
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -237,6 +238,26 @@ def _build_sentinel_s1_safe_vrt(input_dataset: str, variable: str, vrt_path: Pat
         raise RuntimeError(f"Unable to build Sentinel-1 SAFE VRT for {variable}")
     translated = None
     return manifest_path
+
+
+def _resolve_stretch_percentiles(processing: dict[str, Any]) -> tuple[float, float]:
+    """Percentiles for the grayscale stretch, in either the S2 or the S1 spelling.
+
+    Sentinel-2 takes ``stretch_percentiles``; Sentinel-1 historically took
+    ``histogram_stretch={"percentiles": ...}``. Both work here, so an option
+    written for one platform is not silently dropped by the other.
+    """
+    requested = processing.get("stretch_percentiles")
+    histogram = processing.get("histogram_stretch")
+    if requested in (None, "") and isinstance(histogram, dict) and "percentiles" in histogram:
+        warnings.warn(
+            'histogram_stretch={"percentiles": ...} is deprecated; '
+            "pass stretch_percentiles=(low, high) instead",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+        requested = histogram.get("percentiles")
+    return _coerce_percentiles(requested)
 
 
 def _coerce_percentiles(percentiles: object) -> tuple[float, float]:
@@ -533,6 +554,7 @@ def _run_sentinel_s1_product(
     percentiles: tuple[float, float],
     compression: str,
     overview_factors: tuple[int, ...],
+    warp_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     final_path = Path(output_path)
     scratch_root = Path(work_dir) if work_dir else final_path.parent
@@ -551,6 +573,7 @@ def _run_sentinel_s1_product(
             block_size=block_size,
             gdal_num_threads=gdal_num_threads,
             warp_memory_limit_mb=warp_memory_limit_mb,
+            **(warp_kwargs or {}),
         )
         stats = _write_quicklook_from_warped(
             warped_path,
@@ -576,8 +599,9 @@ def _process_sentinel_s1_product(**spec: Any) -> dict[str, Any]:
     return _run_sentinel_s1_product(_warp_sentinel_s1_amplitude, **spec)
 
 
-def _process_sentinel_s1_safe_product(**spec: Any) -> dict[str, Any]:
-    return _run_sentinel_s1_product(_warp_sentinel_s1_safe_amplitude, **spec)
+def _process_sentinel_s1_safe_product(*, use_tps: bool = True, **spec: Any) -> dict[str, Any]:
+    # Only the SAFE warp is GCP-based, so only it takes use_tps.
+    return _run_sentinel_s1_product(_warp_sentinel_s1_safe_amplitude, warp_kwargs={"use_tps": use_tps}, **spec)
 
 
 def _resolve_sentinel_s1_processing_settings(
@@ -586,8 +610,7 @@ def _resolve_sentinel_s1_processing_settings(
     output_count: int,
 ) -> dict[str, Any]:
     processing = dict(processing_options or {})
-    histogram = processing.get("histogram_stretch") if isinstance(processing.get("histogram_stretch"), dict) else {}
-    percentiles = _coerce_percentiles(histogram.get("percentiles"))
+    percentiles = _resolve_stretch_percentiles(processing)
     block_size = _coerce_positive_int(processing.get("block_size"), 256)
     overview_factors = _coerce_overview_factors(processing.get("overview_factors"))
     target_epsg = str(processing.get("target_epsg") or S1_TARGET_EPSG)
@@ -622,6 +645,7 @@ def _resolve_sentinel_s1_processing_settings(
         "product_workers": product_workers,
         "gdal_num_threads": gdal_num_threads,
         "warp_memory_limit_mb": warp_memory_limit_mb,
+        "use_tps": bool(processing.get("use_tps", True)),
         "work_dir": resolve_work_dir(processing.get("work_dir")),
         "runtime": resolve_gdal_runtime(processing, requested_gdal_threads, gdal_num_threads),
     }
@@ -632,7 +656,10 @@ def _sentinel_s1_jobs(
     output_dir: Path,
     output_names: dict[str, str],
     settings: dict[str, Any],
+    *,
+    extra: tuple[str, ...] = (),
 ) -> list[tuple[str, dict[str, Any]]]:
+    """One job per variable; ``extra`` names settings only one input type takes."""
     return [
         (
             variable,
@@ -651,6 +678,7 @@ def _sentinel_s1_jobs(
                 "percentiles": settings["percentiles"],
                 "compression": settings["compression"],
                 "overview_factors": settings["overview_factors"],
+                **{key: settings[key] for key in extra},
             },
         )
         for variable, output_name in output_names.items()
@@ -709,6 +737,17 @@ def process_sentinel_s1_safe(
         as ``serial`` inside a worker process, and its pool uses ``forkserver``
         or ``spawn``, so scripts must guard their entry point with
         ``if __name__ == "__main__":``.
+    ``use_tps``
+        Thin-plate-spline GCP warp (default ``True``). It is the dominant cost;
+        ``False`` uses the much faster polynomial transform, which moves the
+        output grid by a few pixels.
+    ``stretch_percentiles``
+        Clip range for the grayscale stretch, default ``(2.0, 98.0)``. The older
+        ``histogram_stretch={"percentiles": ...}`` spelling still works.
+    ``target_epsg``, ``target_resolution``
+        Output grid, by default **EPSG:32661 (UPS North) at 40 m**, which suits
+        the Nordic archive this was written for. Scenes elsewhere - anything
+        south of roughly 60 degrees north - want their own UTM zone here.
 
     Every requested polarisation is attempted. If one of several fails,
     :class:`pysent.errors.PartialFailure` is raised after the rest finish.
@@ -732,7 +771,7 @@ def process_sentinel_s1_safe(
     settings = _resolve_sentinel_s1_processing_settings(processing_options, output_count=len(output_names))
     return run_product_jobs(
         _process_sentinel_s1_safe_product,
-        _sentinel_s1_jobs(input_dataset, output_dir, output_names, settings),
+        _sentinel_s1_jobs(input_dataset, output_dir, output_names, settings, extra=("use_tps",)),
         parallel_mode=settings["parallel_mode"],
         workers=settings["product_workers"],
         runtime=settings["runtime"],

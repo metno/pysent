@@ -394,6 +394,8 @@ def build_job(scene: str, *, output_dir: Path, args: argparse.Namespace) -> dict
 
 
 def _coerce(value: str) -> Any:
+    if "," in value:  # e.g. stretch_percentiles=0.5,99.5
+        return tuple(_coerce(part.strip()) for part in value.split(","))
     for cast in (int, float):
         try:
             return cast(value)

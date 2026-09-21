@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import warnings
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -30,7 +31,15 @@ from .errors import EmptySceneError
 
 S2_SAFE_IMPLEMENTATION = "sentinel_s2_safe_quicklook"
 S2_OVERVIEW_FACTORS: tuple[int, ...] = (2, 4, 8, 16)
-S2_STRETCH_PERCENTILES: tuple[float, float] = (2.0, 98.0)
+S2_STRETCH_PERCENTILES: tuple[float, float] = (0.5, 99.5)
+S2_STRETCH_METHOD = "percentile"
+# Gamma < 1 lifts the mid-tones. Together with the 0.5/99.5 clip this is what a
+# Sentinel-2 scene needs to read well without blowing out cloud tops; min/max
+# alone renders a hazy scene almost black (see the phase 3 session log).
+S2_STRETCH_GAMMA = 0.7
+# Valid pixels start at 1 so that 0 means NoData and nothing else: a valid pixel
+# must never come out transparent.
+S2_VALID_FLOOR = 1
 S2_DEFAULT_PRODUCTS: dict[str, tuple[str, str, str]] = {
     "true_color_vegetation": ("B4", "B3", "B2"),
     "false_color_glacier": ("B12", "B8A", "B3"),
@@ -116,6 +125,45 @@ def _coerce_positive_int(value: object, default: int) -> int:
     except Exception:
         return default
     return parsed if parsed > 0 else default
+
+
+# Options that only mean something while the stretch is on.
+_STRETCH_KEYS = ("stretch_percentiles", "stretch_method", "stretch_gamma")
+
+
+def _resolve_stretch_options(processing: dict[str, Any]) -> tuple[tuple[float, float], str, float]:
+    """Percentiles, method and gamma, accepting the Sentinel-1 spelling as well.
+
+    Sentinel-1 takes ``histogram_stretch={"percentiles": ...}`` while Sentinel-2
+    takes a bool plus ``stretch_percentiles``; both are accepted here, and in
+    :mod:`pysent.s1`, so an option written for one platform is not silently
+    dropped by the other.
+    """
+    requested = processing.get("stretch_percentiles")
+    histogram = processing.get("histogram_stretch")
+    if requested in (None, "") and isinstance(histogram, dict) and "percentiles" in histogram:
+        warnings.warn(
+            'histogram_stretch={"percentiles": ...} is deprecated for Sentinel-2; '
+            "pass stretch_percentiles=(low, high) instead",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+        requested = histogram.get("percentiles")
+    percentiles = _coerce_percentiles(requested)
+    method = str(processing.get("stretch_method") or S2_STRETCH_METHOD).strip().lower()
+    if method not in {"percentile", "minmax"}:
+        raise ValueError(f"stretch_method must be 'percentile' or 'minmax', not {method!r}")
+    if method == "minmax" and requested not in (None, ""):
+        warnings.warn(
+            "stretch_percentiles has no effect with stretch_method='minmax'",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    gamma = processing.get("stretch_gamma")
+    gamma = S2_STRETCH_GAMMA if gamma in (None, "") else float(gamma)
+    if gamma <= 0:
+        raise ValueError(f"stretch_gamma must be positive, not {gamma!r}")
+    return percentiles, method, gamma
 
 
 def _coerce_percentiles(percentiles: object) -> tuple[float, float]:
@@ -472,42 +520,113 @@ def _band_min_max(band: gdal.Band, description: str) -> tuple[float, float]:
     return float(result[0]), float(result[1])
 
 
-def _write_stretched_sentinel_s2_rgb(
+# Percentiles are read from a decimated grid rather than every pixel: an exact
+# pass costs about as much as the warp itself, while 4 million samples put the
+# 0.5/99.5 points within a digital number of the exact answer.
+_PERCENTILE_SAMPLE_SIDE = 2048
+
+
+def _band_percentiles(
+    band: gdal.Band,
+    description: str,
+    percentiles: tuple[float, float],
+) -> tuple[float, float]:
+    """Percentile range of one band, ignoring NoData, from a decimated read."""
+    width = min(band.XSize, _PERCENTILE_SAMPLE_SIDE)
+    height = min(band.YSize, _PERCENTILE_SAMPLE_SIDE)
+    with gdal_errors():
+        sample = band.ReadAsArray(buf_xsize=width, buf_ysize=height)  # nearest: real pixel values
+    if sample is None:
+        raise RuntimeError(f"Unable to read {description}")
+    nodata = band.GetNoDataValue()
+    values = sample[np.isfinite(sample)] if sample.dtype.kind == "f" else sample.ravel()
+    if nodata is not None:
+        values = values[values != nodata]
+    if values.size == 0:
+        # Too sparse to sample, or genuinely empty: let the exact pass decide.
+        return _band_min_max(band, description)
+    low, high = (float(value) for value in np.percentile(values, list(percentiles)))
+    if high <= low:  # a near-flat band: use its full range instead
+        return _band_min_max(band, description)
+    return low, high
+
+
+def _stretch_range(
+    band: gdal.Band,
+    description: str,
+    *,
+    method: str,
+    percentiles: tuple[float, float],
+) -> tuple[float, float]:
+    """The source range a band is stretched from."""
+    if method == "minmax":
+        return _band_min_max(band, description)
+    return _band_percentiles(band, description, percentiles)
+
+
+_LUT_DTYPES = {gdal.GDT_Byte: 256, gdal.GDT_UInt16: 65536}
+
+
+def _stretch_lut(low: float, high: float, gamma: float, size: int, nodata: float | None) -> np.ndarray:
+    """Map every possible source value to its output byte, NoData to 0."""
+    values = np.arange(size, dtype=np.float32)
+    norm = np.clip((values - low) / (high - low), 0.0, 1.0)
+    if gamma != 1.0:
+        norm = norm ** gamma
+    lut = np.rint(norm * (255 - S2_VALID_FLOOR) + S2_VALID_FLOOR).astype(np.uint8)
+    if nodata is not None and float(nodata).is_integer() and 0 <= int(nodata) < size:
+        lut[int(nodata)] = 0  # the one value that stays transparent
+    return lut
+
+
+def _write_stretched_with_lut(
+    source: gdal.Dataset,
+    output_path: Path,
+    ranges: list[tuple[float, float]],
+    *,
+    gamma: float,
+    creation_options: list[str],
+    strip_rows: int = 1024,
+) -> None:
+    """Apply the per-band curves through a lookup table, a strip at a time.
+
+    Same result as ``gdal.Translate`` with scale and exponent (within one digital
+    number) at a third of the cost, because a table lookup replaces a ``pow()``
+    per pixel, and it never holds more than a strip of the raster in memory.
+    """
+    width, height = source.RasterXSize, source.RasterYSize
+    with gdal_errors():
+        target = gdal.GetDriverByName("GTiff").Create(
+            str(output_path), width, height, source.RasterCount, gdal.GDT_Byte, creation_options
+        )
+    if target is None:
+        raise RuntimeError(f"Unable to create {output_path.name}")
+    target.SetGeoTransform(source.GetGeoTransform())
+    target.SetProjection(source.GetProjectionRef())
+    luts = []
+    for index, (low, high) in enumerate(ranges, start=1):
+        band = source.GetRasterBand(index)
+        size = _LUT_DTYPES[band.DataType]
+        luts.append(_stretch_lut(low, high, gamma, size, band.GetNoDataValue()))
+        target.GetRasterBand(index).SetNoDataValue(0)
+    with gdal_errors():
+        for row in range(0, height, strip_rows):
+            rows = min(strip_rows, height - row)
+            for index in range(1, source.RasterCount + 1):
+                chunk = source.GetRasterBand(index).ReadAsArray(0, row, width, rows)
+                target.GetRasterBand(index).WriteArray(luts[index - 1][chunk], 0, row)
+    target = None
+
+
+def _write_stretched_with_translate(
     warped_path: Path,
     output_path: Path,
+    ranges: list[tuple[float, float]],
     *,
-    percentiles: tuple[float, float],
-    block_size: int,
-    overview_factors: tuple[int, ...],
-    compression: str = "DEFLATE",
-) -> dict[str, list[float]]:
-    """Auto (per-band min/max) stretch the warped RGB to a tiled, compressed 8-bit
-    GeoTIFF with internal overviews.
-
-    The min/max is computed per band (ignoring nodata) and applied via
-    ``gdal.Translate`` scale params - so, unlike a bare ``scaleParams=[[]]``, the
-    output is tiled + compressed (web/COG friendly) and the per-band src range is
-    returned as ``{"p_low", "p_high", "method"}`` for the job record.
-
-    Raises :class:`pysent.errors.EmptySceneError` if a band has no valid pixel.
-    """
-    with gdal_errors():
-        source = gdal.Open(str(warped_path), gdal.GA_ReadOnly)
-    if source is None:
-        raise RuntimeError(f"Unable to open warped Sentinel-2 raster: {warped_path}")
-    scale_params: list[list[float]] = []
-    p_low: list[float] = []
-    p_high: list[float] = []
-    for band_index in range(1, source.RasterCount + 1):
-        band = source.GetRasterBand(band_index)
-        minimum, maximum = _band_min_max(band, f"Sentinel-2 band {band_index}")
-        if maximum <= minimum:
-            maximum = minimum + 1.0
-        scale_params.append([minimum, maximum, 0, 255])
-        p_low.append(float(minimum))
-        p_high.append(float(maximum))
-    source = None
-
+    gamma: float,
+    creation_options: list[str],
+) -> None:
+    """The same stretch for source types a lookup table cannot cover (float, 32-bit)."""
     with gdal_errors():
         translated = gdal.Translate(
             str(output_path),
@@ -515,26 +634,83 @@ def _write_stretched_sentinel_s2_rgb(
             options=gdal.TranslateOptions(
                 format="GTiff",
                 outputType=gdal.GDT_Byte,
-                scaleParams=scale_params,
-                creationOptions=[
-                    f"COMPRESS={compression}",
-                    "TILED=YES",
-                    f"BLOCKXSIZE={block_size}",
-                    f"BLOCKYSIZE={block_size}",
-                    "BIGTIFF=IF_SAFER",
-                    "INTERLEAVE=PIXEL",
-                ],
+                scaleParams=[[low, high, S2_VALID_FLOOR, 255] for low, high in ranges],
+                exponents=[gamma] * len(ranges) if gamma != 1.0 else None,
+                creationOptions=creation_options,
             ),
         )
-        if translated is None:
-            raise RuntimeError(f"Unable to stretch Sentinel-2 RGB product to {output_path.name}")
-        translated = None
+    if translated is None:
+        raise RuntimeError(f"Unable to stretch Sentinel-2 RGB product to {output_path.name}")
 
+
+def _write_stretched_sentinel_s2_rgb(
+    warped_path: Path,
+    output_path: Path,
+    *,
+    percentiles: tuple[float, float] = S2_STRETCH_PERCENTILES,
+    block_size: int,
+    overview_factors: tuple[int, ...],
+    compression: str = "DEFLATE",
+    method: str = S2_STRETCH_METHOD,
+    gamma: float = S2_STRETCH_GAMMA,
+) -> dict[str, Any]:
+    """Stretch the warped RGB to a tiled, compressed 8-bit GeoTIFF with overviews.
+
+    Each band is scaled from its source range - percentiles by default, or the
+    exact min/max with ``method="minmax"`` - into ``[1, 255]``, through a gamma
+    curve that lifts the mid-tones. **0 is reserved for NoData**, so no valid
+    pixel can come out transparent.
+
+    The per-band range is returned for the job record. Raises
+    :class:`pysent.errors.EmptySceneError` if a band has no valid pixel.
+    """
+    with gdal_errors():
+        source = gdal.Open(str(warped_path), gdal.GA_ReadOnly)
+    if source is None:
+        raise RuntimeError(f"Unable to open warped Sentinel-2 raster: {warped_path}")
+    method = str(method or S2_STRETCH_METHOD).strip().lower()
+    gamma = float(gamma)
+    ranges: list[tuple[float, float]] = []
+    for band_index in range(1, source.RasterCount + 1):
+        band = source.GetRasterBand(band_index)
+        low, high = _stretch_range(
+            band, f"Sentinel-2 band {band_index}", method=method, percentiles=percentiles
+        )
+        ranges.append((low, high if high > low else low + 1.0))
+
+    creation_options = [
+        f"COMPRESS={compression}",
+        "TILED=YES",
+        f"BLOCKXSIZE={block_size}",
+        f"BLOCKYSIZE={block_size}",
+        "BIGTIFF=IF_SAFER",
+        "INTERLEAVE=PIXEL",
+    ]
+    if all(source.GetRasterBand(index).DataType in _LUT_DTYPES for index in range(1, source.RasterCount + 1)):
+        _write_stretched_with_lut(source, output_path, ranges, gamma=gamma, creation_options=creation_options)
+    else:
+        source = None
+        _write_stretched_with_translate(
+            warped_path, output_path, ranges, gamma=gamma, creation_options=creation_options
+        )
+    source = None
+
+    with gdal_errors():
         dataset = gdal.Open(str(output_path), gdal.GA_Update)
         if dataset is not None and overview_factors:
             dataset.BuildOverviews("AVERAGE", list(overview_factors))
         dataset = None
-    return {"p_low": p_low, "p_high": p_high, "method": "minmax"}
+
+    stats: dict[str, Any] = {
+        "p_low": [low for low, _ in ranges],
+        "p_high": [high for _, high in ranges],
+        "method": method,
+    }
+    if method != "minmax":
+        stats["percentiles"] = [float(value) for value in percentiles]
+    if gamma != 1.0:
+        stats["gamma"] = gamma
+    return stats
 
 
 def _write_stretched_sentinel_s2_rgb_percentile(
@@ -589,6 +765,8 @@ def _process_sentinel_s2_product(
     percentiles: tuple[float, float],
     compression: str,
     overview_factors: tuple[int, ...],
+    stretch_method: str = S2_STRETCH_METHOD,
+    stretch_gamma: float = S2_STRETCH_GAMMA,
 ) -> dict[str, Any]:
     """Write one RGB product by selecting its three bands from the scene's warped stack."""
     if isinstance(stack, BaseException):
@@ -597,7 +775,7 @@ def _process_sentinel_s2_product(
     stack_path = Path(str(stack["stack_path"]))
     # A band-subset VRT costs nothing to build and lets the writers work unchanged.
     subset_path = stack_path.with_name(f"{stack_path.stem}.{_sanitize_name_fragment(product_name).lower()}.vrt")
-    stretch_stats: dict[str, list[float]] | None = None
+    stretch_stats: dict[str, Any] | None = None
     try:
         with gdal_errors():
             selected = gdal.Translate(
@@ -620,6 +798,8 @@ def _process_sentinel_s2_product(
                     block_size=block_size,
                     overview_factors=overview_factors,
                     compression=compression,
+                    method=stretch_method,
+                    gamma=stretch_gamma,
                 )
             else:
                 _translate_sentinel_s2_rgb(
@@ -742,7 +922,7 @@ def _resolve_sentinel_s2_processing_settings(
 ) -> dict[str, Any]:
     processing = dict(processing_options or {})
     histogram = processing.get("histogram_stretch")
-    percentiles = _coerce_percentiles(processing.get("stretch_percentiles"))
+    percentiles, method, gamma = _resolve_stretch_options(processing)
     block_size = _coerce_positive_int(processing.get("block_size"), 256)
     overview_factors = _coerce_overview_factors(processing.get("overview_factors"))
     target_epsg = str(processing.get("target_epsg") or "").strip() or None
@@ -770,12 +950,20 @@ def _resolve_sentinel_s2_processing_settings(
     gdal_num_threads = _resolve_gdal_num_threads(requested_gdal_threads, product_workers)
     warp_memory_limit_mb = _resolve_warp_memory_limit_mb(processing.get("warp_memory_limit_mb"))
     histogram_enabled = bool(histogram)
+    if not histogram_enabled and any(key in processing for key in _STRETCH_KEYS):
+        warnings.warn(
+            "stretch options were given but histogram_stretch is off, so they do nothing",
+            RuntimeWarning,
+            stacklevel=3,
+        )
     return {
         "target_epsg": target_epsg,
         "target_resolution": target_resolution,
         "resample_alg": resample_alg,
         "histogram_stretch": histogram_enabled,
         "percentiles": percentiles,
+        "stretch_method": method,
+        "stretch_gamma": gamma,
         "compression": compression,
         "intermediate_compression": intermediate_compression,
         "overview_factors": overview_factors,
@@ -847,6 +1035,8 @@ def process_sentinel_s2_safe(
                     "block_size": settings["block_size"],
                     "histogram_stretch": settings["histogram_stretch"],
                     "percentiles": settings["percentiles"],
+                    "stretch_method": settings["stretch_method"],
+                    "stretch_gamma": settings["stretch_gamma"],
                     "compression": settings["compression"],
                     "overview_factors": settings["overview_factors"],
                 },
