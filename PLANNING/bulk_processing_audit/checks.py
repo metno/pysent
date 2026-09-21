@@ -1,4 +1,4 @@
-"""Audit bug checks (GDAL 3.8, synthetic data). Driven by run.sh checks; see TODO_PLANNING_bulk_processing.md."""
+"""Audit bug checks (GDAL 3.8, synthetic data). Driven by run.sh checks; see PLANNING_bulk_processing.md."""
 import sys, os, tempfile, threading, json
 from pathlib import Path
 import numpy as np

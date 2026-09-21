@@ -92,25 +92,35 @@ Levers, roughly in impact order:
   end-to-end wall-clock closer to production.
 - **S1 GCP warp transform.** SAFE path uses `tps=True` (thin-plate-spline, expensive). The SAFE
   band VRT is **GCP-based** (not a geolocation array — so `geoloc=True` does NOT apply here; that's
-  the NetCDF path), so the fast alternative is GDAL's **polynomial GCP** transform. Likely the
-  biggest single S1 speed win. **Now benchmarkable in the notebook:** set `S1_USE_TPS=False` (the
-  warp gained a `use_tps` param, default True=tps, False=polynomial GCP) and
-  compare the `warp_raw` `seconds`/`rss_peak_mb`.
+  the NetCDF path), so the fast alternative is GDAL's **polynomial GCP** transform. Worth
+  about 23 % of wall time — but **measured and not adopted as the default** (2026-09-21):
+  against the product's own 210 GCPs the polynomial transform is 61.7 m RMS off, which is
+  **1.54 output pixels** at 40 m (max 4.87 px), while the spline interpolates them exactly.
+  Available as `use_tps=False` (also `S1_USE_TPS=False` in the notebook) where speed beats
+  geolocation.
 - **Resampling cost.** `average` > `bilinear` > `near`. Coarsening `target_resolution`
-  cuts warp cost ~quadratically — quantify the quality cost before shipping.
-- **Stretch cost (S2).** `np.percentile` on the full array is the cost. Estimating
-  percentiles from a **decimated read** (`rasterio` `out_shape=` / overview) or a random
-  subsample is a large speedup at negligible accuracy loss — `raster_stats()` already
-  subsamples and is a good template. The S1 numba path (`use_numba=True`) is the
-  analogous win for S1.
-- **Output format.** Consider Cloud-Optimized GeoTIFF (`driver="COG"`) and tune
-  overview factors / compression; measure `write_stretched` + `out_size_mb`.
+  cuts warp cost ~quadratically: **shipped as `preset="quicklook"`** (S2 60 m, S1 160 m),
+  which is 5.0 s against 38.6 s for a three-product S2 scene because GDAL then reads the
+  JP2 overview levels.
+- **Stretch cost (S2): shipped.** Percentiles come from a **decimated read** (2048²,
+  nearest, NoData dropped) instead of a full pass, and the curve is applied through a
+  per-band **lookup table written strip by strip** — 3.4 s against 13.6 s for GDAL's own
+  scale+exponent on a 10980² three-band raster, and within 1 DN of it. The S1 numba path
+  (`use_numba=True`) is the analogous win for S1.
+- **Output format: COG evaluated, not adopted** (2026-09-21). The COG driver took 8.0 s
+  against 5.4 s for a tiled GeoTIFF with overviews of the same size, and the output is
+  already tiled with internal overviews. Revisit if the products are ever served straight
+  from object storage.
+- **Threaded compression: shipped** by defaulting `parallel_mode` to `serial`. The final
+  write of a product drops from 15.6 s to 5.4 s when it has every core to itself.
+  `NUM_THREADS` as a creation option was rejected: it would also arm multi-threaded
+  compression in `threads` mode, which is where GDAL 3.8 segfaults.
 
 ### 4.2 Output quality
 - **S2 percentile stretch: shipped** (2026-09-21). Defaults are
   `stretch_method="percentile"`, `stretch_percentiles=(0.5, 99.5)` and
-  `stretch_gamma=0.7`, applied by `gdal.Translate` (scale + exponent) rather than by
-  reading the bands into numpy. Measured on two real scenes, this lifts a hazy scene
+  `stretch_gamma=0.7`, applied through a per-band lookup table rather than by reading the
+  bands into numpy. Measured on two real scenes, this lifts a hazy scene
   from mean 17/255 to 44/255 while clipping 0.6 % of pixels; min/max left it nearly
   black. Valid pixels now start at 1 so none of them can be mistaken for NoData.
 - **SAR should likely be stretched in dB.** S1 amplitude is currently stretched
@@ -122,7 +132,7 @@ Levers, roughly in impact order:
 - **Speckle.** Optional Lee / refined-Lee filter on S1 before stretch.
 - **Per-band vs joint stretch.** Per-band (current) maximises contrast but can shift
   colour balance; a shared/luminance-preserving stretch keeps truer colour. Offer both.
-- **Gamma / tone curve** after the linear clip for perceptual brightness.
+- **Gamma / tone curve** after the linear clip: **shipped** as `stretch_gamma`, default 0.7.
 - **Resampling for band-resolution mixing** (20 m → 10 m): `cubic` vs `bilinear`.
 - **Bit depth.** Keep a 16-bit analysis product alongside the 8-bit display product?
 - **Nodata / partial tiles.** Real scenes are partial (valid frac ~0.54 S2, ~0.67 S1);

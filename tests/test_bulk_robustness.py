@@ -1,7 +1,7 @@
 """Robustness of the processing entry points under unattended, bulk use.
 
 Covers findings B1-B4, B6-B8 and B10-B12 of
-``PLANNING/TODO_PLANNING_bulk_processing.md``. The SAFE warp is replaced by a
+``PLANNING/PLANNING_bulk_processing.md``. The SAFE warp is replaced by a
 fake that writes a synthetic warped raster, so everything downstream of it
 (scratch files, atomic writes, stretch, error collection, GDAL settings) runs
 for real without a Sentinel product.

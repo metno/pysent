@@ -1,4 +1,4 @@
-# Corrupt-input check: expects /out/corrupt.zip (an S2 zip with bytes zeroed inside B04_10m.jp2). See TODO_PLANNING_bulk_processing.md, finding B7.
+# Corrupt-input check: expects /out/corrupt.zip (an S2 zip with bytes zeroed inside B04_10m.jp2). See PLANNING_bulk_processing.md, finding B7.
 import os
 from pathlib import Path
 import numpy as np, rasterio

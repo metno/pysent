@@ -49,26 +49,30 @@ CPUs / --threads-per-worker          and          (RAM - 2 GB) / --mem-per-worke
 ```
 
 reading the CPU count and memory from the Slurm allocation, the cgroup limit or
-the machine, in that order. Measured per worker on the benchmark scenes (three
-S2 products each, GDAL 3.8): **0.5 GB with 1 thread, 1.1 GB with 2, 1.5 GB with
-4**. Each scene in flight also needs about **1.2 GB of scratch** for its warped
-stack, so point `--scratch` at local disk when the output directory is on a
-shared filesystem.
+the machine, in that order.
 
-Throughput on a 16-core, 39 GB machine, 16 Sentinel-2 scenes of three products
-each, reading from page cache:
+**Two GDAL threads per worker is the sweet spot**, which is why `--workers auto`
+divides by that. Measured on a 16-core / 39 GB machine and on 8 pinned cores of
+it, processing real scenes end to end (Sentinel-2 = three products per scene):
 
-| Workers × threads | Cache | Scenes/hour | Peak RAM |
+| Scenes/hour | 8 cores | 16 cores | peak RAM (16 cores) |
 |---|---:|---:|---:|
-| 8 × 2 | 256 MB | **282** | 7.6 GB |
-| 16 × 1 | 128 MB | 262 | 6.6 GB |
-| 4 × 4 | 256 MB | 222 | 5.4 GB |
-| 1 × 16 | 256 MB | 92 | 2.7 GB |
+| **S2 full, 2 threads/worker** | **165** | 312 | 7.6 GB |
+| S2 full, 1 thread/worker | 152 | **349** | 9.5 GB |
+| S2 full, 4 threads/worker | 131 | 253 | 4.8 GB |
+| **S2 quicklook, 2 threads/worker** | **1106** | **2090** | 2.6 GB |
+| S2 quicklook, 1 thread/worker | 1054 | 1878 | 4.2 GB |
+| **S1, 2 threads/worker** | **307** | **598** | 8.5 GB |
+| S1, 4 threads/worker | 256 | 490 | 4.6 GB |
 
-More workers with fewer threads each wins until memory runs out; the defaults
-(2 threads, 256 MB of GDAL cache) sit at that sweet spot. The `quicklook`
-preset (60 m for S2, 160 m for S1) is roughly 8× faster again: one three-product
-S2 scene takes 5 s instead of 39 s.
+One thread per worker edges ahead on 16 cores for full S2 (+12 %) but costs 25 %
+more memory; everywhere else two threads wins outright. Per worker, budget
+**1.0–1.5 GB** (S1 is the heavy one at ~1.4 GB, quicklook needs only ~0.4 GB),
+plus about **1.2 GB of scratch** per scene in flight — point `--scratch` at local
+disk when the outputs live on a shared filesystem.
+
+Scenes come from a warm page cache here, so a cold archive or a network
+filesystem will be slower; the shape of the table is what matters.
 
 ## Changing how the images look
 

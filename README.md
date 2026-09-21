@@ -200,18 +200,36 @@ processing_options={
 Sentinel-1 keeps its linear 2–98 percentile stretch and writes an explicit alpha
 band, so its NoData was never ambiguous.
 
+## Performance
+
+One 16-core machine, real scenes end to end, Sentinel-2 counting three products
+per scene:
+
+| | scenes/hour | per worker |
+|---|---:|---:|
+| Sentinel-2, full resolution | 312 | ~1.0 GB |
+| Sentinel-2, `preset="quicklook"` | 2090 | ~0.4 GB |
+| Sentinel-1, VV+VH | 598 | ~1.4 GB |
+
+Two GDAL threads per worker measured fastest nearly everywhere; the bulk runner
+sizes itself that way. [`examples/README.md`](examples/README.md) has the full
+sweep and the memory budget.
+
 ## Known tuning work
 
-Carried over from the QA benchmarking; each is measurable with `pysent.qa`:
+Each is measurable with `pysent.qa`:
 
 - **S1 is stretched linearly.** SAR backscatter spans orders of magnitude, so
   `20*log10(amplitude)` before the percentile clip should give better contrast.
 - **The S1 warp dominates its cost** (~27 s of 31 s for an S1 GRD).
-  `use_tps=False` swaps TPS for the much faster polynomial GCP transform, at the
-  price of moving the output grid by a few pixels.
+  `use_tps=False` swaps the thin-plate spline for the polynomial GCP transform
+  and saves about 23 % — measured at 1.54 output pixels RMS off the product's
+  own GCPs, which is why it is not the default.
 - **S1 warps to EPSG:32661 (UPS North) at 40 m** by default, which suits the
   Nordic archive; scenes further south want their own UTM zone via `target_epsg`.
-- Percentiles from a decimated read, and COG output, are both unexplored wins.
+- **Speckle filtering** (Lee / refined Lee) on S1 before the stretch.
+- COG output was evaluated and not adopted: slower, for the same size, and the
+  GeoTIFF already carries internal overviews.
 
 ## Licence
 
