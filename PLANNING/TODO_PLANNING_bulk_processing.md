@@ -8,7 +8,7 @@ break or slow that use case.
 |---|---|
 | Branch / worktree | `feature/bulk-processing` → `../pysent.worktrees/bulk-processing` |
 | Base | `main` @ `c660cde` (2026-09-14) |
-| Status | Audit done (phase A). Phase 1 merged (PR #5). Phase 4's P2+P4 done out of order (2026-09-21). Phases 2, 3, 5 not started. |
+| Status | Audit done (phase A). Phases 1 and 2 done (PRs #5, #7); phase 4's P2+P4 done out of order (PR #6). Phases 3 and 5, and the rest of phase 4, not started. |
 | Audit evidence | [`bulk_processing_audit/`](bulk_processing_audit/): `run.sh checks`, `run.sh bench <DATA_DIR>` |
 
 ## Kick-off prompt
@@ -134,8 +134,8 @@ Each item needs a regression test in `tests/`, using synthetic data like `tests/
 
 ### Phase 2: `examples/` bulk processing (PR 2)
 Stdlib only, plus pysent. Must run on Python 3.10+; use `max_tasks_per_child` only when available (3.11+).
-- [ ] `examples/README.md`: which script to use when; sizing guide built from the tables above; environment variables; failure modes and how to resume.
-- [ ] `examples/bulk_convert.py`, the reference runner (CLI plus an importable `run_bulk()`):
+- [x] `examples/README.md`: which script to use when; sizing guide built from the tables above; environment variables; failure modes and how to resume.
+- [x] `examples/bulk_convert.py`, the reference runner (CLI plus an importable `run_bulk()`):
   - **Inputs:** `--input-dir` (recursive `*.zip`/`*.SAFE`), `--input-list` (local paths or `/vsizip//vsicurl/` URLs). Platform detected from the basename (`pysent.profiles`).
   - **Presets:** `--preset quicklook|full`, plus S2 `--products` and S1 polarisations (auto-detected by default).
   - **Execution:** `ProcessPoolExecutor(mp_context=forkserver, max_tasks_per_child=…)`. A worker initializer sets `GDAL_NUM_THREADS`, `GDAL_CACHEMAX`, `NUMBA_NUM_THREADS`, `OMP_NUM_THREADS` and `NUMBA_CACHE_DIR`. The library is called with `parallel_mode="serial"`, an explicit `gdal_num_threads` and `work_dir=--scratch`.
@@ -143,10 +143,10 @@ Stdlib only, plus pysent. Must run on Python 3.10+; use `max_tasks_per_child` on
   - **Idempotent and resumable:** layout `<out>/<platform>/<product>/…`, plus a sidecar `<product>.json` written last (options, stats, versions, timings). Skip when the sidecar and all outputs exist; `--force` overrides.
   - **Failure isolation:** a per-scene status of `ok|skipped|empty|failed` goes to a JSONL results log with traceback. Rebuild the pool after `BrokenProcessPool` (OOM kill) and mark only the scenes that were in flight. Retry network errors with backoff (`--retries`).
   - **Operations:** progress with scenes/hour and ETA, `--dry-run`, clean Ctrl-C (cancel pending, finish or terminate running), exit code ≠ 0 if anything failed.
-- [ ] `examples/bulk_from_catalogue.py`: UUIDs or a CSW query → `pysent.archive.resolve_safe_archive_from_uuid` → local archive path, falling back to the remote `/vsizip//vsicurl/` URL → `run_bulk()`.
-- [ ] `examples/slurm/bulk_array.sbatch`: splits an input list by `SLURM_ARRAY_TASK_ID` and sizes workers from `SLURM_CPUS_PER_TASK` and `SLURM_MEM_PER_NODE`.
-- [ ] `tests/test_examples_bulk.py`: runner logic with a fake processor (no GDAL). Cover discovery, skip/resume, an interrupted write leaving no sidecar, one failing scene not stopping others, a worker `os._exit` → pool rebuilt, exit codes. Add it to CI.
-- [ ] Link the examples from `README.md`. PR opened.
+- [x] `examples/bulk_from_catalogue.py`: UUIDs or a CSW query → `pysent.archive.resolve_safe_archive_from_uuid` → local archive path, falling back to the remote `/vsizip//vsicurl/` URL → `run_bulk()`.
+- [x] `examples/slurm/bulk_array.sbatch`: splits an input list by `SLURM_ARRAY_TASK_ID` and sizes workers from `SLURM_CPUS_PER_TASK` and `SLURM_MEM_PER_NODE`.
+- [x] `tests/test_examples_bulk.py`: runner logic with a fake processor (no GDAL). Cover discovery, skip/resume, an interrupted write leaving no sidecar, one failing scene not stopping others, a worker `os._exit` → pool rebuilt, exit codes. Add it to CI.
+- [x] Link the examples from `README.md`. PR opened.
 
 ### Phase 3: Output correctness and option plumbing (PR 3)
 - [ ] **B5:** stretch valid pixels to `[1,255]` and keep 0 for NoData, or write an alpha/mask band. Decide with the user (see open questions).
@@ -224,3 +224,11 @@ Recommendations in *italics*. Ask before the phase that needs the answer.
   - **Speed** (8 pinned cores, serial products, cache 256 MB): a three-product scene 127.9 → 48.8 s (T34VEP) and 126.9 → 49.1 s (T35VPE), CPU 382 → 194 s, peak RSS ~1.5 GB either way. 60 m quicklook 6.2 → 5.1 s. Batch (16 cores, 16 scenes, no failures): 8 workers × 2 threads **282 scenes/h** at 7.6 GB (was 133/h), 16 × 1 thread 262/h at 6.6 GB (was 148/h), 4 × 4 threads 222/h at 5.4 GB.
   - **Also fixed:** `gdal_runtime` restored a `GDAL_NUM_THREADS` that came from the environment as an explicit config option, so it outlived the env var and could trigger the threads-mode warning in an unrelated later call.
   - Still open from phase 4: P1 (quicklook preset), P5 (S1 polynomial), P6/P7 (percentiles from a decimated read), P8 (COG). Phases 2, 3 and 5 are untouched; **phase 2 (the `examples/` runner) is next**.
+- **2026-09-21, phase 2: the `examples/` bulk runner (PR #7).** PR #6 was rebase-merged (`2f1c66c`) first.
+  - `examples/bulk_convert.py`: one worker process per scene, products serial inside the worker, `forkserver`/`spawn` pool with `max_tasks_per_child`, a worker initializer pinning `GDAL_NUM_THREADS`/`GDAL_CACHEMAX`/`NUMBA_NUM_THREADS`/`OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS`/`NUMBA_CACHE_DIR`, `--workers auto` from the CPU and memory budget (Slurm, cgroup, machine), `<out>/<platform>/<scene>/` layout with a sidecar written last, a JSONL results log, retries with backoff for network-like errors, pool rebuild after a dead worker, `--dry-run`, Ctrl-C handling and a non-zero exit code when anything failed.
+  - `examples/bulk_from_catalogue.py` (UUIDs, `--uuid-file`, or an OWSLib `--query`; falls back to `/vsizip//vsicurl/` when the archive copy is absent) and `examples/slurm/bulk_array.sbatch` (splits the list by `SLURM_ARRAY_TASK_ID`, node-local scratch, `--workers auto` from the allocation).
+  - `tests/test_examples_bulk.py`: 22 tests, no GDAL needed, fake processors in **real** worker processes. Covers discovery, naming/family, sizing, serial options, presets, skip/resume, an interrupted write leaving no sidecar, a deleted output, empty scenes, one failing scene, a dead worker, retries, dry-run and exit codes.
+  - **Bug the tests caught:** the scene whose worker died was popped from the in-flight map before its `BrokenProcessPool` surfaced, so it vanished from the report instead of being marked failed.
+  - **Decisions.** Products run serially per worker: it is the best throughput per GB and it keeps off the GDAL 3.8 concurrent-write crash path. An `empty` scene gets a sidecar so a resume skips it. `run_bulk()` takes the parsed `args` namespace, so the CLI and the importable API cannot drift. `--preset quicklook` = 60 m (S2) / 160 m (S1); presets change nothing but resolution.
+  - **Verified on the three real products** (2 S2 + 1 S1, 8 pinned cores): full preset 99 s for 3 scenes (109 scenes/h) with 2 workers × 4 threads, exit 0, scratch left empty; re-running skipped all three; `--preset quicklook` with 3 workers × 2 threads took 24 s (456 scenes/h). Sidecars carry options, per-product stretch stats, timings and pysent/GDAL/Python versions.
+  - Phases 3 and 5 remain, plus phase 4's P1, P5, P6/P7 and P8.
