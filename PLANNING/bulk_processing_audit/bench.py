@@ -1,4 +1,4 @@
-"""Audit benchmarks on real S1/S2 products. Driven by run.sh bench <DATA_DIR>; see TODO_PLANNING_bulk_processing.md."""
+"""Audit benchmarks on real S1/S2 products. Driven by run.sh bench <DATA_DIR>; see PLANNING_bulk_processing.md."""
 import sys, time, zipfile, tempfile, resource, os
 from pathlib import Path
 from osgeo import gdal

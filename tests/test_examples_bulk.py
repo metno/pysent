@@ -173,7 +173,7 @@ def test_workers_are_sized_by_cpu_and_memory():
     # 16 CPUs / 2 threads = 8, and (24 - 2) / 1.2 = 18 -> the CPUs are the limit.
     assert bulk_convert.resolve_workers("auto", threads_per_worker=2, mem_per_worker_gb=1.2, cpus=16, memory_gb=24) == 8
     # A small-memory node is limited by memory instead.
-    assert bulk_convert.resolve_workers("auto", threads_per_worker=2, mem_per_worker_gb=1.2, cpus=16, memory_gb=8) == 5
+    assert bulk_convert.resolve_workers("auto", threads_per_worker=2, mem_per_worker_gb=1.5, cpus=16, memory_gb=8) == 4
     # Never zero, whatever the budget.
     assert bulk_convert.resolve_workers("auto", threads_per_worker=8, mem_per_worker_gb=4, cpus=2, memory_gb=2) == 1
     # An explicit count wins.

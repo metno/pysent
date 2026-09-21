@@ -183,8 +183,9 @@ def resolve_workers(
 ) -> int:
     """Worker count from the CPU and memory budget, unless a number was given.
 
-    Measured on the benchmark scenes: about 0.5 GB per worker with one GDAL
-    thread, 1.1 GB with two (see ``examples/README.md``).
+    Two GDAL threads per worker measured fastest or near-fastest everywhere
+    (see the table in ``examples/README.md``), and a worker peaks at 1.0-1.5 GB
+    on full-resolution scenes.
     """
     if str(requested).strip().lower() not in {"auto", ""}:
         return max(1, int(requested))
@@ -607,8 +608,9 @@ def build_parser() -> argparse.ArgumentParser:
                            help="worker processes, or auto from the CPU and memory budget (default: auto)")
     execution.add_argument("--threads-per-worker", type=int, default=2, metavar="N",
                            help="GDAL threads per worker (default: 2)")
-    execution.add_argument("--mem-per-worker-gb", type=float, default=1.2, metavar="GB",
-                           help="memory budgeted per worker when sizing --workers auto (default: 1.2)")
+    execution.add_argument("--mem-per-worker-gb", type=float, default=1.5, metavar="GB",
+                           help="memory budgeted per worker when sizing --workers auto "
+                                "(default: 1.5, measured worst case; quicklook needs ~0.5)")
     execution.add_argument("--gdal-cachemax-mb", type=int, default=256, metavar="MB",
                            help="GDAL block cache per worker (default: 256)")
     execution.add_argument("--max-tasks-per-child", type=int, default=20, metavar="N",

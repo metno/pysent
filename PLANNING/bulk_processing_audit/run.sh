@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Re-run the audit evidence for PLANNING/TODO_PLANNING_bulk_processing.md.
+# Re-run the audit evidence for PLANNING/PLANNING_bulk_processing.md.
 #
 #   PLANNING/bulk_processing_audit/run.sh checks            # bug checks, synthetic data only
 #   PLANNING/bulk_processing_audit/run.sh bench <DATA_DIR>  # benchmarks, needs the two real products

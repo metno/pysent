@@ -8,12 +8,13 @@ break or slow that use case.
 |---|---|
 | Branch / worktree | `feature/bulk-processing` → `../pysent.worktrees/bulk-processing` |
 | Base | `main` @ `c660cde` (2026-09-14) |
-| Status | Audit done (phase A). Phases 1-4 done (PRs #5-#9). Only phase 5 (sweep, docs, close-out) remains. |
+| Status | **Complete.** Phases 1-5 and the audit shipped in PRs #4-#10. |
 | Audit evidence | [`bulk_processing_audit/`](bulk_processing_audit/): `run.sh checks`, `run.sh bench <DATA_DIR>` |
 
 ## Kick-off prompt
 
-Copy this into a new agent session. It can run from any directory.
+*Kept for reference: the plan is finished, so a new session only needs this if the
+work is reopened.* Copy it into a new agent session; it can run from any directory.
 
 ```text
 You are continuing the bulk-processing plan for the pysent library (github.com/metno/pysent).
@@ -28,7 +29,7 @@ Repository rules (mandatory):
    If it is missing, run this from /home/ubuntu/dev/services/pysent:
    git worktree add ../pysent.worktrees/bulk-processing feature/bulk-processing
    (add `-b` and `main` if the branch does not exist either). Rebase on origin/main before starting.
-3. Read PLANNING/TODO_PLANNING_bulk_processing.md in full. Do the next unchecked phase, in order.
+3. Read PLANNING/PLANNING_bulk_processing.md in full. Do the next unchecked phase, in order.
    Tick its checkboxes in the file as you complete them, and record every decision and
    deviation in the "Session log" section.
 4. Verify the way CI does: run the full test suite in ubuntu:24.04 with apt GDAL 3.8
@@ -163,9 +164,9 @@ Re-measure every item with `run.sh bench` and put before/after numbers in the PR
 - [x] **P5:** measured - polynomial is 1.54 output px RMS off the product's own GCPs, so **the TPS default stays**.
 
 ### Phase 5: Throughput sweep, docs and close-out (PR 5)
-- [ ] Sweep workers × threads per worker on 8 and 16 cores for S2 (quicklook and full) and S1. Record scenes/hour and peak RSS in `examples/README.md`, and set the `--workers auto` defaults from the results.
-- [ ] Update `README.md` "Known tuning work" and `docs/tuning-and-roadmap.md`.
-- [ ] Update memory. Rename this file to `PLANNING_bulk_processing.md`.
+- [x] Sweep workers × threads per worker on 8 and 16 cores for S2 (quicklook and full) and S1. Recorded in `examples/README.md`; `--workers auto` keeps 2 threads per worker and now budgets 1.5 GB per worker.
+- [x] Update `README.md` "Known tuning work" and `docs/tuning-and-roadmap.md`.
+- [x] Update memory. Rename this file to `PLANNING_bulk_processing.md`.
 
 ## Open questions for the user
 Recommendations in *italics*. Ask before the phase that needs the answer.
@@ -246,3 +247,18 @@ Recommendations in *italics*. Ask before the phase that needs the answer.
   - **P6, no free win.** Peak RSS during the warp tracks the thread budget almost linearly (8 threads 0.99 GB / 21.9 s, 4 threads 0.63 GB / 47.0 s, 2 threads 0.58 GB / 52.7 s); `warpMemoryLimit` changes it by less than 0.1 GB. The lever is `gdal_num_threads`, which the runner already sizes, so nothing was changed and the relationship is documented instead.
   - **Batch, with everything in:** 8 workers x 2 threads, 16 scenes: **313 scenes/h at 7.8 GB** (282/h at the end of phase 3), no failures. Suite: 116 tests.
   - Only phase 5 is left: the sweep, the docs refresh and the close-out rename.
+- **2026-09-21, phase 5: sweep, docs and close-out (PR #10).** PR #9 was rebase-merged (`ef614a0`) first.
+  - **Sweep:** 18 configurations, all completing without failures - S2 full, S2 quicklook and S1, at 2/4/8/16 workers, on 16 cores and on 8 pinned cores. Table in `examples/README.md`.
+
+    | scenes/hour | 8 cores | 16 cores | peak RAM (16c) |
+    |---|---:|---:|---:|
+    | S2 full, 2 thr/worker | **165** | 312 | 7.6 GB |
+    | S2 full, 1 thr/worker | 152 | **349** | 9.5 GB |
+    | S2 full, 4 thr/worker | 131 | 253 | 4.8 GB |
+    | S2 quicklook, 2 thr/worker | **1106** | **2090** | 2.6 GB |
+    | S1, 2 thr/worker | **307** | **598** | 8.5 GB |
+
+  - **`--workers auto` keeps 2 threads per worker**, which measured fastest on 8 cores and within 11 % of the best on 16 while using 20 % less memory. `--mem-per-worker-gb` raised 1.2 → 1.5, the measured worst case (S1 ~1.4 GB; quicklook only ~0.4 GB).
+  - **A benchmark-environment trap worth remembering:** the first sweep reported 16 workers "finishing" 16 scenes at 469 scenes/h with `mean_scene_s` 0.0. Every scene had failed with `PartialFailure` because the host disk was 97 % full (45 GB of accumulated benchmark output). A throughput number with no successful scenes looks like a *win* in a table - always print the error count next to it.
+  - Docs: `README.md` gained a performance table and lost the stale "unexplored wins"; `docs/tuning-and-roadmap.md` records what shipped (quicklook preset, decimated percentiles, LUT stretch, threaded compression) and what was measured and rejected (COG, polynomial S1 transform).
+  - Suite: 116 tests. **The plan is complete; this file is renamed to `PLANNING_bulk_processing.md`.**
