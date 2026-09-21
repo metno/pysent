@@ -8,7 +8,7 @@ break or slow that use case.
 |---|---|
 | Branch / worktree | `feature/bulk-processing` → `../pysent.worktrees/bulk-processing` |
 | Base | `main` @ `c660cde` (2026-09-14) |
-| Status | Audit done (phase A). Phase 1 done, PR #5 open (plus a crash fix, 2026-09-18). Phases 2–5 not started; union warp (P2+P4) prototyped. |
+| Status | Audit done (phase A). Phase 1 merged (PR #5). Phase 4's P2+P4 done out of order (2026-09-21). Phases 2, 3, 5 not started. |
 | Audit evidence | [`bulk_processing_audit/`](bulk_processing_audit/): `run.sh checks`, `run.sh bench <DATA_DIR>` |
 
 ## Kick-off prompt
@@ -155,9 +155,9 @@ Stdlib only, plus pysent. Must run on Python 3.10+; use `max_tasks_per_child` on
 
 ### Phase 4: Performance (PR 4)
 Re-measure every item with `run.sh bench` and put before/after numbers in the PR.
-- [ ] **P2:** uncompressed intermediates. Bypass the warp for S2 when no reprojection is needed.
+- [x] **P2:** uncompressed intermediates (`intermediate_compression`, default none). *Bypassing the warp when no reprojection is needed is still open.*
 - [ ] **P1:** a `quicklook` preset in the library (e.g. `processing_options={"preset": "quicklook"}`), used by the examples.
-- [ ] **P4:** decode each needed S2 band once per scene.
+- [x] **P4:** decode each needed S2 band once per scene (one warp per output grid; products are cut from that stack).
 - [ ] **P6/P7:** percentiles or min/max from a decimated read; lower peak RSS.
 - [ ] **P8:** `NUM_THREADS` creation option; evaluate the COG driver.
 - [ ] **P5:** measure S1 polynomial geolocation error against TPS on the benchmark scene and report it.
@@ -217,3 +217,10 @@ Recommendations in *italics*. Ask before the phase that needs the answer.
 
   - **Union-warp prototype (P2+P4 pulled forward, not yet in the library):** warp the 5-band union once per scene, uncompressed, then cut the 3 products from it. Outputs pixel-identical to the current pipeline (pixels, profile, overviews, colour interpretation). Single scene, serial, 16 threads: 39.7 s vs 103.8 s at the same ~1.8 GB. A bigger cache no longer helps (the 2 GB cache only paid off because the products re-decoded shared bands). Waiting for the user's go-ahead to implement it.
   - **For Phase 2:** default the runner to serial products per worker, `gdal_cachemax_mb=256`, 2 threads per worker and workers ≈ cores / 2 (memory ~1.1 GB per worker). Use `max_tasks_per_child`: one process running 8 scenes in a row peaked at 7.8 GB vs 6.4 GB for one scene.
+- **2026-09-21, phase 1 merged; P2+P4 implemented out of order (user's request).** PR #5 was rebase-merged (`c972d28`, `2b74dfa`, `b87ae67`).
+  - **S2 now warps once per scene.** The bands the requested products need are collected once, warped once per output grid into an uncompressed stack in the call's scratch directory, and each product is cut from it with a band-subset VRT. `_warp_sentinel_s2_rgb` keeps its old signature (the notebooks call it) and delegates to the new `_warp_sentinel_s2_bands`. New option `intermediate_compression` (default none).
+  - **Grouping rule, found the hard way.** Sharing one stack changed the output when `target_resolution` was coarser than the scene: GDAL then warps from source overviews, and *which* overview it reads depends on the bands in the stack (at 60 m: every pixel differed, max 3210 DN; with `overviewLevel="NONE"` both agreed, but that costs 11.5 s instead of 1.5 s, which would undo P1). So products whose request is coarser than their native resolution keep a stack of their own. Verified: not the chunking (`warpMemoryLimit` made no difference), not the VRT grid (all 10 m, same origin), not compression or interleave (byte-identical).
+  - **Outputs verified identical** to the pre-change code on both real scenes, all three products, for: defaults (10 m), `histogram_stretch=False`, and `target_resolution=60` - pixels, profile, overviews, colour interpretation, tags and overview reads.
+  - **Speed** (8 pinned cores, serial products, cache 256 MB): a three-product scene 127.9 → 48.8 s (T34VEP) and 126.9 → 49.1 s (T35VPE), CPU 382 → 194 s, peak RSS ~1.5 GB either way. 60 m quicklook 6.2 → 5.1 s. Batch (16 cores, 16 scenes, no failures): 8 workers × 2 threads **282 scenes/h** at 7.6 GB (was 133/h), 16 × 1 thread 262/h at 6.6 GB (was 148/h), 4 × 4 threads 222/h at 5.4 GB.
+  - **Also fixed:** `gdal_runtime` restored a `GDAL_NUM_THREADS` that came from the environment as an explicit config option, so it outlived the env var and could trigger the threads-mode warning in an unrelated later call.
+  - Still open from phase 4: P1 (quicklook preset), P5 (S1 polynomial), P6/P7 (percentiles from a decimated read), P8 (COG). Phases 2, 3 and 5 are untouched; **phase 2 (the `examples/` runner) is next**.

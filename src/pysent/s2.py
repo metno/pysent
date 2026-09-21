@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -17,6 +18,7 @@ from ._runtime import (
     atomic_output,
     available_cpus,
     gdal_errors,
+    gdal_runtime,
     resolve_gdal_runtime,
     resolve_work_dir,
     run_product_jobs,
@@ -228,11 +230,11 @@ def _collect_sentinel_s2_band_sources(input_dataset: str) -> dict[str, dict[str,
     return out
 
 
-def _resolve_selected_band_sources(
-    input_dataset: str,
-    band_names: tuple[str, str, str],
+def _select_band_sources(
+    sources: dict[str, dict[str, object]],
+    band_names: Sequence[str],
 ) -> tuple[list[dict[str, object]], str | None, float | None]:
-    sources = _collect_sentinel_s2_band_sources(input_dataset)
+    """Pick the requested bands out of an already collected scene, with their common grid."""
     selected: list[dict[str, object]] = []
     resolutions: list[float] = []
     epsgs: list[str] = []
@@ -252,12 +254,22 @@ def _resolve_selected_band_sources(
     return selected, target_epsg, target_resolution
 
 
+def _resolve_selected_band_sources(
+    input_dataset: str,
+    band_names: Sequence[str],
+) -> tuple[list[dict[str, object]], str | None, float | None]:
+    return _select_band_sources(_collect_sentinel_s2_band_sources(input_dataset), band_names)
+
+
 def _build_sentinel_s2_stack_vrt(
     input_dataset: str,
-    band_names: tuple[str, str, str],
+    band_names: Sequence[str],
     vrt_path: Path,
+    sources: dict[str, dict[str, object]] | None = None,
 ) -> tuple[str | None, float | None, list[Path]]:
-    selected_sources, target_epsg, target_resolution = _resolve_selected_band_sources(input_dataset, band_names)
+    if sources is None:
+        sources = _collect_sentinel_s2_band_sources(input_dataset)
+    selected_sources, target_epsg, target_resolution = _select_band_sources(sources, band_names)
     single_band_vrts: list[Path] = []
     try:
         for position, source in enumerate(selected_sources, start=1):
@@ -279,7 +291,7 @@ def _build_sentinel_s2_stack_vrt(
                 options=gdal.BuildVRTOptions(separate=True, resolution="highest", srcNodata=0, VRTNodata=0),
             )
         if stacked is None:
-            raise RuntimeError(f"Unable to build Sentinel-2 RGB VRT for {', '.join(band_names)}")
+            raise RuntimeError(f"Unable to build Sentinel-2 band VRT for {', '.join(band_names)}")
         stacked = None
         return target_epsg, target_resolution, single_band_vrts
     except Exception:
@@ -288,9 +300,9 @@ def _build_sentinel_s2_stack_vrt(
         raise
 
 
-def _warp_sentinel_s2_rgb(
+def _warp_sentinel_s2_bands(
     input_dataset: str,
-    band_names: tuple[str, str, str],
+    band_names: Sequence[str],
     warped_path: Path,
     *,
     target_epsg: str | None,
@@ -299,11 +311,26 @@ def _warp_sentinel_s2_rgb(
     block_size: int,
     gdal_num_threads: str,
     warp_memory_limit_mb: float | None,
+    sources: dict[str, dict[str, object]] | None = None,
+    compression: str = "LZW",
+    interleave: str = "PIXEL",
 ) -> tuple[str | None, float | None]:
+    """Warp the given bands of a SAFE product into one stacked GeoTIFF."""
     vrt_path = warped_path.with_name(f"{warped_path.stem}.stack.vrt")
-    resolved_epsg, resolved_resolution, child_vrts = _build_sentinel_s2_stack_vrt(input_dataset, band_names, vrt_path)
+    resolved_epsg, resolved_resolution, child_vrts = _build_sentinel_s2_stack_vrt(
+        input_dataset, band_names, vrt_path, sources
+    )
     effective_epsg = (target_epsg or resolved_epsg or "").strip() or None
     effective_resolution = float(target_resolution or resolved_resolution or 10.0)
+    creation_options = [
+        "TILED=YES",
+        f"BLOCKXSIZE={block_size}",
+        f"BLOCKYSIZE={block_size}",
+        "BIGTIFF=IF_SAFER",
+        f"INTERLEAVE={interleave}",
+    ]
+    if compression and compression.upper() not in {"NONE", "NO"}:
+        creation_options.insert(0, f"COMPRESS={compression.upper()}")
     try:
         try:
             with gdal_errors():
@@ -322,14 +349,7 @@ def _warp_sentinel_s2_rgb(
                         outputType=gdal.GDT_UInt16,
                         warpOptions=[f"NUM_THREADS={gdal_num_threads}"],
                         warpMemoryLimit=warp_memory_limit_mb,
-                        creationOptions=[
-                            "COMPRESS=LZW",
-                            "TILED=YES",
-                            f"BLOCKXSIZE={block_size}",
-                            f"BLOCKYSIZE={block_size}",
-                            "BIGTIFF=IF_SAFER",
-                            "INTERLEAVE=PIXEL",
-                        ],
+                        creationOptions=creation_options,
                     ),
                 )
         except RuntimeError as exc:
@@ -342,6 +362,32 @@ def _warp_sentinel_s2_rgb(
         vrt_path.unlink(missing_ok=True)
         for path in child_vrts:
             path.unlink(missing_ok=True)
+
+
+def _warp_sentinel_s2_rgb(
+    input_dataset: str,
+    band_names: tuple[str, str, str],
+    warped_path: Path,
+    *,
+    target_epsg: str | None,
+    target_resolution: float | None,
+    resample_alg: str,
+    block_size: int,
+    gdal_num_threads: str,
+    warp_memory_limit_mb: float | None,
+) -> tuple[str | None, float | None]:
+    """Warp one product's three bands into an LZW-compressed GeoTIFF."""
+    return _warp_sentinel_s2_bands(
+        input_dataset,
+        band_names,
+        warped_path,
+        target_epsg=target_epsg,
+        target_resolution=target_resolution,
+        resample_alg=resample_alg,
+        block_size=block_size,
+        gdal_num_threads=gdal_num_threads,
+        warp_memory_limit_mb=warp_memory_limit_mb,
+    )
 
 
 def stretch_sentinel_s2_rgb(
@@ -534,77 +580,159 @@ def _write_stretched_sentinel_s2_rgb_percentile(
 
 def _process_sentinel_s2_product(
     *,
-    input_dataset: str,
     product_name: str,
     band_names: tuple[str, str, str],
     output_path: str,
-    work_dir: str | None,
-    target_epsg: str | None,
-    target_resolution: float | None,
-    resample_alg: str,
+    stack: dict[str, Any] | BaseException,
     block_size: int,
-    gdal_num_threads: str,
-    warp_memory_limit_mb: float | None,
     histogram_stretch: bool,
     percentiles: tuple[float, float],
     compression: str,
     overview_factors: tuple[int, ...],
 ) -> dict[str, Any]:
+    """Write one RGB product by selecting its three bands from the scene's warped stack."""
+    if isinstance(stack, BaseException):
+        raise stack  # the shared warp failed; every product of that grid reports it
     final_path = Path(output_path)
-    scratch_root = Path(work_dir) if work_dir else final_path.parent
+    stack_path = Path(str(stack["stack_path"]))
+    # A band-subset VRT costs nothing to build and lets the writers work unchanged.
+    subset_path = stack_path.with_name(f"{stack_path.stem}.{_sanitize_name_fragment(product_name).lower()}.vrt")
     stretch_stats: dict[str, list[float]] | None = None
-    # Intermediates live in a private scratch directory and the final file is
-    # moved into place only once complete, so a failure or a kill leaves neither
-    # stray intermediates nor a truncated output under the final name.
-    with scratch_dir(scratch_root) as scratch, atomic_output(final_path) as partial_path:
-        warped_path = scratch / f"{final_path.stem}.warp.tif"
-        effective_epsg, effective_resolution = _warp_sentinel_s2_rgb(
-            input_dataset,
-            band_names,
-            warped_path,
-            target_epsg=target_epsg,
-            target_resolution=target_resolution,
-            resample_alg=resample_alg,
-            block_size=block_size,
-            gdal_num_threads=gdal_num_threads,
-            warp_memory_limit_mb=warp_memory_limit_mb,
-        )
-        if histogram_stretch:
-            stretch_stats = _write_stretched_sentinel_s2_rgb(
-                warped_path,
-                partial_path,
-                percentiles=percentiles,
-                block_size=block_size,
-                overview_factors=overview_factors,
-                compression=compression,
+    try:
+        with gdal_errors():
+            selected = gdal.Translate(
+                str(subset_path),
+                str(stack_path),
+                options=gdal.TranslateOptions(format="VRT", bandList=list(stack["band_indexes"])),
             )
-        else:
-            _translate_sentinel_s2_rgb(
-                warped_path,
-                partial_path,
-                compression=compression,
-                block_size=block_size,
-                overview_factors=overview_factors,
-            )
-        warped_path.unlink(missing_ok=True)
+        if selected is None:
+            raise RuntimeError(f"Unable to select bands {', '.join(band_names)} from the Sentinel-2 stack")
+        selected = None
 
-        dataset = gdal.Open(str(partial_path), gdal.GA_Update)
-        if dataset is not None:
-            for band_index, color in enumerate((gdal.GCI_RedBand, gdal.GCI_GreenBand, gdal.GCI_BlueBand), start=1):
-                band = dataset.GetRasterBand(band_index)
-                if band is not None:
-                    band.SetColorInterpretation(color)
-        dataset = None
+        # The final file is moved into place only once complete, so a failure or a
+        # kill leaves no truncated output under the final name.
+        with atomic_output(final_path) as partial_path:
+            if histogram_stretch:
+                stretch_stats = _write_stretched_sentinel_s2_rgb(
+                    subset_path,
+                    partial_path,
+                    percentiles=percentiles,
+                    block_size=block_size,
+                    overview_factors=overview_factors,
+                    compression=compression,
+                )
+            else:
+                _translate_sentinel_s2_rgb(
+                    subset_path,
+                    partial_path,
+                    compression=compression,
+                    block_size=block_size,
+                    overview_factors=overview_factors,
+                )
+            dataset = gdal.Open(str(partial_path), gdal.GA_Update)
+            if dataset is not None:
+                for band_index, color in enumerate((gdal.GCI_RedBand, gdal.GCI_GreenBand, gdal.GCI_BlueBand), start=1):
+                    band = dataset.GetRasterBand(band_index)
+                    if band is not None:
+                        band.SetColorInterpretation(color)
+            dataset = None
+    finally:
+        subset_path.unlink(missing_ok=True)
     return {
         "product_name": product_name,
         "bands": list(band_names),
         "path": str(final_path),
         "output_file": final_path.name,
-        "target_epsg": effective_epsg,
-        "target_resolution": effective_resolution,
+        "target_epsg": stack["target_epsg"],
+        "target_resolution": stack["target_resolution"],
         "histogram_stretch": histogram_stretch,
         "stretch": stretch_stats,
     }
+
+
+def _sentinel_s2_band_union(product_bands: Mapping[str, tuple[str, str, str]], product_names: Sequence[str]) -> tuple[str, ...]:
+    """Every band the given products need, in first-use order."""
+    union: list[str] = []
+    for name in product_names:
+        for band in product_bands[name]:
+            if band not in union:
+                union.append(band)
+    return tuple(union)
+
+
+def _prepare_sentinel_s2_stacks(
+    input_dataset: str,
+    product_bands: Mapping[str, tuple[str, str, str]],
+    product_names: Sequence[str],
+    scratch: Path,
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    """Warp the bands the scene needs once per output grid.
+
+    All the default products share bands (B3 is in all three), and each product
+    used to decode and warp its own copy. Products are grouped by the grid they
+    would be warped to - the same ``(CRS, resolution)`` each would have resolved
+    on its own - so grouping cannot change any output.
+
+    One exception: when the request is coarser than the scene's own resolution,
+    GDAL warps from source overviews, and which overview it reads depends on the
+    bands in the stack. Such products keep a stack of their own, so their output
+    stays exactly what a per-product warp produced.
+
+    Returns a mapping of product name to its stack (path, band indexes, grid),
+    or to the exception that prevented it, so each product keeps its own status.
+    """
+    try:
+        sources = _collect_sentinel_s2_band_sources(input_dataset)
+    except Exception as exc:
+        return dict.fromkeys(product_names, exc)
+
+    prepared: dict[str, Any] = {}
+    grids: dict[tuple[str | None, float], list[str]] = {}
+    for name in product_names:
+        try:
+            _, resolved_epsg, resolved_resolution = _select_band_sources(sources, product_bands[name])
+        except Exception as exc:
+            prepared[name] = exc
+            continue
+        epsg = (settings["target_epsg"] or resolved_epsg or "").strip() or None
+        resolution = float(settings["target_resolution"] or resolved_resolution or 10.0)
+        native = float(resolved_resolution or resolution)
+        # Downsampling reads source overviews, whose choice depends on the stack's
+        # bands: keep such a product on its own so its output does not change.
+        key: tuple = (epsg, resolution) if resolution <= native else (epsg, resolution, name)
+        grids.setdefault(key, []).append(name)
+
+    for index, (grid, names) in enumerate(grids.items(), start=1):
+        epsg, resolution = grid[0], grid[1]
+        band_names = _sentinel_s2_band_union(product_bands, names)
+        stack_path = scratch / f"stack{index}.warp.tif"
+        try:
+            _warp_sentinel_s2_bands(
+                input_dataset,
+                band_names,
+                stack_path,
+                target_epsg=epsg,
+                target_resolution=resolution,
+                resample_alg=settings["resample_alg"],
+                block_size=settings["block_size"],
+                gdal_num_threads=settings["gdal_num_threads"],
+                warp_memory_limit_mb=settings["warp_memory_limit_mb"],
+                sources=sources,
+                compression=settings["intermediate_compression"],
+                interleave="BAND",
+            )
+        except Exception as exc:
+            prepared.update(dict.fromkeys(names, exc))
+            continue
+        for name in names:
+            prepared[name] = {
+                "stack_path": str(stack_path),
+                "band_indexes": [band_names.index(band) + 1 for band in product_bands[name]],
+                "target_epsg": epsg,
+                "target_resolution": resolution,
+            }
+    return prepared
 
 
 def _resolve_sentinel_s2_processing_settings(
@@ -625,6 +753,9 @@ def _resolve_sentinel_s2_processing_settings(
         target_resolution = None
     resample_alg = str(processing.get("resample_alg") or "bilinear")
     compression = str(processing.get("compression") or "DEFLATE")
+    # The scene stack is read once per product and deleted; compressing it costs
+    # more time than the extra scratch space is usually worth.
+    intermediate_compression = str(processing.get("intermediate_compression") or "NONE")
     parallel_mode = str(processing.get("parallel_mode") or os.environ.get("S2_PARALLEL_MODE") or "threads").strip().lower()
     if parallel_mode not in SERIAL_MODES:
         # S2 has only ever fanned out over threads; "processes" keeps meaning threads here.
@@ -646,6 +777,7 @@ def _resolve_sentinel_s2_processing_settings(
         "histogram_stretch": histogram_enabled,
         "percentiles": percentiles,
         "compression": compression,
+        "intermediate_compression": intermediate_compression,
         "overview_factors": overview_factors,
         "block_size": block_size,
         "parallel_mode": parallel_mode,
@@ -667,12 +799,20 @@ def process_sentinel_s2_safe(
 ) -> list[dict[str, Any]]:
     """Generate RGB band-combination GeoTIFFs from a Sentinel-2 SAFE product.
 
+    The bands the requested products need are decoded and warped **once per
+    scene** (grouped by output grid), then each product is cut from that stack.
+
     Options for unattended and bulk runs, all in ``processing_options``:
 
     ``work_dir``
-        Where intermediates are written (default: ``output_dir``). Each product
-        gets its own temporary directory there, removed on success and failure.
-        Outputs appear under their final name only once complete.
+        Where intermediates are written (default: ``output_dir``). The scene's
+        stack lives in a temporary directory there, removed on success and
+        failure. Budget about 2 bytes per pixel per band needed: roughly 1.2 GB
+        for the three default products of a 10 m scene. Outputs appear under
+        their final name only once complete.
+    ``intermediate_compression``
+        Compression of that stack (default: none, the fastest). Set e.g.
+        ``"LZW"`` when scratch space matters more than time.
     ``gdal_num_threads``
         GDAL threads per product for the warp and, when products run one at a
         time (``serial``), also ``GDAL_NUM_THREADS`` for JP2 decoding and
@@ -681,7 +821,7 @@ def process_sentinel_s2_safe(
     ``gdal_cachemax_mb``
         GDAL block cache for the duration of the call (default: ``GDAL_CACHEMAX``).
     ``parallel_mode``
-        ``threads`` (default) or ``serial``.
+        ``threads`` (default) or ``serial``, for the per-product stretch.
 
     Every requested product is attempted. If one of several fails,
     :class:`pysent.errors.PartialFailure` is raised after the rest finish. A
@@ -690,33 +830,33 @@ def process_sentinel_s2_safe(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     settings = _resolve_sentinel_s2_processing_settings(processing_options, output_count=len(output_names))
-    jobs = [
-        (
-            product_name,
-            {
-                "input_dataset": input_dataset,
-                "product_name": product_name,
-                "band_names": product_bands[product_name],
-                "output_path": str(output_dir / output_name),
-                "work_dir": settings["work_dir"],
-                "target_epsg": settings["target_epsg"],
-                "target_resolution": settings["target_resolution"],
-                "resample_alg": settings["resample_alg"],
-                "block_size": settings["block_size"],
-                "gdal_num_threads": settings["gdal_num_threads"],
-                "warp_memory_limit_mb": settings["warp_memory_limit_mb"],
-                "histogram_stretch": settings["histogram_stretch"],
-                "percentiles": settings["percentiles"],
-                "compression": settings["compression"],
-                "overview_factors": settings["overview_factors"],
-            },
+    scratch_root = Path(settings["work_dir"]) if settings["work_dir"] else output_dir
+    product_names = list(output_names)
+
+    with scratch_dir(scratch_root) as scratch:
+        with gdal_runtime(**settings["runtime"]):
+            stacks = _prepare_sentinel_s2_stacks(input_dataset, product_bands, product_names, scratch, settings)
+        jobs = [
+            (
+                product_name,
+                {
+                    "product_name": product_name,
+                    "band_names": product_bands[product_name],
+                    "output_path": str(output_dir / output_names[product_name]),
+                    "stack": stacks[product_name],
+                    "block_size": settings["block_size"],
+                    "histogram_stretch": settings["histogram_stretch"],
+                    "percentiles": settings["percentiles"],
+                    "compression": settings["compression"],
+                    "overview_factors": settings["overview_factors"],
+                },
+            )
+            for product_name in product_names
+        ]
+        return run_product_jobs(
+            _process_sentinel_s2_product,
+            jobs,
+            parallel_mode=settings["parallel_mode"],
+            workers=settings["product_workers"],
+            runtime=settings["runtime"],
         )
-        for product_name, output_name in output_names.items()
-    ]
-    return run_product_jobs(
-        _process_sentinel_s2_product,
-        jobs,
-        parallel_mode=settings["parallel_mode"],
-        workers=settings["product_workers"],
-        runtime=settings["runtime"],
-    )

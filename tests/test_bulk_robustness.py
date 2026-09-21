@@ -51,33 +51,81 @@ def _files(root: Path) -> list[str]:
     return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
 
 
-class FakeS2Warp:
-    """Stands in for ``_warp_sentinel_s2_rgb``; records what the pipeline looked like mid-product."""
+# Band resolutions of a real S2 product, so grid grouping behaves as it would on a scene.
+_BAND_RESOLUTION = {
+    "B1": 60.0, "B2": 10.0, "B3": 10.0, "B4": 10.0, "B5": 20.0, "B6": 20.0, "B7": 20.0,
+    "B8": 10.0, "B8A": 20.0, "B9": 60.0, "B10": 60.0, "B11": 20.0, "B12": 20.0,
+}
+FAKE_SOURCES = {
+    band: {"subdataset_name": f"FAKE:{band}", "band_index": 1, "resolution": resolution, "epsg": "EPSG:32633"}
+    for band, resolution in _BAND_RESOLUTION.items()
+}
 
-    def __init__(self, *, fail_for: tuple[tuple[str, str, str], ...] = (), fill: int | None = None):
+
+class FakeS2Stack:
+    """Stands in for the scene warp: writes one raster band per requested band.
+
+    Band *k* carries the marker value ``1000 * k``, so a product's output shows
+    which bands of the stack it actually read.
+    """
+
+    def __init__(self, *, fail_for: tuple[str, ...] = (), fill: int | None = None, marker: bool = False):
         self.fail_for = fail_for
         self.fill = fill
+        self.marker = marker
         self.calls: list[dict] = []
 
-    def __call__(self, input_dataset, band_names, warped_path, **kwargs):
+    def __call__(self, input_dataset, band_names, warped_path, *, target_epsg=None, target_resolution=None, **kwargs):
+        band_names = tuple(band_names)
         self.calls.append({
+            "band_names": band_names,
             "warped_path": Path(warped_path),
+            "target_epsg": target_epsg,
+            "target_resolution": target_resolution,
+            "compression": kwargs.get("compression"),
             "GDAL_NUM_THREADS": gdal.GetConfigOption("GDAL_NUM_THREADS"),
             "cachemax": gdal.GetCacheMax(),
         })
-        _write_raster(Path(warped_path), _rgb(self.fill))  # the intermediate exists before any failure
-        if band_names in self.fail_for:
+        stack = np.zeros((len(band_names), 64, 64), dtype="uint16")
+        for index in range(len(band_names)):
+            if self.fill is not None:
+                stack[index] = self.fill
+            elif self.marker:
+                stack[index] = 1000 * (index + 1)
+            else:
+                stack[index] = np.random.default_rng(index).integers(1, 9000, size=(64, 64)).astype("uint16")
+                stack[index, :8, :] = 0  # nodata strip
+        _write_raster(Path(warped_path), stack)  # the intermediate exists before any failure
+        if any(band in self.fail_for for band in band_names):
             raise RuntimeError("simulated warp failure")
-        return "EPSG:32633", 10.0
+        return target_epsg, target_resolution
 
 
 @pytest.fixture
 def fake_s2_warp(monkeypatch):
-    def install(**kwargs) -> FakeS2Warp:
-        fake = FakeS2Warp(**kwargs)
-        monkeypatch.setattr(s2, "_warp_sentinel_s2_rgb", fake)
+    def install(**kwargs) -> FakeS2Stack:
+        fake = FakeS2Stack(**kwargs)
+        monkeypatch.setattr(s2, "_collect_sentinel_s2_band_sources", lambda dataset: dict(FAKE_SOURCES))
+        monkeypatch.setattr(s2, "_warp_sentinel_s2_bands", fake)
         return fake
     return install
+
+
+@pytest.fixture
+def record_product_writes(monkeypatch):
+    """Record the GDAL settings seen while each product is written."""
+    calls: list[dict] = []
+    real_writer = s2._write_stretched_sentinel_s2_rgb
+
+    def writer(subset_path, output_path, **kwargs):
+        calls.append({
+            "GDAL_NUM_THREADS": gdal.GetConfigOption("GDAL_NUM_THREADS"),
+            "cachemax": gdal.GetCacheMax(),
+        })
+        return real_writer(subset_path, output_path, **kwargs)
+
+    monkeypatch.setattr(s2, "_write_stretched_sentinel_s2_rgb", writer)
+    return calls
 
 
 def run_s2(output_dir: Path, products=S2_PRODUCTS[:1], **options):
@@ -115,7 +163,7 @@ def test_s2_intermediates_go_to_work_dir(tmp_path, fake_s2_warp):
 
 @pytest.mark.parametrize("work_dir", [None, "scratch"])
 def test_s2_failed_warp_leaves_no_intermediates(tmp_path, fake_s2_warp, work_dir):
-    fake_s2_warp(fail_for=(s2.S2_DEFAULT_PRODUCTS["true_color_vegetation"],))
+    fake_s2_warp(fail_for=("B4",))
     options = {"work_dir": str(tmp_path / work_dir)} if work_dir else {}
     with pytest.raises(RuntimeError, match="simulated warp failure"):
         run_s2(tmp_path / "out", **options)
@@ -145,8 +193,9 @@ KILLED_MID_WRITE = textwrap.dedent('''
     from pysent import s2
 
     def fake_warp(input_dataset, band_names, warped_path, **kwargs):
-        data = np.random.default_rng(0).integers(1, 9000, size=(3, 256, 256)).astype("uint16")
-        with rasterio.open(warped_path, "w", driver="GTiff", height=256, width=256, count=3, dtype="uint16",
+        bands = len(tuple(band_names))
+        data = np.random.default_rng(0).integers(1, 9000, size=(bands, 256, 256)).astype("uint16")
+        with rasterio.open(warped_path, "w", driver="GTiff", height=256, width=256, count=bands, dtype="uint16",
                            crs="EPSG:32633", transform=from_origin(0, 1000, 10, 10), nodata=0) as dst:
             dst.write(data)
         return "EPSG:32633", 10.0
@@ -158,7 +207,11 @@ KILLED_MID_WRITE = textwrap.dedent('''
         os.truncate(output_path, os.path.getsize(output_path) // 2)
         os.kill(os.getpid(), signal.SIGKILL)  # OOM killer / Slurm time limit, mid-write
 
-    s2._warp_sentinel_s2_rgb = fake_warp
+    s2._collect_sentinel_s2_band_sources = lambda dataset: {
+        band: {"subdataset_name": "FAKE", "band_index": 1, "resolution": 10.0, "epsg": "EPSG:32633"}
+        for band in s2.S2_SUPPORTED_BANDS
+    }
+    s2._warp_sentinel_s2_bands = fake_warp
     s2._write_stretched_sentinel_s2_rgb = killed_writer
     name = "true_color_vegetation"
     s2.process_sentinel_s2_safe(
@@ -209,6 +262,68 @@ def test_s1_success_writes_final_output_only(tmp_path, monkeypatch):
     assert [r["variable"] for r in results] == ["Amplitude_VV", "Amplitude_VH"]
     assert _files(tmp_path / "out") == ["scene_vh.tif", "scene_vv.tif"]
     assert _files(tmp_path / "scratch") == []
+
+
+# --------------------------------------------------------------------------- #
+# P2/P4: one warp per scene
+# --------------------------------------------------------------------------- #
+def test_scene_bands_are_warped_once_for_all_products(tmp_path, fake_s2_warp):
+    # The three default products share bands (B3 in all three, B4 and B8A in two);
+    # warping per product decoded them again each time.
+    fake = fake_s2_warp()
+    results = run_s2(tmp_path / "out", S2_PRODUCTS)
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["band_names"] == ("B4", "B3", "B2", "B12", "B8A")
+    assert fake.calls[0]["compression"] == "NONE"  # the stack is read once and deleted
+    assert len(results) == 3
+    assert _files(tmp_path / "out") == sorted(f"scene_{name}.tif" for name in S2_PRODUCTS)
+
+
+def test_products_on_different_grids_get_their_own_stack(tmp_path, fake_s2_warp):
+    # A 20 m-only product must not be dragged onto the 10 m grid of another product.
+    fake = fake_s2_warp()
+    s2.process_sentinel_s2_safe(
+        input_dataset="unused.zip",
+        output_dir=tmp_path / "out",
+        product_bands={"ten": ("B4", "B3", "B2"), "twenty": ("B12", "B11", "B8A")},
+        output_names={"ten": "ten.tif", "twenty": "twenty.tif"},
+        processing_options={"histogram_stretch": True, "overview_factors": [2]},
+    )
+    assert [call["target_resolution"] for call in fake.calls] == [10.0, 20.0]
+    assert [call["band_names"] for call in fake.calls] == [("B4", "B3", "B2"), ("B12", "B11", "B8A")]
+
+
+def test_coarser_target_resolution_keeps_one_stack_per_product(tmp_path, fake_s2_warp):
+    # Downsampling warps from source overviews, and which one GDAL picks depends
+    # on the bands in the stack, so sharing there would change the output.
+    fake = fake_s2_warp()
+    run_s2(tmp_path / "out", S2_PRODUCTS, target_resolution=60)
+    assert len(fake.calls) == 3
+    assert [call["band_names"] for call in fake.calls] == [s2.S2_DEFAULT_PRODUCTS[name] for name in S2_PRODUCTS]
+    assert {call["target_resolution"] for call in fake.calls} == {60.0}
+
+
+def test_each_product_reads_its_own_bands_from_the_stack(tmp_path, fake_s2_warp):
+    # Stack band k holds 1000 * k; without the stretch those values pass through,
+    # so the output proves which stack bands the product selected, and in what order.
+    fake_s2_warp(marker=True)
+    results = run_s2(tmp_path / "out", S2_PRODUCTS, histogram_stretch=False)
+    stack_bands = ("B4", "B3", "B2", "B12", "B8A")
+    for result in results:
+        with rasterio.open(result["path"]) as ds:
+            values = [int(ds.read(index)[32, 32]) for index in (1, 2, 3)]
+        assert values == [1000 * (stack_bands.index(band) + 1) for band in result["bands"]]
+
+
+def test_failed_scene_warp_fails_every_product_of_that_grid(tmp_path, fake_s2_warp):
+    from pysent.errors import PartialFailure
+
+    fake_s2_warp(fail_for=("B3",))
+    with pytest.raises(PartialFailure) as caught:
+        run_s2(tmp_path / "out", S2_PRODUCTS)
+    assert sorted(caught.value.errors) == sorted(S2_PRODUCTS)
+    assert caught.value.results == []
+    assert _files(tmp_path / "out") == []
 
 
 # --------------------------------------------------------------------------- #
@@ -336,27 +451,31 @@ def test_processes_mode_runs_serial_inside_a_worker_process():
     assert settings["parallel_mode"] == "serial"
 
 
-def test_gdal_threads_and_cache_apply_while_products_run(tmp_path, fake_s2_warp, monkeypatch):
+def test_gdal_threads_and_cache_apply_while_products_run(tmp_path, fake_s2_warp, record_product_writes, monkeypatch):
     monkeypatch.delenv("GDAL_NUM_THREADS", raising=False)
     cache_before = gdal.GetCacheMax()
     fake = fake_s2_warp()
     run_s2(tmp_path / "out", S2_PRODUCTS, gdal_num_threads=3, gdal_cachemax_mb=37, parallel_mode="serial")
-    assert [call["GDAL_NUM_THREADS"] for call in fake.calls] == ["3", "3", "3"]
-    assert {call["cachemax"] for call in fake.calls} == {37 * 2**20}
+    # The scene warp and the products all run one at a time here.
+    assert [call["GDAL_NUM_THREADS"] for call in fake.calls] == ["3"]
+    assert [call["GDAL_NUM_THREADS"] for call in record_product_writes] == ["3", "3", "3"]
+    assert {call["cachemax"] for call in fake.calls + record_product_writes} == {37 * 2**20}
     # Restored afterwards.
     assert gdal.GetConfigOption("GDAL_NUM_THREADS") is None
     assert gdal.GetCacheMax() == cache_before
 
 
-def test_products_in_parallel_threads_leave_gdal_num_threads_unset(tmp_path, fake_s2_warp, monkeypatch):
+def test_products_in_parallel_threads_leave_gdal_num_threads_unset(tmp_path, fake_s2_warp, record_product_writes, monkeypatch):
     # GDAL_NUM_THREADS turns on multi-threaded GeoTIFF compression; with several
     # products writing from threads of one process, GDAL 3.8 segfaults in
-    # GDALRasterBlock::Internalize() within a few real scenes.
+    # GDALRasterBlock::Internalize() within a few real scenes. The scene warp
+    # before them is a single GDAL call, so it keeps the setting.
     monkeypatch.delenv("GDAL_NUM_THREADS", raising=False)
     fake = fake_s2_warp()
     run_s2(tmp_path / "out", S2_PRODUCTS, gdal_num_threads=3, gdal_cachemax_mb=37, parallel_workers=3)
-    assert [call["GDAL_NUM_THREADS"] for call in fake.calls] == [None, None, None]
-    assert {call["cachemax"] for call in fake.calls} == {37 * 2**20}
+    assert [call["GDAL_NUM_THREADS"] for call in fake.calls] == ["3"]
+    assert [call["GDAL_NUM_THREADS"] for call in record_product_writes] == [None, None, None]
+    assert {call["cachemax"] for call in record_product_writes} == {37 * 2**20}
 
 
 def test_user_gdal_num_threads_with_parallel_products_warns(tmp_path, fake_s2_warp, monkeypatch):
@@ -380,6 +499,9 @@ def test_user_gdal_num_threads_is_kept_unless_an_option_overrides_it(tmp_path, f
     run_s2(tmp_path / "a")
     run_s2(tmp_path / "b", gdal_num_threads=5)
     assert [call["GDAL_NUM_THREADS"] for call in fake.calls] == ["2", "5"]
+    # Restoring must not leave the environment's value behind as a config option.
+    monkeypatch.delenv("GDAL_NUM_THREADS")
+    assert gdal.GetConfigOption("GDAL_NUM_THREADS") is None
 
 
 # --------------------------------------------------------------------------- #
@@ -400,10 +522,18 @@ def test_s2_empty_scene_raises_empty_scene_error(tmp_path, fake_s2_warp):
 
 
 @pytest.mark.parametrize("parallel_mode", ["threads", "serial"])
-def test_one_failed_product_does_not_discard_the_others(tmp_path, fake_s2_warp, parallel_mode):
+def test_one_failed_product_does_not_discard_the_others(tmp_path, fake_s2_warp, parallel_mode, monkeypatch):
     from pysent.errors import PartialFailure
 
-    fake_s2_warp(fail_for=(s2.S2_DEFAULT_PRODUCTS["false_color_glacier"],))
+    fake_s2_warp()
+    real_writer = s2._write_stretched_sentinel_s2_rgb
+
+    def writer(subset_path, output_path, **kwargs):
+        if "false_color_glacier" in Path(output_path).name:
+            raise RuntimeError("simulated warp failure")
+        return real_writer(subset_path, output_path, **kwargs)
+
+    monkeypatch.setattr(s2, "_write_stretched_sentinel_s2_rgb", writer)
     with pytest.raises(PartialFailure) as caught:
         run_s2(tmp_path / "out", S2_PRODUCTS, parallel_mode=parallel_mode)
     failure = caught.value
