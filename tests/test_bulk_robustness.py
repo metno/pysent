@@ -327,6 +327,41 @@ def test_failed_scene_warp_fails_every_product_of_that_grid(tmp_path, fake_s2_wa
 
 
 # --------------------------------------------------------------------------- #
+# P1: the quicklook preset
+# --------------------------------------------------------------------------- #
+def test_quicklook_preset_moves_the_output_grid(tmp_path, fake_s2_warp):
+    fake = fake_s2_warp()
+    run_s2(tmp_path / "out", preset="quicklook")
+    assert fake.calls[0]["target_resolution"] == 60.0
+
+    settings = s1._resolve_sentinel_s1_processing_settings({"preset": "quicklook"}, output_count=1)
+    assert settings["target_resolution"] == 160.0
+
+
+def test_an_explicit_option_beats_the_preset(tmp_path, fake_s2_warp):
+    fake = fake_s2_warp()
+    run_s2(tmp_path / "out", preset="quicklook", target_resolution=20)
+    assert fake.calls[0]["target_resolution"] == 20.0
+
+
+def test_the_default_preset_changes_nothing(tmp_path, fake_s2_warp):
+    fake = fake_s2_warp()
+    run_s2(tmp_path / "out")
+    assert fake.calls[0]["target_resolution"] == 10.0  # the scene's own resolution
+
+
+@pytest.mark.parametrize("module", [s1, s2])
+def test_an_unknown_preset_is_rejected(module):
+    resolve = (
+        module._resolve_sentinel_s1_processing_settings
+        if module is s1
+        else module._resolve_sentinel_s2_processing_settings
+    )
+    with pytest.raises(ValueError, match="preset"):
+        resolve({"preset": "thumbnail"}, output_count=1)
+
+
+# --------------------------------------------------------------------------- #
 # B9: options that used to do nothing
 # --------------------------------------------------------------------------- #
 def _fake_s1_warp(recorder: list):
@@ -522,7 +557,8 @@ def test_products_in_parallel_threads_leave_gdal_num_threads_unset(tmp_path, fak
     # before them is a single GDAL call, so it keeps the setting.
     monkeypatch.delenv("GDAL_NUM_THREADS", raising=False)
     fake = fake_s2_warp()
-    run_s2(tmp_path / "out", S2_PRODUCTS, gdal_num_threads=3, gdal_cachemax_mb=37, parallel_workers=3)
+    run_s2(tmp_path / "out", S2_PRODUCTS, gdal_num_threads=3, gdal_cachemax_mb=37,
+           parallel_mode="threads", parallel_workers=3)
     assert [call["GDAL_NUM_THREADS"] for call in fake.calls] == ["3"]
     assert [call["GDAL_NUM_THREADS"] for call in record_product_writes] == [None, None, None]
     assert {call["cachemax"] for call in record_product_writes} == {37 * 2**20}
@@ -532,7 +568,7 @@ def test_user_gdal_num_threads_with_parallel_products_warns(tmp_path, fake_s2_wa
     monkeypatch.setenv("GDAL_NUM_THREADS", "4")
     fake_s2_warp()
     with pytest.warns(RuntimeWarning, match="GDAL_NUM_THREADS"):
-        run_s2(tmp_path / "out", S2_PRODUCTS, parallel_workers=3)
+        run_s2(tmp_path / "out", S2_PRODUCTS, parallel_mode="threads", parallel_workers=3)
 
 
 def test_gdal_cachemax_env_set_after_gdal_started_is_honoured(tmp_path, fake_s2_warp, monkeypatch):
@@ -675,3 +711,28 @@ def test_process_workers_get_the_gdal_settings():
         assert state["in_child"] and state["pid"] != os.getpid()
         assert state["GDAL_NUM_THREADS"] == "3"
         assert state["cachemax"] == 29 * 2**20
+
+
+# --------------------------------------------------------------------------- #
+# P8: one write at a time per process, so the write can use every core
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("module", [s1, s2])
+def test_products_run_serially_by_default(module, monkeypatch):
+    monkeypatch.delenv("S1_PARALLEL_MODE", raising=False)
+    monkeypatch.delenv("S2_PARALLEL_MODE", raising=False)
+    resolve = (
+        module._resolve_sentinel_s1_processing_settings
+        if module is s1
+        else module._resolve_sentinel_s2_processing_settings
+    )
+    assert resolve({}, output_count=3)["parallel_mode"] == "serial"
+    assert resolve({"parallel_mode": "threads"}, output_count=3)["parallel_mode"] == "threads"
+
+
+def test_serial_products_get_the_gdal_thread_budget(tmp_path, fake_s2_warp, record_product_writes, monkeypatch):
+    # Threaded GeoTIFF compression is where serial mode wins: 15.6 s -> 5.4 s per
+    # product on a real scene. It is safe only because nothing else writes at once.
+    monkeypatch.delenv("GDAL_NUM_THREADS", raising=False)
+    fake_s2_warp()
+    run_s2(tmp_path / "out", S2_PRODUCTS, gdal_num_threads=4)
+    assert [call["GDAL_NUM_THREADS"] for call in record_product_writes] == ["4", "4", "4"]

@@ -15,6 +15,7 @@ from osgeo import gdal
 from rasterio.enums import ColorInterp, Resampling
 
 from ._runtime import (
+    apply_preset,
     atomic_output,
     available_cpus,
     gdal_errors,
@@ -51,6 +52,11 @@ S1_SUPPORTED_AMPLITUDE_VARIABLES: tuple[str, ...] = (
 )
 S1_TARGET_EPSG = "EPSG:32661"
 S1_TARGET_RESOLUTION = 40.0
+# Presets only move the output grid; everything else stays at the defaults.
+S1_PRESETS: dict[str, dict[str, Any]] = {
+    "full": {},
+    "quicklook": {"target_resolution": 160.0},
+}
 S1_OVERVIEW_FACTORS: tuple[int, ...] = (2, 4, 8, 16)
 S1_STRETCH_PERCENTILES: tuple[float, float] = (2.0, 98.0)
 S1_NETCDF_IMPLEMENTATION = "sentinel_s1_quicklook"
@@ -609,7 +615,7 @@ def _resolve_sentinel_s1_processing_settings(
     *,
     output_count: int,
 ) -> dict[str, Any]:
-    processing = dict(processing_options or {})
+    processing = apply_preset(processing_options, S1_PRESETS)
     percentiles = _resolve_stretch_percentiles(processing)
     block_size = _coerce_positive_int(processing.get("block_size"), 256)
     overview_factors = _coerce_overview_factors(processing.get("overview_factors"))
@@ -618,7 +624,10 @@ def _resolve_sentinel_s1_processing_settings(
     resample_alg = str(processing.get("resample_alg") or "average")
     compression = str(processing.get("compression") or "JPEG")
     use_numba = _env_bool("S1_USE_NUMBA", default=False) if processing.get("use_numba") is None else bool(processing.get("use_numba"))
-    parallel_mode = str(processing.get("parallel_mode") or os.environ.get("S1_PARALLEL_MODE") or "threads").strip().lower()
+    # Serial by default: one GDAL write at a time per process is both faster
+    # (the write can then use every core for compression) and the only way the
+    # GDAL 3.8 concurrent-write crash cannot happen. See the phase 4 session log.
+    parallel_mode = str(processing.get("parallel_mode") or os.environ.get("S1_PARALLEL_MODE") or "serial").strip().lower()
     if parallel_mode == "processes" and in_child_process():
         # Already inside a worker process (a bulk runner's pool): a second pool
         # per scene would multiply processes, and CPU oversubscription with them.
@@ -733,10 +742,14 @@ def process_sentinel_s1_safe(
     ``gdal_cachemax_mb``
         GDAL block cache for the duration of the call (default: ``GDAL_CACHEMAX``).
     ``parallel_mode``
-        ``threads`` (default), ``processes`` or ``serial``. ``processes`` runs
-        as ``serial`` inside a worker process, and its pool uses ``forkserver``
+        ``serial`` (default), ``threads`` or ``processes``. Serial uses about a
+        third less memory at the same speed, because one polarisation is held at
+        a time. ``processes`` runs as ``serial`` inside a worker process, and its pool uses ``forkserver``
         or ``spawn``, so scripts must guard their entry point with
         ``if __name__ == "__main__":``.
+    ``preset``
+        ``full`` (default) or ``quicklook``, which renders at 160 m instead of
+        40 m. Options given explicitly win over the preset.
     ``use_tps``
         Thin-plate-spline GCP warp (default ``True``). It is the dominant cost;
         ``False`` uses the much faster polynomial transform, which moves the

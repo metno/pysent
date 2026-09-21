@@ -140,7 +140,7 @@ environment variables below only supply defaults when an option is omitted.
 
 | Variable | Effect |
 |---|---|
-| `S1_PARALLEL_MODE`, `S2_PARALLEL_MODE` | `threads` / `processes` (S1 only) / `serial` fan-out across products |
+| `S1_PARALLEL_MODE`, `S2_PARALLEL_MODE` | `serial` (default) / `threads` / `processes` (S1 only) fan-out across products |
 | `S1_PRODUCT_WORKERS`, `S2_PRODUCT_WORKERS` | Worker count for that fan-out |
 | `S1_GDAL_NUM_THREADS`, `S2_GDAL_NUM_THREADS` | GDAL threads per product: warp `NUM_THREADS`, plus `GDAL_NUM_THREADS` (decoding, compression) when products run one at a time |
 | `S1_WARP_MEMORY_LIMIT_MB`, `S2_WARP_MEMORY_LIMIT_MB` | GDAL `warpMemoryLimit` |
@@ -162,8 +162,13 @@ environment variables below only supply defaults when an option is omitted.
   10 m scene. `intermediate_compression` (default none) trades time for space.
 - **`gdal_cachemax_mb`** (processing option): GDAL block cache during the call.
   GDAL's default of 5 % of RAM applies *per process*.
+- **`preset`** (processing option): `full` (default) or `quicklook`, which
+  renders Sentinel-2 at 60 m and Sentinel-1 at 160 m. A three-product S2 scene
+  takes 5 s instead of 39 s, because GDAL then reads the JP2 overviews.
 - **CPU budget:** defaults come from the CPUs the process may use (affinity
   mask and cgroup quota, e.g. `docker --cpus` or Slurm), not the host total.
+  Products run one at a time per process by default, so each gets every thread
+  for its compression; `parallel_mode="threads"` overlaps them instead.
   Each product of a call may use all of them, so when running several calls
   side by side, set `gdal_num_threads` to each call's share.
   `parallel_mode="processes"` runs serially inside a worker process. Its pool

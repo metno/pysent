@@ -16,6 +16,7 @@ from rasterio.enums import ColorInterp, Resampling
 
 from ._runtime import (
     SERIAL_MODES,
+    apply_preset,
     atomic_output,
     available_cpus,
     gdal_errors,
@@ -31,6 +32,13 @@ from .errors import EmptySceneError
 
 S2_SAFE_IMPLEMENTATION = "sentinel_s2_safe_quicklook"
 S2_OVERVIEW_FACTORS: tuple[int, ...] = (2, 4, 8, 16)
+# Presets only move the output grid; everything else stays at the defaults below.
+# A 60 m quicklook reads the JP2 overview levels instead of full resolution,
+# which is about an order of magnitude less work for a browsable image.
+S2_PRESETS: dict[str, dict[str, Any]] = {
+    "full": {},
+    "quicklook": {"target_resolution": 60.0},
+}
 S2_STRETCH_PERCENTILES: tuple[float, float] = (0.5, 99.5)
 S2_STRETCH_METHOD = "percentile"
 # Gamma < 1 lifts the mid-tones. Together with the 0.5/99.5 clip this is what a
@@ -920,7 +928,7 @@ def _resolve_sentinel_s2_processing_settings(
     *,
     output_count: int,
 ) -> dict[str, Any]:
-    processing = dict(processing_options or {})
+    processing = apply_preset(processing_options, S2_PRESETS)
     histogram = processing.get("histogram_stretch")
     percentiles, method, gamma = _resolve_stretch_options(processing)
     block_size = _coerce_positive_int(processing.get("block_size"), 256)
@@ -936,7 +944,10 @@ def _resolve_sentinel_s2_processing_settings(
     # The scene stack is read once per product and deleted; compressing it costs
     # more time than the extra scratch space is usually worth.
     intermediate_compression = str(processing.get("intermediate_compression") or "NONE")
-    parallel_mode = str(processing.get("parallel_mode") or os.environ.get("S2_PARALLEL_MODE") or "threads").strip().lower()
+    # Serial by default: one GDAL write at a time per process is both faster
+    # (the write can then use every core for compression) and the only way the
+    # GDAL 3.8 concurrent-write crash cannot happen. See the phase 4 session log.
+    parallel_mode = str(processing.get("parallel_mode") or os.environ.get("S2_PARALLEL_MODE") or "serial").strip().lower()
     if parallel_mode not in SERIAL_MODES:
         # S2 has only ever fanned out over threads; "processes" keeps meaning threads here.
         parallel_mode = "threads"
@@ -1009,7 +1020,12 @@ def process_sentinel_s2_safe(
     ``gdal_cachemax_mb``
         GDAL block cache for the duration of the call (default: ``GDAL_CACHEMAX``).
     ``parallel_mode``
-        ``threads`` (default) or ``serial``, for the per-product stretch.
+        ``serial`` (default) or ``threads``. Serial is faster here: the products
+        then have every core for compression, instead of competing for it.
+    ``preset``
+        ``full`` (default) or ``quicklook``, which renders at 60 m: about an
+        order of magnitude faster, since GDAL then reads the JP2 overviews.
+        Options given explicitly win over the preset.
 
     Every requested product is attempted. If one of several fails,
     :class:`pysent.errors.PartialFailure` is raised after the rest finish. A

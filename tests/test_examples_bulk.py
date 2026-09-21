@@ -226,8 +226,9 @@ def test_presets_and_extra_options(tmp_path):
     summary = bulk_convert.run_bulk(scenes, output_dir=tmp_path / "out", args=args, process=fake_ok, log=lambda m: None)
 
     options = {record["name"]: record["options"] for record in summary.records}
-    assert options[S2_NAME]["target_resolution"] == 60.0
-    assert options[S1_NAME]["target_resolution"] == 160.0
+    # The preset is passed through; pysent turns it into a resolution per platform.
+    assert options[S2_NAME]["preset"] == "quicklook"
+    assert options[S1_NAME]["preset"] == "quicklook"
     assert options[S2_NAME]["compression"] == "JPEG" and options[S2_NAME]["block_size"] == 512
     assert options[S2_NAME]["stretch_percentiles"] == (1.0, 99.0)
 

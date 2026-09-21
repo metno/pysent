@@ -8,7 +8,7 @@ break or slow that use case.
 |---|---|
 | Branch / worktree | `feature/bulk-processing` → `../pysent.worktrees/bulk-processing` |
 | Base | `main` @ `c660cde` (2026-09-14) |
-| Status | Audit done (phase A). Phases 1, 2 and 3 done (PRs #5, #7, #8); phase 4's P2+P4+part of P7 done (PRs #6, #8). Phase 5 and the rest of phase 4 not started. |
+| Status | Audit done (phase A). Phases 1-4 done (PRs #5-#9). Only phase 5 (sweep, docs, close-out) remains. |
 | Audit evidence | [`bulk_processing_audit/`](bulk_processing_audit/): `run.sh checks`, `run.sh bench <DATA_DIR>` |
 
 ## Kick-off prompt
@@ -156,11 +156,11 @@ Stdlib only, plus pysent. Must run on Python 3.10+; use `max_tasks_per_child` on
 ### Phase 4: Performance (PR 4)
 Re-measure every item with `run.sh bench` and put before/after numbers in the PR.
 - [x] **P2:** uncompressed intermediates (`intermediate_compression`, default none). *Bypassing the warp when no reprojection is needed is still open.*
-- [ ] **P1:** a `quicklook` preset in the library (e.g. `processing_options={"preset": "quicklook"}`), used by the examples.
+- [x] **P1:** a `quicklook` preset in the library (`processing_options={"preset": "quicklook"}`), used by the examples.
 - [x] **P4:** decode each needed S2 band once per scene (one warp per output grid; products are cut from that stack).
-- [x] **P7 (part):** S2 percentiles come from a decimated read (phase 3). *P6's lower peak RSS is still open.*
-- [ ] **P8:** `NUM_THREADS` creation option; evaluate the COG driver.
-- [ ] **P5:** measure S1 polynomial geolocation error against TPS on the benchmark scene and report it.
+- [x] **P6/P7:** percentiles from a decimated read (phase 3). P6 measured: peak RSS tracks the thread budget (8 threads 0.99 GB, 4 threads 0.63, 2 threads 0.58) and `warpMemoryLimit` barely moves it, so the lever is `gdal_num_threads`, which callers already set.
+- [x] **P8:** threaded compression, via the serial default rather than a creation option (which would re-arm the crash in threads mode). COG evaluated and not adopted.
+- [x] **P5:** measured - polynomial is 1.54 output px RMS off the product's own GCPs, so **the TPS default stays**.
 
 ### Phase 5: Throughput sweep, docs and close-out (PR 5)
 - [ ] Sweep workers × threads per worker on 8 and 16 cores for S2 (quicklook and full) and S1. Record scenes/hour and peak RSS in `examples/README.md`, and set the `--workers auto` defaults from the results.
@@ -169,11 +169,11 @@ Re-measure every item with `run.sh bench` and put before/after numbers in the PR
 
 ## Open questions for the user
 Recommendations in *italics*. Ask before the phase that needs the answer.
-1. **S2 stretch default** (Phase 3): min/max (current) or percentile? *Percentile, since min/max breaks on any cloud or sunglint pixel. It's a visible output change, though.*
-2. **S2 NoData** (B5): map valid pixels to `[1,255]` (same file layout) or add an alpha band (4-band RGBA)? *`[1,255]`: minimal change, and map servers keep working.*
-3. **S2 default resolution** (P1): keep 10 m and offer `quicklook` as an opt-in preset? *Yes.*
-4. **S1 polynomial transform** (P5): switch the default only if geolocation error is under ~1 output pixel. *Decide after measuring.*
-5. **Examples location:** plain `examples/` scripts (not installed), or also a `pysent-bulk` console entry point? *Scripts first; promote later if people use them.*
+1. **S2 stretch default** (Phase 3): **answered 2026-09-21 - percentile 0.5-99.5 with gamma 0.7**, chosen by the user from a visual comparison.
+2. **S2 NoData** (B5): **answered 2026-09-21 - `[1,255]`, 0 is NoData only.**
+3. **S2 default resolution** (P1): **answered - 10 m stays the default; `preset="quicklook"` is the opt-in.**
+4. **S1 polynomial transform** (P5): **answered 2026-09-21 - keep TPS.** Measured 1.54 output px RMS (61.7 m) against the product's own GCPs, above the ~1 px bar; `use_tps=False` stays an opt-in.
+5. **Examples location:** **answered - plain `examples/` scripts** (phase 2). Promote to a console entry point later if people use them.
 
 ## Session log
 - **2026-09-14, audit session.** Worktree and branch created from `main` @ `c660cde`. Ran the audit and wrote this plan. Evidence scripts are in `bulk_processing_audit/`. The benchmark products were downloaded into the session scratchpad; get them again from the URLs in `tests/data/manifest.json`. No library code changed.
@@ -239,3 +239,10 @@ Recommendations in *italics*. Ask before the phase that needs the answer.
   - **B13/B14.** The S1 target CRS (EPSG:32661 UPS North at 40 m, Nordic-specific) is documented in the docstring and README; `docs/tuning-and-roadmap.md` and the generated `03_sentinel2.ipynb` no longer describe a min/max stretch or a JPEG production default. Notebooks regenerated from `_build_notebooks.py` and all four still execute.
   - **Defaults changed on purpose:** regenerated S2 products will not match older ones byte for byte. `stretch_method="minmax"`, `stretch_gamma=1.0` restores the old *range selection*, though valid pixels still start at 1.
   - Suite: 108 tests. Remaining: phase 5, and phase 4's P1, P5, P6 and P8.
+- **2026-09-21, phase 4: the rest of performance (PR #9).** PR #8 was rebase-merged (`36b4c02`) first.
+  - **P1, the `quicklook` preset.** `processing_options={"preset": "quicklook"}` renders S2 at 60 m and S1 at 160 m; explicit options still win (`apply_preset` in `_runtime`). One three-product S2 scene: **5.0 s instead of 38.6 s**. The examples now pass the preset name through instead of keeping their own table, so the two cannot drift.
+  - **P5, answered: keep TPS.** Against the product's own 210 GCPs, the polynomial transform is **61.7 m RMS (1.54 output px) and 194.7 m max (4.87 px)**; TPS interpolates them exactly. The two disagree by 1.34 px RMS over a dense grid. The plan's bar was "under ~1 px", so the default stays; `use_tps=False` remains a documented opt-in worth about 23 % of wall time.
+  - **P8, and a default change.** Threaded GeoTIFF compression takes the final write from **15.6 s to 5.4 s** per product. Passing `NUM_THREADS` as a creation option would also switch it on in threads mode, which is exactly the GDAL 3.8 crash condition - so instead **`parallel_mode` now defaults to `serial`**, where the scoped `GDAL_NUM_THREADS` already gives each write every core. Measured per S2 scene: 38.6 s serial vs 42.8 s threads on 8 cores, 32.8 vs 38.0 on 16. S1 is a wash on time but **1.22 GB instead of 1.82 GB**. Outputs are unchanged, byte for byte. The COG driver was evaluated and **not adopted**: 8.0 s vs 5.4 s, same size, no structural gain for this output (tiled with overviews already).
+  - **P6, no free win.** Peak RSS during the warp tracks the thread budget almost linearly (8 threads 0.99 GB / 21.9 s, 4 threads 0.63 GB / 47.0 s, 2 threads 0.58 GB / 52.7 s); `warpMemoryLimit` changes it by less than 0.1 GB. The lever is `gdal_num_threads`, which the runner already sizes, so nothing was changed and the relationship is documented instead.
+  - **Batch, with everything in:** 8 workers x 2 threads, 16 scenes: **313 scenes/h at 7.8 GB** (282/h at the end of phase 3), no failures. Suite: 116 tests.
+  - Only phase 5 is left: the sweep, the docs refresh and the close-out rename.
