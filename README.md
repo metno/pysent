@@ -116,6 +116,23 @@ over Norway and cuts a window from each **directly out of the remote archive**
 using HTTP range requests, so a few hundred KB crosses the network rather than
 the full 1–8 GB product. `tests/data/manifest.json` records the provenance.
 
+## Bulk processing
+
+For converting many products at once, [`examples/`](examples/README.md) holds a
+reference runner and the measurements behind its defaults:
+
+```bash
+python examples/bulk_convert.py --input-dir /archive/S2C/2026/09 --output-dir /out
+```
+
+One worker process per scene, resumable (a scene is skipped once its sidecar
+JSON and outputs are in place), failure-isolated (one bad scene or a worker
+killed by the OOM killer does not stop the run) and sized from the CPU and
+memory budget it is actually given. [`bulk_from_catalogue.py`](examples/bulk_from_catalogue.py)
+starts from catalogue UUIDs or a search instead of a directory, and
+[`slurm/bulk_array.sbatch`](examples/slurm/bulk_array.sbatch) runs it as a Slurm
+array job.
+
 ## Configuration
 
 Processing parameters are passed explicitly via `processing_options`; the
@@ -155,6 +172,8 @@ environment variables below only supply defaults when an option is omitted.
   of several fail, `PartialFailure` carries `.results` (the finished products)
   and `.errors`. An S2 scene without valid pixels raises `EmptySceneError`.
   Both subclass `RuntimeError`, and GDAL's own message is included.
+- **A ready-made runner** with these settings, resume and failure isolation is
+  in [`examples/bulk_convert.py`](examples/bulk_convert.py).
 
 ## Known tuning work
 
