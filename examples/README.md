@@ -25,10 +25,11 @@ python examples/bulk_convert.py --input-dir /archive --output-dir /out --dry-run
 ## How a run is arranged
 
 One worker process per scene, and inside each worker the scene's products are
-processed **one after another** (`parallel_mode="serial"`). Parallelism comes
-from the number of workers. This is both the best throughput per gigabyte of
-RAM and the arrangement that avoids concurrent GeoTIFF writes inside one
-process, which can crash GDAL 3.8 (see the note at the end).
+processed **one after another** (`parallel_mode="serial"`, now also the library
+default). Parallelism comes from the number of workers. This is the best
+throughput per gigabyte of RAM, it lets each write use every thread it is given
+for compression, and it avoids concurrent GeoTIFF writes inside one process,
+which can crash GDAL 3.8 (see the note at the end).
 
 Outputs are laid out per platform and scene, with a sidecar JSON written last:
 
@@ -66,8 +67,8 @@ each, reading from page cache:
 
 More workers with fewer threads each wins until memory runs out; the defaults
 (2 threads, 256 MB of GDAL cache) sit at that sweet spot. The `quicklook`
-preset (60 m for S2, 160 m for S1) is roughly 4× faster again: the three real
-benchmark scenes take 24 s instead of 99 s.
+preset (60 m for S2, 160 m for S1) is roughly 8× faster again: one three-product
+S2 scene takes 5 s instead of 39 s.
 
 ## Changing how the images look
 

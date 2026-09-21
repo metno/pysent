@@ -114,6 +114,20 @@ def parse_cachemax_mb(value: object) -> float | None:
     return parsed if parsed > 0 else None
 
 
+def apply_preset(processing_options: dict[str, Any] | None, presets: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Return the options with the named preset filled in underneath them.
+
+    A preset is a starting point, not an override: anything the caller passed
+    explicitly wins, so ``{"preset": "quicklook", "target_resolution": 20}``
+    means 20 m.
+    """
+    processing = dict(processing_options or {})
+    name = str(processing.pop("preset", None) or "full").strip().lower()
+    if name not in presets:
+        raise ValueError(f"preset must be one of {sorted(presets)}, not {name!r}")
+    return {**presets[name], **processing}
+
+
 def resolve_work_dir(value: object) -> str | None:
     text = str(value or "").strip()
     return text or None

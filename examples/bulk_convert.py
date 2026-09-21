@@ -48,11 +48,9 @@ OK, SKIPPED, EMPTY, FAILED = "ok", "skipped", "empty", "failed"
 
 S2_PRODUCT_NAMES = ("true_color_vegetation", "false_color_glacier", "false_color_vegetation")
 
-# Presets only change resolution: everything else stays at the library defaults.
-PRESETS: dict[str, dict[str, dict[str, Any]]] = {
-    "full": {"S1": {}, "S2": {}},
-    "quicklook": {"S1": {"target_resolution": 160.0}, "S2": {"target_resolution": 60.0}},
-}
+# The presets themselves live in pysent (pysent.s1.S1_PRESETS, pysent.s2.S2_PRESETS);
+# the runner only passes the name through, so the two cannot drift apart.
+PRESETS = ("full", "quicklook")
 
 # A scene that failed on one of these is worth retrying: the archive was briefly
 # unreachable rather than the product being broken.
@@ -379,7 +377,8 @@ def build_job(scene: str, *, output_dir: Path, args: argparse.Namespace) -> dict
         options["histogram_stretch"] = True
     if args.scratch:
         options["work_dir"] = str(args.scratch)
-    options.update(PRESETS[args.preset].get(family, {}))
+    if args.preset:
+        options["preset"] = args.preset
     for item in args.option or []:
         key, _, value = item.partition("=")
         options[key.strip()] = _coerce(value.strip())
@@ -594,7 +593,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scratch", type=Path, help="directory for intermediates (default: alongside the outputs)")
 
     products = parser.add_argument_group("what to produce")
-    products.add_argument("--preset", choices=sorted(PRESETS), default="full",
+    products.add_argument("--preset", choices=PRESETS, default="full",
                           help="full: the library defaults; quicklook: 60 m (S2) / 160 m (S1)")
     products.add_argument("--products", nargs="+", metavar="NAME",
                           help=f"Sentinel-2 products (default: all of {', '.join(S2_PRODUCT_NAMES)})")
