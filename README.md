@@ -30,7 +30,7 @@ results = process_sentinel_s2_safe(
 | Module | Contents |
 |---|---|
 | `pysent.s1` | Sentinel-1 amplitude quicklooks from SAFE or NetCDF: GCP warp (TPS or polynomial), percentile grayscale stretch + alpha, tiled/compressed GeoTIFF with overviews. Handles **VV/VH, HH/HV and single-pol** products. |
-| `pysent.s2` | Sentinel-2 RGB band combinations from SAFE: stacked-VRT warp, per-band stretch (min/max or percentile), tiled/compressed 8-bit RGB with overviews. |
+| `pysent.s2` | Sentinel-2 RGB band combinations from SAFE: one stacked-VRT warp per scene, per-band stretch (min/max or percentile), tiled/compressed 8-bit RGB with overviews. |
 | `pysent.profiles` | Platform detection (S1 vs S2) from any textual hint, plus per-platform profile defaults. |
 | `pysent.archive` | Catalogue download URL → local archive path; UUID → local SAFE resolution. |
 | `pysent.csw` | CSW record lookup (needs the `csw` extra). |
@@ -137,10 +137,12 @@ environment variables below only supply defaults when an option is omitted.
 ### Unattended and bulk runs
 
 - **`work_dir`** (processing option): where intermediates go, default
-  `output_dir`. Each product uses its own temporary directory, removed whether
-  it succeeds or fails. Outputs are written under a hidden temporary name and
-  renamed when complete, so a killed worker never leaves a truncated file under
-  the final name.
+  `output_dir`. Each call uses its own temporary directory there, removed
+  whether it succeeds or fails. Outputs are written under a hidden temporary
+  name and renamed when complete, so a killed worker never leaves a truncated
+  file under the final name. For Sentinel-2, budget about 2 bytes per pixel per
+  band the products need: roughly 1.2 GB for the three default products of a
+  10 m scene. `intermediate_compression` (default none) trades time for space.
 - **`gdal_cachemax_mb`** (processing option): GDAL block cache during the call.
   GDAL's default of 5 % of RAM applies *per process*.
 - **CPU budget:** defaults come from the CPUs the process may use (affinity
@@ -164,9 +166,10 @@ none is shipped as the default yet:
   alternative, pending A/B validation.
 - **S1 is stretched linearly.** SAR backscatter spans orders of magnitude, so
   `20*log10(amplitude)` before the percentile clip should give better contrast.
-- **The warp dominates cost** (~20 s of 42 s for a 10980² S2 scene; ~27 s of 31 s
-  for an S1 GRD). `use_tps=False` on the S1 warp swaps TPS for the much faster
-  polynomial GCP transform.
+- **The S1 warp dominates its cost** (~27 s of 31 s for an S1 GRD).
+  `use_tps=False` swaps TPS for the much faster polynomial GCP transform.
+  (Sentinel-2 now warps the bands its products need once per scene, which cut a
+  three-product scene from 128 s to 49 s with identical output.)
 - Percentiles from a decimated read, and COG output, are both unexplored wins.
 
 ## Licence

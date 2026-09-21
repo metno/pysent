@@ -158,7 +158,10 @@ def gdal_runtime(*, num_threads: str | None = None, cachemax_mb: float | None = 
         yield
     finally:
         if num_threads is not None:
-            gdal.SetConfigOption("GDAL_NUM_THREADS", previous_threads)
+            # GetConfigOption also reports the environment: writing such a value
+            # back would turn it into an explicit option that outlives the env var.
+            restored = None if os.environ.get("GDAL_NUM_THREADS") == previous_threads else previous_threads
+            gdal.SetConfigOption("GDAL_NUM_THREADS", restored)
         if cachemax_mb is not None:
             gdal.SetCacheMax(previous_cache)
 
