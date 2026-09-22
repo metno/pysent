@@ -10,6 +10,7 @@ every push, so a change that breaks an example fails the build.
 | [02_sentinel1.ipynb](notebooks/02_sentinel1.ipynb) | SAR amplitude: polarisation detection, the GCP warp, choosing stretch percentiles |
 | [03_sentinel2.ipynb](notebooks/03_sentinel2.ipynb) | Optical: band combinations, min/max vs percentile stretch |
 | [04_benchmarks.ipynb](notebooks/04_benchmarks.ipynb) | Time and memory per step, stretch-quality report, profile comparison |
+| [05_bulk_benchmarks.ipynb](notebooks/05_bulk_benchmarks.ipynb) | Throughput: scenes per hour and peak memory across worker/thread counts |
 
 ## Two ways to run them
 

@@ -54,6 +54,8 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages --no-deps -e '
     && python3 -m pip install --no-cache-dir --break-system-packages owslib
 
 COPY docs ./docs
+# The notebooks drive the bulk runner and its benchmark harness.
+COPY examples ./examples
 COPY scripts ./scripts
 COPY tests ./tests
 
