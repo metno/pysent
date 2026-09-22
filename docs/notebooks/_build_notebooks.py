@@ -318,7 +318,7 @@ print(f"output      : {gray.dtype}, {(gray[valid] == 0).mean():.1%} black, "
         code('''
 print(f"{'percentiles':>14} | {'clipped':>8} | {'range used':>10} | verdict")
 print("-" * 56)
-for percentiles in [(0.0, 100.0), (1.0, 99.0), (2.0, 98.0), (5.0, 95.0), (20.0, 80.0)]:
+for percentiles in [(0.0, 100.0), (1.0, 99.0), (2.0, 98.0), (5.0, 95.0), (20.0, 80.0)]:  # (1, 99) is the default
     g, _, _ = stretch_sentinel_s1_grayscale(amplitude, nodata=nodata, percentiles=percentiles)
     values = g[valid]
     clipped = ((values == 0) | (values == 255)).mean()
@@ -328,8 +328,36 @@ for percentiles in [(0.0, 100.0), (1.0, 99.0), (2.0, 98.0), (5.0, 95.0), (20.0, 
     print(f"{str(percentiles):>14} | {clipped:7.1%} | {used:9.1%} | {verdict}")
 '''),
         md("Wide percentiles clip almost nothing but leave the image dull; narrow ones use "
-           "the full range but destroy detail. The default `(2, 98)` sits where both numbers "
+           "the full range but destroy detail. The default `(1, 99)` sits where both numbers "
            "are acceptable."),
+        md("## 6. dB or linear, and what a speckle filter buys\n"
+           "The stretch runs on `20*log10(amplitude)` by default. Global statistics barely "
+           "separate the two curves - on a real scene the *clipped* linear stretch even has "
+           "marginally higher entropy - so the argument is not information content but **where "
+           "the 8-bit range is spent**: dB compresses the bright end and gives the room to the "
+           "dark end, where water, radar shadow and smooth ground live.\n\n"
+           "The optional Lee filter is a separate question: it makes the picture far easier to "
+           "read, and it alters the measurement."),
+        code('''
+from pysent.s1 import despeckle_sentinel_s1, estimate_equivalent_looks
+
+print(f"equivalent looks of this raster: {estimate_equivalent_looks(amplitude, nodata=nodata):.1f}")
+print(f"{'rendering':>24} | {'mean':>5} | {'std':>5} | {'dark quartile mean':>18}")
+print("-" * 62)
+dark = amplitude[valid] < np.percentile(amplitude[valid], 25)
+for label, values in [
+    ("linear 2-98", stretch_sentinel_s1_grayscale(
+        amplitude, nodata=nodata, percentiles=(2.0, 98.0), method="linear")[0]),
+    ("dB 1-99 (default)", stretch_sentinel_s1_grayscale(amplitude, nodata=nodata)[0]),
+    ("Lee 5x5 + dB 1-99", stretch_sentinel_s1_grayscale(
+        despeckle_sentinel_s1(amplitude, nodata=nodata)[0], nodata=nodata)[0]),
+]:
+    shown = values[valid]
+    print(f"{label:>24} | {shown.mean():5.1f} | {shown.std():5.1f} | {shown[dark].mean():18.1f}")
+'''),
+        md("The dark quartile is the column to watch: that is the part of the scene the linear "
+           "stretch leaves near black. The filter costs about 9 s per polarisation on a full "
+           "40 m scene, which is why it is off by default (`speckle_filter=\"lee\"` turns it on)."),
         md(S1_WARP_NOTE),
         code('''
 if product.can_warp:

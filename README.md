@@ -197,12 +197,41 @@ processing_options={
 }
 ```
 
-Sentinel-1 is stretched in **dB** (`20*log10(amplitude)`) between the 1st and
-99th percentile, which is how SAR is normally read: the bright end is compressed
-so that water, radar shadow and smooth ground show detail instead of going flat
-black. `stretch_method="linear"` with `stretch_percentiles=(2.0, 98.0)`
-reproduces the previous rendering exactly. Validity lives in an explicit alpha
-band, so S1 NoData was never ambiguous.
+## How Sentinel-1 products are rendered
+
+Each polarisation is stretched in **dB** (`20*log10(amplitude)`) between the 1st
+and 99th percentile, which is how SAR is normally read: the bright end is
+compressed so that water, radar shadow and smooth ground show detail instead of
+going flat black. Validity lives in an explicit alpha band, so S1 NoData was
+never ambiguous.
+
+```python
+processing_options={
+    "stretch_method": "db",             # or "linear" for the amplitude itself
+    "stretch_percentiles": (1.0, 99.0),
+    "speckle_filter": "lee",            # off by default; "none" to keep it off
+    "speckle_window": 5,
+}
+```
+
+`stretch_method="linear"` with `stretch_percentiles=(2.0, 98.0)` reproduces the
+rendering from before September 2026 exactly.
+
+**Speckle filtering is available and off by default.** A Lee filter makes a
+browse image much easier to read — equivalent looks rise from 16 to 139 on a real
+40 m scene — but it alters the pixel values (point targets are dimmed, fine
+texture is averaged away) and adds about 9 s per polarisation:
+
+| S1 scene, VV+VH, 8 cores | time | peak RAM |
+|---|---:|---:|
+| default (no filter) | 20.2 s | 1.35 GB |
+| `speckle_filter="lee"` | 38.1 s | 1.55 GB |
+| `"lee"` + `preset="quicklook"` | 23.5 s | 0.92 GB |
+
+The number of looks is estimated from the warped raster rather than taken from
+the product type: a GRDH scene has about 4.4 looks natively, but warping to 40 m
+already averages it to about 16, and a filter told to expect 4.4 would smooth
+away real texture.
 
 ## Performance
 
@@ -223,8 +252,6 @@ sweep and the memory budget.
 
 Each is measurable with `pysent.qa`:
 
-- **Speckle filtering** (Lee / refined Lee) on S1 before the stretch: measured at
-  ENL 16 → 175 for about 8 s per polarisation. Shipping as an option next.
 - **The S1 warp dominates its cost** (~27 s of 31 s for an S1 GRD).
   `use_tps=False` swaps the thin-plate spline for the polynomial GCP transform
   and saves about 23 % — measured at 1.54 output pixels RMS off the product's
