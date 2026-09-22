@@ -74,6 +74,11 @@ disk when the outputs live on a shared filesystem.
 Scenes come from a warm page cache here, so a cold archive or a network
 filesystem will be slower; the shape of the table is what matters.
 
+**Sentinel-1 with `--option speckle_filter=lee` costs about 9 s more per
+polarisation** (a VV+VH scene goes from 20 s to 38 s) and about 0.2 GB more per
+worker. It is off by default; with the `quicklook` preset it is much cheaper
+(23.5 s), because the coarser grid has already averaged most speckle away.
+
 ## Changing how the images look
 
 The runner passes `histogram_stretch` on, so Sentinel-2 products get the library

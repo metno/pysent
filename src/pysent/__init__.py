@@ -55,7 +55,9 @@ __all__ = [
     # sentinel-1
     "S1_SUPPORTED_AMPLITUDE_VARIABLES",
     "build_sentinel_s1_output_filename",
+    "despeckle_sentinel_s1",
     "detect_sentinel_s1_polarizations",
+    "estimate_equivalent_looks",
     "process_sentinel_s1_netcdf",
     "process_sentinel_s1_safe",
     "stretch_sentinel_s1_grayscale",
@@ -79,7 +81,9 @@ _SUBMODULES = {"archive", "csw", "errors", "profiles", "qa", "s1", "s2"}
 _EXPORTS = {
     "S1_SUPPORTED_AMPLITUDE_VARIABLES": "s1",
     "build_sentinel_s1_output_filename": "s1",
+    "despeckle_sentinel_s1": "s1",
     "detect_sentinel_s1_polarizations": "s1",
+    "estimate_equivalent_looks": "s1",
     "process_sentinel_s1_netcdf": "s1",
     "process_sentinel_s1_safe": "s1",
     "stretch_sentinel_s1_grayscale": "s1",

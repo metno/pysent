@@ -130,7 +130,13 @@ Levers, roughly in impact order:
   changes is where the range is spent - it compresses the bright end and expands the
   dark end, so water and shadow stop being a flat black smear. The argument is
   perceptual, and was settled by looking at the images.
-- **Speckle.** Optional Lee / refined-Lee filter on S1 before stretch.
+- **Speckle: shipped** (2026-09-22) as `speckle_filter="lee"`, **off by default**. A 5x5 Lee
+  filter on intensity takes the equivalent number of looks from 16 to 139 on a real 40 m scene,
+  for about 9 s per polarisation (a VV+VH scene goes 20.2 s -> 38.1 s, peak RSS 1.35 -> 1.55 GB).
+  It is off by default because it alters the measurement: point targets are dimmed and fine
+  texture is averaged away. numpy-only (integral image, strip by strip); the number of looks is
+  estimated from the warped raster, since warping to 40 m already lifts a GRDH scene from about
+  4.4 looks to 16 and a filter expecting 4.4 would over-smooth. Refined Lee is still unexplored.
 - **Per-band vs joint stretch.** Per-band (current) maximises contrast but can shift
   colour balance; a shared/luminance-preserving stretch keeps truer colour. Offer both.
 - **Gamma / tone curve** after the linear clip: **shipped** as `stretch_gamma`, default 0.7.

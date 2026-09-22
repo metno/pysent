@@ -63,6 +63,11 @@ S1_OVERVIEW_FACTORS: tuple[int, ...] = (2, 4, 8, 16)
 # 1-99 rather than 2-98 halves the clipping for a near-identical picture
 # (PLANNING/PLANNING_s1_radiometry.md, measurements A.1).
 S1_STRETCH_METHOD = "db"
+# Speckle filtering is off by default: it makes a browse image easier to read,
+# but it alters a measurement before anyone sees it (point targets are dimmed,
+# fine texture is averaged away) and costs roughly 40 % more time per scene.
+S1_SPECKLE_FILTER = "none"
+S1_SPECKLE_WINDOW = 5
 S1_STRETCH_PERCENTILES: tuple[float, float] = (1.0, 99.0)
 S1_NETCDF_IMPLEMENTATION = "sentinel_s1_quicklook"
 S1_SAFE_IMPLEMENTATION = "sentinel_s1_safe_quicklook"
@@ -127,6 +132,137 @@ def _get_numba_kernel():
         except RuntimeError:
             _numba_kernel = njit(cache=False, parallel=True)(_stretch_sentinel_s1_kernel)
     return _numba_kernel
+
+
+def _tile_moments(intensity: np.ndarray, valid: np.ndarray, tile: int) -> tuple[np.ndarray, np.ndarray]:
+    """Per-tile mean and variance of the fully valid tiles."""
+    rows, cols = intensity.shape[0] // tile, intensity.shape[1] // tile
+    if rows == 0 or cols == 0:
+        return np.empty(0), np.empty(0)
+    shape = (rows, tile, cols, tile)
+    blocks = intensity[: rows * tile, : cols * tile].reshape(shape).swapaxes(1, 2)
+    mask = valid[: rows * tile, : cols * tile].reshape(shape).swapaxes(1, 2)
+    whole = mask.all(axis=(2, 3))
+    return blocks.mean(axis=(2, 3))[whole], blocks.var(axis=(2, 3))[whole]
+
+
+def estimate_equivalent_looks(
+    data: np.ndarray,
+    *,
+    nodata: float | None = 0.0,
+    tile: int = 32,
+) -> float:
+    """Equivalent number of looks of an amplitude raster: higher means less speckle.
+
+    Estimated from the most homogeneous tenth of ``tile``-sized tiles, where the
+    variation that remains is speckle rather than landscape. This is measured on
+    the raster in hand rather than taken from the product type on purpose: a
+    Sentinel-1 GRDH scene has about 4.4 looks natively, but pysent warps it - at
+    the default 40 m that averaging already takes a real scene to about 16, and a
+    filter told to expect 4.4 looks would smooth away genuine texture.
+    """
+    valid = np.isfinite(data) & (data > 0)
+    if nodata is not None and math.isfinite(float(nodata)):
+        valid &= data != float(nodata)
+    means, variances = _tile_moments(np.asarray(data, dtype=np.float64) ** 2, valid, tile)
+    usable = (means > 0) & (variances > 0)
+    if not np.any(usable):
+        return float("nan")
+    looks = np.sort(means[usable] ** 2 / variances[usable])
+    return float(np.median(looks[-max(1, looks.size // 10):]))
+
+
+def _box_sum(data: np.ndarray, window: int) -> np.ndarray:
+    """Sum over a ``window``-sized box, from an integral image.
+
+    Boxes shrink at the raster edge rather than wrapping or padding. numpy only:
+    pysent depends on numpy and rasterio, so scipy.ndimage is not available.
+    """
+    height, width = data.shape
+    radius = window // 2
+    integral = np.zeros((height + 1, width + 1), dtype=np.float64)
+    integral[1:, 1:] = data.cumsum(0).cumsum(1)
+    rows, cols = np.arange(height), np.arange(width)
+    y0, y1 = np.clip(rows - radius, 0, height), np.clip(rows + radius + 1, 0, height)
+    x0, x1 = np.clip(cols - radius, 0, width), np.clip(cols + radius + 1, 0, width)
+    return (integral[np.ix_(y1, x1)] - integral[np.ix_(y0, x1)]
+            - integral[np.ix_(y1, x0)] + integral[np.ix_(y0, x0)])
+
+
+def despeckle_sentinel_s1(
+    data: np.ndarray,
+    *,
+    nodata: float | None = 0.0,
+    window: int = S1_SPECKLE_WINDOW,
+    looks: float | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Lee-filter one amplitude raster, returning the filtered amplitude and stats.
+
+    The classic Lee filter, on intensity: where the local variation is no more
+    than speckle explains, the pixel is replaced by the local mean; where it is
+    more - an edge, a bright target - the original value is kept. ``looks``
+    defaults to :func:`estimate_equivalent_looks` of this raster.
+
+    Fill is excluded from every local mean, so nothing bleeds in from outside
+    the swath, and fill pixels come back untouched.
+    """
+    window = int(window)
+    if window < 1:
+        raise ValueError(f"window must be 1 or more, not {window}")
+    valid = np.isfinite(data) & (data > 0)
+    if nodata is not None and math.isfinite(float(nodata)):
+        valid &= data != float(nodata)
+    stats: dict[str, Any] = {"filter": "lee", "window": window}
+    if window == 1 or not np.any(valid):
+        stats["looks"] = None
+        return np.asarray(data, dtype=np.float32), stats
+
+    if looks is None:
+        looks = estimate_equivalent_looks(data, nodata=nodata)
+    if not math.isfinite(float(looks)) or float(looks) <= 0:
+        looks = 1.0
+    stats["looks"] = round(float(looks), 2)
+
+    # Strip by strip with a halo: the filter is local, and a whole-raster pass in
+    # float64 would hold several hundred megabytes per temporary.
+    filtered = np.asarray(data, dtype=np.float32).copy()
+    radius = window // 2
+    for top in range(0, data.shape[0], _SPECKLE_STRIP_ROWS):
+        bottom = min(top + _SPECKLE_STRIP_ROWS, data.shape[0])
+        halo_top, halo_bottom = max(0, top - radius), min(data.shape[0], bottom + radius)
+        strip = _lee_strip(
+            np.asarray(data[halo_top:halo_bottom], dtype=np.float64),
+            valid[halo_top:halo_bottom],
+            window,
+            float(looks),
+        )
+        keep = valid[top:bottom]
+        filtered[top:bottom] = np.where(keep, strip[top - halo_top:bottom - halo_top], filtered[top:bottom])
+    return filtered, stats
+
+
+# A strip of this many rows keeps the float64 working set to a few hundred MB.
+_SPECKLE_STRIP_ROWS = 1024
+
+
+def _lee_strip(data: np.ndarray, valid: np.ndarray, window: int, looks: float) -> np.ndarray:
+    """The Lee estimate for one strip, in amplitude."""
+    intensity = np.where(valid, data ** 2, 0.0)
+    count = _box_sum(valid.astype(np.float64), window)
+    # Centre before accumulating: an integral image of *squared* intensity runs
+    # to ~1e23 over a large raster, where float64 cancellation is the same order
+    # as the variance being computed. Subtracting a central value keeps the sums
+    # small, and the moments are shift-invariant.
+    centre = float(intensity[valid].mean()) if np.any(valid) else 0.0
+    centred = np.where(valid, intensity - centre, 0.0)
+    offset_mean = _box_sum(centred, window) / np.maximum(count, 1e-9)
+    mean = offset_mean + centre
+    variance = np.maximum(_box_sum(centred ** 2, window) / np.maximum(count, 1e-9) - offset_mean ** 2, 0.0)
+    del centred, offset_mean
+    # Lee's weight: 0 where the variation is no more than speckle explains, 1 at a strong edge.
+    weight = np.maximum(variance - mean ** 2 / looks, 0.0) / np.maximum(variance, 1e-9)
+    del variance
+    return np.sqrt(np.maximum(mean + weight * (intensity - mean), 0.0))
 
 
 def _sanitize_name_fragment(value: str) -> str:
@@ -531,6 +667,9 @@ def _write_quicklook_from_warped(
     use_numba: bool = False,
     percentiles: tuple[float, float] = S1_STRETCH_PERCENTILES,
     stretch_method: str = S1_STRETCH_METHOD,
+    speckle_filter: str = S1_SPECKLE_FILTER,
+    speckle_window: int = S1_SPECKLE_WINDOW,
+    speckle_looks: float | None = None,
     compression: str = "jpeg",
     block_size: int = 256,
     overview_factors: tuple[int, ...] = S1_OVERVIEW_FACTORS,
@@ -539,6 +678,11 @@ def _write_quicklook_from_warped(
 ) -> dict[str, Any]:
     with rasterio.open(warped_path) as src:
         data = src.read(1).astype(np.float32, copy=False)
+        speckle: dict[str, Any] | None = None
+        if speckle_filter == "lee":
+            data, speckle = despeckle_sentinel_s1(
+                data, nodata=src.nodata, window=speckle_window, looks=speckle_looks
+            )
         gray, alpha, stretch = stretch_sentinel_s1_grayscale(
             data,
             nodata=src.nodata,
@@ -569,6 +713,7 @@ def _write_quicklook_from_warped(
                 dst.update_tags(ns="rio_overview", resampling="average")
         return {
             "stretch": stretch,
+            "speckle": speckle,
             "width": int(src.width),
             "height": int(src.height),
             "target_epsg": target_epsg,
@@ -593,6 +738,9 @@ def _run_sentinel_s1_product(
     use_numba: bool,
     percentiles: tuple[float, float],
     stretch_method: str,
+    speckle_filter: str,
+    speckle_window: int,
+    speckle_looks: float | None,
     compression: str,
     overview_factors: tuple[int, ...],
     warp_kwargs: dict[str, Any] | None = None,
@@ -622,6 +770,9 @@ def _run_sentinel_s1_product(
             use_numba=use_numba,
             percentiles=percentiles,
             stretch_method=stretch_method,
+            speckle_filter=speckle_filter,
+            speckle_window=speckle_window,
+            speckle_looks=speckle_looks,
             compression=compression,
             block_size=block_size,
             overview_factors=overview_factors,
@@ -656,6 +807,14 @@ def _resolve_sentinel_s1_processing_settings(
     stretch_method = str(processing.get("stretch_method") or S1_STRETCH_METHOD).strip().lower()
     if stretch_method not in {"db", "linear"}:
         raise ValueError(f"stretch_method must be 'db' or 'linear', not {stretch_method!r}")
+    speckle_filter = str(processing.get("speckle_filter") or S1_SPECKLE_FILTER).strip().lower()
+    if speckle_filter in {"off", "false", ""}:
+        speckle_filter = "none"
+    if speckle_filter not in {"none", "lee"}:
+        raise ValueError(f"speckle_filter must be 'lee' or 'none', not {speckle_filter!r}")
+    speckle_window = _coerce_positive_int(processing.get("speckle_window"), S1_SPECKLE_WINDOW)
+    speckle_looks = processing.get("speckle_looks")
+    speckle_looks = float(speckle_looks) if speckle_looks not in (None, "") else None
     block_size = _coerce_positive_int(processing.get("block_size"), 256)
     overview_factors = _coerce_overview_factors(processing.get("overview_factors"))
     target_epsg = str(processing.get("target_epsg") or S1_TARGET_EPSG)
@@ -683,6 +842,9 @@ def _resolve_sentinel_s1_processing_settings(
     return {
         "percentiles": percentiles,
         "stretch_method": stretch_method,
+        "speckle_filter": speckle_filter,
+        "speckle_window": speckle_window,
+        "speckle_looks": speckle_looks,
         "block_size": block_size,
         "overview_factors": overview_factors,
         "target_epsg": target_epsg,
@@ -726,6 +888,9 @@ def _sentinel_s1_jobs(
                 "use_numba": settings["use_numba"],
                 "percentiles": settings["percentiles"],
                 "stretch_method": settings["stretch_method"],
+                "speckle_filter": settings["speckle_filter"],
+                "speckle_window": settings["speckle_window"],
+                "speckle_looks": settings["speckle_looks"],
                 "compression": settings["compression"],
                 "overview_factors": settings["overview_factors"],
                 **{key: settings[key] for key in extra},
@@ -798,6 +963,13 @@ def process_sentinel_s1_safe(
     ``stretch_method``
         ``db`` (default) clips percentiles of ``20*log10(amplitude)``, the way SAR
         is normally read; ``linear`` clips the amplitude itself, as before.
+    ``speckle_filter``
+        ``none`` (default) or ``lee``. The Lee filter makes a browse image much
+        easier to read - equivalent looks rise from about 16 to 175 on a real
+        40 m scene - at roughly 8 s per polarisation, and it alters the pixel
+        values: point targets are dimmed and fine texture is averaged away.
+        ``speckle_window`` (default 5) sets the box size, and ``speckle_looks``
+        overrides the estimate made from the raster itself.
     ``stretch_percentiles``
         Clip range for the stretch, default ``(1.0, 99.0)``. The older
         ``histogram_stretch={"percentiles": ...}`` spelling still works.

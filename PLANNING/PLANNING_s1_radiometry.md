@@ -9,12 +9,13 @@ defaults, then ship them as options.
 |---|---|
 | Branch / worktree | `feature/s1-radiometry` → `../pysent.worktrees/s1-radiometry` |
 | Base | `main` @ `7283ba8` (2026-09-22, end of the bulk-processing plan) |
-| Status | Measurements done (phase A); all three questions answered. Phase 1 done. Phases 2–3 not started. |
-| Evidence | `s1_radiometry_audit/` (to be committed with phase 1) |
+| Status | **Complete.** Phases 1–3 shipped in PR #11. |
+| Evidence | Measurements in section A; the visual comparison the decisions came from is linked there. |
 
 ## Kick-off prompt
 
-Copy this into a new agent session. It can run from any directory.
+*Kept for reference: the plan is finished, so a new session only needs this if the work is
+reopened.* Copy it into a new agent session; it can run from any directory.
 
 ```text
 You are continuing the Sentinel-1 radiometry plan for the pysent library (github.com/metno/pysent).
@@ -29,7 +30,7 @@ Repository rules (mandatory):
    If it is missing, run this from /home/ubuntu/dev/services/pysent:
    git worktree add ../pysent.worktrees/s1-radiometry feature/s1-radiometry
    (add `-b` and `main` if the branch does not exist either). Rebase on origin/main before starting.
-3. Read PLANNING/TODO_PLANNING_s1_radiometry.md in full. Do the next unchecked phase, in order.
+3. Read PLANNING/PLANNING_s1_radiometry.md in full. Do the next unchecked phase, in order.
    Tick its checkboxes in the file as you complete them, and record every decision and
    deviation in the "Session log" section.
 4. Verify the way CI does: run the full test suite in ubuntu:24.04 with apt GDAL 3.8
@@ -116,21 +117,21 @@ these measurements. It is in the QA extra, not in the processing path, and its s
 - [x] Measure before/after on the benchmark scene; put the numbers in the PR.
 
 ### Phase 2: speckle filter as an option (PR 2)
-- [ ] `speckle_filter="lee"` (default off), with `speckle_window` (default 5) and the number of
+- [x] `speckle_filter="lee"` (default off), with `speckle_window` (default 5) and the number of
       looks derived from the product type where possible, else configurable.
-- [ ] numpy-only implementation (integral image), applied to the warped amplitude before the
+- [x] numpy-only implementation (integral image), applied to the warped amplitude before the
       stretch, respecting the valid mask so fill never bleeds into the image.
-- [ ] Tests: ENL rises on a synthetic speckled field; edges are preserved better than a plain box
+- [x] Tests: ENL rises on a synthetic speckled field; edges are preserved better than a plain box
       mean; the valid mask is untouched; a window of 1 is a no-op.
-- [ ] Measure the cost per polarisation and per scene, and say so in `examples/README.md`, since
+- [x] Measure the cost per polarisation and per scene, and say so in `examples/README.md`, since
       it changes the sizing arithmetic.
 
 ### Phase 3: docs and close-out (PR 3)
-- [ ] README and `docs/tuning-and-roadmap.md`: replace the two "known tuning work" bullets with
+- [x] README and `docs/tuning-and-roadmap.md`: replace the two "known tuning work" bullets with
       what shipped and what it costs, including the correction from A.1 (the linear stretch is
       not as bad as the docs claimed; dB wins on where the range is spent, not on entropy).
-- [ ] A notebook cell comparing the options on the committed fixtures, so the choice stays visible.
-- [ ] Update memory. Rename this file to `PLANNING_s1_radiometry.md`.
+- [x] A notebook cell comparing the options on the committed fixtures, so the choice stays visible.
+- [x] Update memory. Rename this file to `PLANNING_s1_radiometry.md`.
 
 ## Open questions for the user
 Recommendations in *italics*. Both were put to the user with the visual comparison above.
@@ -156,3 +157,24 @@ Recommendations in *italics*. Both were put to the user with the visual comparis
   Verified on the real scene: VV mean 116.2 → 152.7, VH 122.7 → 161.8, same runtime (20.1 s vs
   19.7 s), and `stretch_method="linear"` with `(2.0, 98.0)` reproduces the old output exactly.
   The overstated claim in `docs/tuning-and-roadmap.md` was corrected rather than repeated.
+- **2026-09-22, phases 2 and 3: speckle filter, docs, close-out.** Stacked onto the same branch
+  and PR as phase 1, because the user asked for the remaining phases while PR #11 was still open
+  and unmerged - a deviation from "one PR per phase", recorded here rather than forcing a merge.
+  - **`despeckle_sentinel_s1`**: Lee filter on intensity, numpy-only via an integral image,
+    applied strip by strip. Off by default (`speckle_filter="lee"` turns it on, `speckle_window`
+    and `speckle_looks` tune it). Real 40 m scene: ENL 16 → 139, VV+VH 20.2 s → 38.1 s, peak RSS
+    1.35 → 1.55 GB; with `preset="quicklook"` only 23.5 s.
+  - **The number of looks is estimated from the warped raster**, not taken from the product type.
+    A GRDH scene is about 4.4 looks natively, but the default 40 m warp already averages it to
+    about 16; filtering as if it were 4.4 smooths away real texture (my first measurement, ENL
+    16 → 175, was exactly that over-smoothing).
+  - **Two bugs found by measuring rather than by the tests.** A whole-raster pass held several
+    float64 temporaries and doubled peak RSS to 3.1 GB - fixed by striping. And the integral image
+    of *squared* intensity reaches ~1e23 over 37 Mpx, where float64 cancellation is the same order
+    as the variance being computed: striped and whole-raster results differed by up to 10 grey
+    levels. Fixed by centring the data before accumulating, and now covered by a test against a
+    direct O(n·w²) implementation and a strip-invariance test.
+  - Docs: README gained a "How Sentinel-1 products are rendered" section with the cost table,
+    `examples/README.md` notes what the filter does to the sizing arithmetic, the tuning doc
+    records what shipped, and `02_sentinel1.ipynb` gained a comparison cell (dark-quartile mean is
+    the column that separates the curves). Suite: 127 tests.
