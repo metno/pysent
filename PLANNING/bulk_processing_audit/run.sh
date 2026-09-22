@@ -3,6 +3,7 @@
 #
 #   PLANNING/bulk_processing_audit/run.sh checks            # bug checks, synthetic data only
 #   PLANNING/bulk_processing_audit/run.sh bench <DATA_DIR>  # benchmarks, needs the two real products
+#   PLANNING/bulk_processing_audit/run.sh warp-accuracy <DATA_DIR>   # S1 polynomial vs TPS geolocation
 #
 # DATA_DIR must hold the S2/S1 zips named in bench.py (download URLs are in
 # tests/data/manifest.json). Everything runs in ubuntu:24.04 with apt GDAL 3.8,
@@ -39,8 +40,12 @@ case "${1:-}" in
         echo "### jp2_decode with GDAL_NUM_THREADS=1"
         run -v "$data:/data:ro" -e GDAL_NUM_THREADS=1 "$image" python3 /s/bench.py jp2_decode
         ;;
+    warp-accuracy)
+        data="$(cd "${2:?usage: run.sh warp-accuracy <DATA_DIR>}" && pwd)"
+        run -v "$data:/data:ro" "$image" python3 /s/warp_accuracy.py /data
+        ;;
     *)
-        sed -n '2,9p' "$0"
+        sed -n '2,10p' "$0"
         exit 2
         ;;
 esac

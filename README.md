@@ -257,8 +257,11 @@ Each is measurable with `pysent.qa`:
 
 - **The S1 warp dominates its cost** (~27 s of 31 s for an S1 GRD).
   `use_tps=False` swaps the thin-plate spline for the polynomial GCP transform
-  and saves about 23 % — measured at 1.54 output pixels RMS off the product's
-  own GCPs, which is why it is not the default.
+  and saves about 23 %. It shifts features by 62 m RMS (194 m at worst) against
+  the product's own GCP grid — **1.5 px at the default 40 m**, which is why it is
+  not the default, but only **0.4 px at the 160 m `quicklook` grid**, where it is
+  close to free. Full distribution in
+  [docs/tuning-and-roadmap.md](docs/tuning-and-roadmap.md).
 - **S1 warps to EPSG:32661 (UPS North) at 40 m** by default, which suits the
   Nordic archive; scenes further south want their own UTM zone via `target_epsg`.
 - COG output was evaluated and not adopted: slower, for the same size, and the
