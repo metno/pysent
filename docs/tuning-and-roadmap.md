@@ -92,12 +92,9 @@ Levers, roughly in impact order:
   end-to-end wall-clock closer to production.
 - **S1 GCP warp transform.** SAFE path uses `tps=True` (thin-plate-spline, expensive). The SAFE
   band VRT is **GCP-based** (not a geolocation array — so `geoloc=True` does NOT apply here; that's
-  the NetCDF path), so the fast alternative is GDAL's **polynomial GCP** transform. Worth
-  about 23 % of wall time — but **measured and not adopted as the default** (2026-09-21):
-  against the product's own 210 GCPs the polynomial transform is 61.7 m RMS off, which is
-  **1.54 output pixels** at 40 m (max 4.87 px), while the spline interpolates them exactly.
-  Available as `use_tps=False` (also `S1_USE_TPS=False` in the notebook) where speed beats
-  geolocation.
+  the NetCDF path), so the fast alternative is GDAL's **polynomial GCP** transform, worth about
+  23 % of wall time. **Measured and not adopted as the default** (2026-09-21); available as
+  `use_tps=False` (also `S1_USE_TPS=False` in the notebook). See §4.1b for how far off it is.
 - **Resampling cost.** `average` > `bilinear` > `near`. Coarsening `target_resolution`
   cuts warp cost ~quadratically: **shipped as `preset="quicklook"`** (S2 60 m, S1 160 m),
   which is 5.0 s against 38.6 s for a three-product S2 scene because GDAL then reads the
@@ -115,6 +112,38 @@ Levers, roughly in impact order:
   write of a product drops from 15.6 s to 5.4 s when it has every core to itself.
   `NUM_THREADS` as a creation option was rejected: it would also arm multi-threaded
   compression in `threads` mode, which is where GDAL 3.8 segfaults.
+
+### 4.1b How far off the polynomial S1 warp is
+
+Measured on S1D IW GRDH 1SDV (2026-08-10), 210 GCPs over 26574 x 16668 pixels, warped to
+EPSG:32661. The thin-plate spline interpolates the product's GCP grid exactly, so these are the
+polynomial transform's departures **from the geolocation the product ships with** — absolute
+accuracy also depends on the GCP grid itself, which is typically sub-pixel for GRD.
+
+| | metres | px at 40 m (default) | px at 160 m (`quicklook`) |
+|---|---:|---:|---:|
+| median | 43.4 | 1.08 | 0.27 |
+| p90 | 97.1 | 2.43 | 0.61 |
+| p95 | 118.8 | 2.97 | 0.74 |
+| p99 | 160.1 | 4.00 | 1.00 |
+| max | 194.7 | 4.87 | 1.22 |
+| RMS | 61.7 | 1.54 | 0.39 |
+
+Two things the RMS alone hides:
+
+- **The error is scene-wide, not an edge artefact.** Interior GCPs average 43.4 m (max 131.9),
+  edge GCPs 59.4 m (max 194.7), and it is flat across the swath — 45.6 to 58.5 m mean in every
+  fifth of the range direction. Trimming the scene does not avoid it; it is a smooth warp of one
+  to three pixels everywhere.
+- **Whether it matters depends on the output grid**, because the error is fixed in metres. At the
+  default 40 m it is 1.54 px RMS, above the ~1 px bar set for switching the default. At the 160 m
+  `quicklook` grid the same error is **0.39 px RMS and 1.22 px at worst** — comfortably sub-pixel,
+  which makes `use_tps=False` close to free for quicklooks.
+
+Caveat: one scene, over Norwegian coast. Geometry varies with relief and incidence angle, and
+steep terrain is exactly what a polynomial cannot model, so treat this as a floor rather than a
+guarantee. Reproduce with `gdal.Transformer(ds, None, ["METHOD=GCP_POLYNOMIAL", ...])` against
+`ds.GetGCPs()`.
 
 ### 4.2 Output quality
 - **S2 percentile stretch: shipped** (2026-09-21). Defaults are
