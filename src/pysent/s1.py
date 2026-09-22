@@ -58,7 +58,12 @@ S1_PRESETS: dict[str, dict[str, Any]] = {
     "quicklook": {"target_resolution": 160.0},
 }
 S1_OVERVIEW_FACTORS: tuple[int, ...] = (2, 4, 8, 16)
-S1_STRETCH_PERCENTILES: tuple[float, float] = (2.0, 98.0)
+# SAR is read in dB by convention: the curve compresses the bright end and gives
+# the range to the dark end, where water, radar shadow and smooth ground live.
+# 1-99 rather than 2-98 halves the clipping for a near-identical picture
+# (PLANNING/PLANNING_s1_radiometry.md, measurements A.1).
+S1_STRETCH_METHOD = "db"
+S1_STRETCH_PERCENTILES: tuple[float, float] = (1.0, 99.0)
 S1_NETCDF_IMPLEMENTATION = "sentinel_s1_quicklook"
 S1_SAFE_IMPLEMENTATION = "sentinel_s1_safe_quicklook"
 
@@ -69,6 +74,7 @@ def _stretch_sentinel_s1_kernel(
     p_high: float,
     nodata: float,
     has_nodata: bool,
+    to_db: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
     rows, cols = data.shape
     gray = np.zeros((rows, cols), dtype=np.uint8)
@@ -84,6 +90,8 @@ def _stretch_sentinel_s1_kernel(
                 continue
             if value <= 0.0:
                 continue
+            if to_db:
+                value = 20.0 * math.log10(value)
 
             scaled = (value - p_low) * scale
             if scaled < 0.0:
@@ -341,8 +349,23 @@ def stretch_sentinel_s1_grayscale(
     nodata: float | None = 0.0,
     percentiles: tuple[float, float] = S1_STRETCH_PERCENTILES,
     use_numba: bool = False,
-) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
-    """Histogram-stretch one warped S1 amplitude raster to gray+alpha bytes."""
+    method: str = S1_STRETCH_METHOD,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Histogram-stretch one warped S1 amplitude raster to gray+alpha bytes.
+
+    ``method="db"`` (the default) clips percentiles of ``20*log10(amplitude)``,
+    which is how SAR is normally read: the bright end is compressed and the dark
+    end - water, radar shadow, smooth ground - gets room to show detail.
+    ``method="linear"`` clips the amplitude itself, as this function always did.
+
+    Validity lives in the alpha band either way, so a valid pixel may legitimately
+    render as 0. ``p_low``/``p_high`` are in the stretch's own unit, which the
+    returned ``unit`` names.
+    """
+    method = str(method or S1_STRETCH_METHOD).strip().lower()
+    if method not in {"db", "linear"}:
+        raise ValueError(f"method must be 'db' or 'linear', not {method!r}")
+    to_db = method == "db"
 
     low_pct, high_pct = percentiles
     valid = np.isfinite(data)
@@ -352,10 +375,13 @@ def stretch_sentinel_s1_grayscale(
 
     gray = np.zeros(data.shape, dtype=np.uint8)
     alpha = np.zeros(data.shape, dtype=np.uint8)
+    unit = "dB" if to_db else "amplitude"
     if not np.any(valid):
-        return gray, alpha, {"min": 0.0, "max": 0.0, "p_low": 0.0, "p_high": 0.0}
+        return gray, alpha, {"min": 0.0, "max": 0.0, "p_low": 0.0, "p_high": 0.0, "unit": unit}
 
     valid_values = data[valid].astype(np.float32, copy=False)
+    if to_db:
+        valid_values = 20.0 * np.log10(valid_values)
     p_low, p_high = np.percentile(valid_values, [low_pct, high_pct])
     if not np.isfinite(p_low):
         p_low = float(np.min(valid_values))
@@ -376,9 +402,14 @@ def stretch_sentinel_s1_grayscale(
                 float(p_high),
                 float(nodata or 0.0),
                 has_nodata,
+                to_db,
             )
     else:
-        scaled = np.clip((data.astype(np.float32, copy=False) - float(p_low)) / float(p_high - p_low), 0.0, 1.0)
+        values = data.astype(np.float32, copy=False)
+        if to_db:
+            # Only the valid pixels are finite in log space; the rest stay masked out.
+            values = np.where(valid, 20.0 * np.log10(np.where(valid, values, 1.0)), 0.0)
+        scaled = np.clip((values - float(p_low)) / float(p_high - p_low), 0.0, 1.0)
         gray[valid] = np.round(scaled[valid] * 255.0).astype(np.uint8)
         alpha[valid] = 255
 
@@ -387,6 +418,7 @@ def stretch_sentinel_s1_grayscale(
         "max": float(np.max(valid_values)),
         "p_low": float(p_low),
         "p_high": float(p_high),
+        "unit": unit,
     }
 
 
@@ -498,6 +530,7 @@ def _write_quicklook_from_warped(
     *,
     use_numba: bool = False,
     percentiles: tuple[float, float] = S1_STRETCH_PERCENTILES,
+    stretch_method: str = S1_STRETCH_METHOD,
     compression: str = "jpeg",
     block_size: int = 256,
     overview_factors: tuple[int, ...] = S1_OVERVIEW_FACTORS,
@@ -511,6 +544,7 @@ def _write_quicklook_from_warped(
             nodata=src.nodata,
             percentiles=percentiles,
             use_numba=use_numba,
+            method=stretch_method,
         )
         profile = src.profile.copy()
         profile.update(
@@ -558,6 +592,7 @@ def _run_sentinel_s1_product(
     warp_memory_limit_mb: float | None,
     use_numba: bool,
     percentiles: tuple[float, float],
+    stretch_method: str,
     compression: str,
     overview_factors: tuple[int, ...],
     warp_kwargs: dict[str, Any] | None = None,
@@ -586,6 +621,7 @@ def _run_sentinel_s1_product(
             partial_path,
             use_numba=use_numba,
             percentiles=percentiles,
+            stretch_method=stretch_method,
             compression=compression,
             block_size=block_size,
             overview_factors=overview_factors,
@@ -617,6 +653,9 @@ def _resolve_sentinel_s1_processing_settings(
 ) -> dict[str, Any]:
     processing = apply_preset(processing_options, S1_PRESETS)
     percentiles = _resolve_stretch_percentiles(processing)
+    stretch_method = str(processing.get("stretch_method") or S1_STRETCH_METHOD).strip().lower()
+    if stretch_method not in {"db", "linear"}:
+        raise ValueError(f"stretch_method must be 'db' or 'linear', not {stretch_method!r}")
     block_size = _coerce_positive_int(processing.get("block_size"), 256)
     overview_factors = _coerce_overview_factors(processing.get("overview_factors"))
     target_epsg = str(processing.get("target_epsg") or S1_TARGET_EPSG)
@@ -643,6 +682,7 @@ def _resolve_sentinel_s1_processing_settings(
     warp_memory_limit_mb = _resolve_warp_memory_limit_mb(processing.get("warp_memory_limit_mb"))
     return {
         "percentiles": percentiles,
+        "stretch_method": stretch_method,
         "block_size": block_size,
         "overview_factors": overview_factors,
         "target_epsg": target_epsg,
@@ -685,6 +725,7 @@ def _sentinel_s1_jobs(
                 "warp_memory_limit_mb": settings["warp_memory_limit_mb"],
                 "use_numba": settings["use_numba"],
                 "percentiles": settings["percentiles"],
+                "stretch_method": settings["stretch_method"],
                 "compression": settings["compression"],
                 "overview_factors": settings["overview_factors"],
                 **{key: settings[key] for key in extra},
@@ -754,8 +795,11 @@ def process_sentinel_s1_safe(
         Thin-plate-spline GCP warp (default ``True``). It is the dominant cost;
         ``False`` uses the much faster polynomial transform, which moves the
         output grid by a few pixels.
+    ``stretch_method``
+        ``db`` (default) clips percentiles of ``20*log10(amplitude)``, the way SAR
+        is normally read; ``linear`` clips the amplitude itself, as before.
     ``stretch_percentiles``
-        Clip range for the grayscale stretch, default ``(2.0, 98.0)``. The older
+        Clip range for the stretch, default ``(1.0, 99.0)``. The older
         ``histogram_stretch={"percentiles": ...}`` spelling still works.
     ``target_epsg``, ``target_resolution``
         Output grid, by default **EPSG:32661 (UPS North) at 40 m**, which suits

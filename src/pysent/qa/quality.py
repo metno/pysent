@@ -328,44 +328,17 @@ def stretch_s1_grayscale_db(
 ) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
     """dB-domain percentile stretch for S1 amplitude -> gray + alpha uint8.
 
-    SAR backscatter spans orders of magnitude, so a *linear* percentile clip
-    (``stretch_sentinel_s1_grayscale``) crushes most of the scene into a narrow
-    band. Converting to dB (``20*log10(amplitude)``) before the clip uses the
-    0-255 range far better. Same return shape as the linear routine, with
-    ``p_low``/``p_high`` reported in dB and ``unit="dB"``.
+    Kept for the notebooks, which compare stretches side by side. Since
+    2026-09-22 this is what :func:`pysent.s1.stretch_sentinel_s1_grayscale` does
+    by default, and this function delegates to it rather than repeating it; the
+    percentile default here stays at 2-98 so existing notebook comparisons do
+    not silently change.
     """
-    low_pct, high_pct = percentiles
-    amplitude = data.astype(np.float32, copy=False)
-    valid = np.isfinite(amplitude) & (amplitude > 0)
-    if nodata is not None and np.isfinite(float(nodata)):
-        valid &= amplitude != float(nodata)
+    from ..s1 import stretch_sentinel_s1_grayscale
 
-    gray = np.zeros(amplitude.shape, dtype=np.uint8)
-    alpha = np.zeros(amplitude.shape, dtype=np.uint8)
-    if not np.any(valid):
-        return gray, alpha, {"min": 0.0, "max": 0.0, "p_low": 0.0, "p_high": 0.0, "unit": "dB"}
-
-    decibels = np.full(amplitude.shape, np.nan, dtype=np.float32)
-    decibels[valid] = 20.0 * np.log10(amplitude[valid])
-    valid_db = decibels[valid]
-    p_low, p_high = np.percentile(valid_db, [low_pct, high_pct])
-    if not np.isfinite(p_low):
-        p_low = float(np.min(valid_db))
-    if not np.isfinite(p_high):
-        p_high = float(np.max(valid_db))
-    if p_high <= p_low:
-        p_high = p_low + 1.0
-
-    scaled = np.clip((decibels - float(p_low)) / float(p_high - p_low), 0.0, 1.0)
-    gray[valid] = np.round(scaled[valid] * 255.0).astype(np.uint8)
-    alpha[valid] = 255
-    return gray, alpha, {
-        "min": float(np.min(valid_db)),
-        "max": float(np.max(valid_db)),
-        "p_low": float(p_low),
-        "p_high": float(p_high),
-        "unit": "dB",
-    }
+    return stretch_sentinel_s1_grayscale(
+        data, nodata=nodata, percentiles=percentiles, method="db"
+    )
 
 
 # --------------------------------------------------------------------------- #
