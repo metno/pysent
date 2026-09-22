@@ -123,12 +123,13 @@ Levers, roughly in impact order:
   bands into numpy. Measured on two real scenes, this lifts a hazy scene
   from mean 17/255 to 44/255 while clipping 0.6 % of pixels; min/max left it nearly
   black. Valid pixels now start at 1 so none of them can be mistaken for NoData.
-- **SAR should likely be stretched in dB.** S1 amplitude is currently stretched
-  **linearly**; SAR backscatter spans orders of magnitude, so `20*log10(amplitude)`
-  (or `10*log10(intensity)`) before percentile clip typically gives far better
-  contrast. **Now available in the notebook: `S1_DB_SCALE=True`** (uses
-  `squ.stretch_s1_grayscale_db`); validate the `range_used_%` gain, then port to
-  `pysent.s1.stretch_sentinel_s1_grayscale`.
+- **SAR in dB: shipped** (2026-09-22) as the S1 default, `stretch_method="db"` with
+  percentiles 1-99; `"linear"` keeps the old curve. Note the justification that stood
+  here was overstated: measured on a real scene, the *clipped* linear stretch has
+  marginally **higher** entropy (7.82 vs 7.73 bits) and both use all 256 levels. What dB
+  changes is where the range is spent - it compresses the bright end and expands the
+  dark end, so water and shadow stop being a flat black smear. The argument is
+  perceptual, and was settled by looking at the images.
 - **Speckle.** Optional Lee / refined-Lee filter on S1 before stretch.
 - **Per-band vs joint stretch.** Per-band (current) maximises contrast but can shift
   colour balance; a shared/luminance-preserving stretch keeps truer colour. Offer both.

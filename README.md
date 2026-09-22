@@ -29,7 +29,7 @@ results = process_sentinel_s2_safe(
 
 | Module | Contents |
 |---|---|
-| `pysent.s1` | Sentinel-1 amplitude quicklooks from SAFE or NetCDF: GCP warp (TPS or polynomial), percentile grayscale stretch + alpha, tiled/compressed GeoTIFF with overviews. Handles **VV/VH, HH/HV and single-pol** products. |
+| `pysent.s1` | Sentinel-1 amplitude quicklooks from SAFE or NetCDF: GCP warp (TPS or polynomial), dB or linear percentile stretch + alpha, tiled/compressed GeoTIFF with overviews. Handles **VV/VH, HH/HV and single-pol** products. |
 | `pysent.s2` | Sentinel-2 RGB band combinations from SAFE: one stacked-VRT warp per scene, per-band percentile stretch with gamma (or min/max), tiled/compressed 8-bit RGB with overviews. |
 | `pysent.profiles` | Platform detection (S1 vs S2) from any textual hint, plus per-platform profile defaults. |
 | `pysent.archive` | Catalogue download URL → local archive path; UUID → local SAFE resolution. |
@@ -197,8 +197,12 @@ processing_options={
 }
 ```
 
-Sentinel-1 keeps its linear 2–98 percentile stretch and writes an explicit alpha
-band, so its NoData was never ambiguous.
+Sentinel-1 is stretched in **dB** (`20*log10(amplitude)`) between the 1st and
+99th percentile, which is how SAR is normally read: the bright end is compressed
+so that water, radar shadow and smooth ground show detail instead of going flat
+black. `stretch_method="linear"` with `stretch_percentiles=(2.0, 98.0)`
+reproduces the previous rendering exactly. Validity lives in an explicit alpha
+band, so S1 NoData was never ambiguous.
 
 ## Performance
 
@@ -219,15 +223,14 @@ sweep and the memory budget.
 
 Each is measurable with `pysent.qa`:
 
-- **S1 is stretched linearly.** SAR backscatter spans orders of magnitude, so
-  `20*log10(amplitude)` before the percentile clip should give better contrast.
+- **Speckle filtering** (Lee / refined Lee) on S1 before the stretch: measured at
+  ENL 16 → 175 for about 8 s per polarisation. Shipping as an option next.
 - **The S1 warp dominates its cost** (~27 s of 31 s for an S1 GRD).
   `use_tps=False` swaps the thin-plate spline for the polynomial GCP transform
   and saves about 23 % — measured at 1.54 output pixels RMS off the product's
   own GCPs, which is why it is not the default.
 - **S1 warps to EPSG:32661 (UPS North) at 40 m** by default, which suits the
   Nordic archive; scenes further south want their own UTM zone via `target_epsg`.
-- **Speckle filtering** (Lee / refined Lee) on S1 before the stretch.
 - COG output was evaluated and not adopted: slower, for the same size, and the
   GeoTIFF already carries internal overviews.
 
