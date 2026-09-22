@@ -80,6 +80,7 @@ The docs are **executable notebooks**, all of which CI runs on every push:
 | [02_sentinel1](docs/notebooks/02_sentinel1.ipynb) | polarisations, the GCP warp, stretch percentiles |
 | [03_sentinel2](docs/notebooks/03_sentinel2.ipynb) | band combinations, percentile vs min/max stretch |
 | [04_benchmarks](docs/notebooks/04_benchmarks.ipynb) | time and memory per step, stretch quality |
+| [05_bulk_benchmarks](docs/notebooks/05_bulk_benchmarks.ipynb) | throughput: scenes/hour and memory across worker and thread counts |
 
 They run with no Sentinel data at all (using the small committed fixtures), or
 against a mounted archive for the full pipeline:
@@ -246,7 +247,9 @@ per scene:
 
 Two GDAL threads per worker measured fastest nearly everywhere; the bulk runner
 sizes itself that way. [`examples/README.md`](examples/README.md) has the full
-sweep and the memory budget.
+sweep and the memory budget, and
+[`05_bulk_benchmarks.ipynb`](docs/notebooks/05_bulk_benchmarks.ipynb) re-runs it
+on your own machine.
 
 ## Known tuning work
 

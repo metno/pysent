@@ -9,6 +9,7 @@ than installed.
 | [`bulk_convert.py`](bulk_convert.py) | you have the products on disk (or a list of paths/URLs) |
 | [`bulk_from_catalogue.py`](bulk_from_catalogue.py) | you have catalogue UUIDs or a search, and want the archive copy resolved for you (needs the `csw` extra) |
 | [`slurm/bulk_array.sbatch`](slurm/bulk_array.sbatch) | you are running on a Slurm cluster and want an array job |
+| [`bench_bulk.py`](bench_bulk.py) | you want to measure the table below on your own machine |
 
 ```bash
 # everything under a directory, sized automatically for the machine
@@ -73,6 +74,15 @@ disk when the outputs live on a shared filesystem.
 
 Scenes come from a warm page cache here, so a cold archive or a network
 filesystem will be slower; the shape of the table is what matters.
+
+To measure your own machine, sweep the grid with the harness that produced this
+table — or run [`05_bulk_benchmarks.ipynb`](../docs/notebooks/05_bulk_benchmarks.ipynb),
+which does the same and plots it:
+
+```bash
+python examples/bench_bulk.py --input-dir /archive/S2C/2026/09 \
+    --grid 4x4,8x2,16x1 --scenes 16 --results-log sweep.jsonl
+```
 
 **Sentinel-1 with `--option speckle_filter=lee` costs about 9 s more per
 polarisation** (a VV+VH scene goes from 20 s to 38 s) and about 0.2 GB more per
