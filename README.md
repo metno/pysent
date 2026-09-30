@@ -181,6 +181,51 @@ environment variables below only supply defaults when an option is omitted.
 - **A ready-made runner** with these settings, resume and failure isolation is
   in [`examples/bulk_convert.py`](examples/bulk_convert.py).
 
+### Reducing output size
+
+Three processing options decide how large a product is. The platforms want
+different settings, because Sentinel-1 already defaults to its smallest codec
+and Sentinel-2 defaults to a lossless one.
+
+| Option | Default | Effect on size |
+|---|---|---|
+| `target_resolution` | 10 m (S2, the finest band used), 40 m (S1) | The biggest lever: doubling it quarters the pixel count. An S2 true-colour product is 175 MB at 10 m and 6 MB at 60 m. |
+| `preset="quicklook"` | `full` | Shorthand for `target_resolution` 60 m (S2) / 160 m (S1), nothing else. An explicit `target_resolution` wins over it. |
+| `compression` | `DEFLATE` (S2), `JPEG` (S1) | S2: `JPEG` or `WEBP` are several times smaller but lossy. S1: leave it alone. |
+| `overview_factors` | `(2, 4, 8, 16)` | Overviews add about a third; `(4, 8, 16)` drops most of that, at the cost of a slower first zoom-out. An empty list falls back to the default, so overviews cannot be turned off. |
+
+```python
+# Sentinel-2
+processing_options={
+    "target_resolution": 20,
+    "compression": "JPEG",              # or "WEBP" for the smallest file
+    "overview_factors": (4, 8, 16),
+}
+
+# Sentinel-1: keep the default JPEG
+processing_options={
+    "target_resolution": 80,
+    "overview_factors": (4, 8, 16),
+}
+```
+
+- **Lossy Sentinel-2 output can fringe at the data edge.** The product has no
+  alpha band; 0 is the NoData value (see below), and `JPEG` and `WEBP` do not
+  keep exact zeros next to valid pixels. Where transparency at a swath edge
+  matters, stay on `DEFLATE` and reduce the resolution instead.
+- **Another lossless codec gains nothing.** On the Sentinel-2 test window `ZSTD`
+  is the size of `DEFLATE` and `LZW` is 20 % larger, against `JPEG` at about a
+  fifth and `WEBP` smaller still.
+- **Sentinel-1 is gray + alpha, two bands.** `WEBP` refuses that layout, and
+  `DEFLATE` or `ZSTD` come out about 2.5 times the size of the default `JPEG`.
+- **There is no quality setting**: `compression` is passed straight to GDAL, so
+  lossy codecs run at GDAL's default quality. `block_size` is not a size lever.
+
+The codec ratios are indicative: they come from the 512 × 512 fixtures under
+`tests/data/`, not from full scenes. From the bulk runner the same options are
+`--preset quicklook` and `--option target_resolution=20`,
+`--option overview_factors=4,8,16` ([examples/README.md](examples/README.md)).
+
 ## How Sentinel-2 products are rendered
 
 Each band is stretched from its **0.5–99.5 percentile** range through a **gamma of
