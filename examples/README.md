@@ -102,6 +102,11 @@ for NoData. Any processing option can be overridden from the command line:
 --option compression=JPEG             # smaller, lossy output
 ```
 
+For smaller files, `--preset quicklook`, `--option target_resolution=20` and
+`--option overview_factors=4,8,16` matter more than the codec; the trade-offs
+per platform are in
+[Reducing output size](../README.md#reducing-output-size).
+
 ## Resuming, and what counts as done
 
 A scene is skipped when its sidecar JSON exists and every output it lists is
