@@ -279,6 +279,33 @@ the product type: a GRDH scene has about 4.4 looks natively, but warping to 40 m
 already averages it to about 16, and a filter told to expect 4.4 would smooth
 away real texture.
 
+## What a product records about itself
+
+Every product carries the settings that determined its pixels as `PYSENT_*` items
+in the default GDAL metadata domain, so plain `gdalinfo` shows them and they travel
+with the file (a byte copy keeps them):
+
+```
+Metadata:
+  PYSENT_PRESET=full
+  PYSENT_SPECKLE_FILTER=none
+  PYSENT_STRETCH_METHOD=db
+  PYSENT_STRETCH_PERCENTILES=1.0,99.0
+  PYSENT_TARGET_EPSG=EPSG:32661
+  PYSENT_TARGET_RESOLUTION=40.0
+  PYSENT_VERSION=0.1.0
+  PYSENT_WARP_TRANSFORM=thin-plate-spline
+  TIFFTAG_SOFTWARE=pysent 0.1.0
+```
+
+`PYSENT_WARP_TRANSFORM` (`thin-plate-spline` or `polynomial-gcp`, from `use_tps`)
+is written for Sentinel-1 SAFE only; `PYSENT_SPECKLE_WINDOW` and
+`PYSENT_SPECKLE_LOOKS` (the looks actually used) only when the Lee filter ran;
+`PYSENT_STRETCH_GAMMA` for Sentinel-2, whose `PYSENT_STRETCH_METHOD` is `none` when
+`histogram_stretch` is off. Each result dict returns the same mapping as
+`provenance`, so a caller can record it without reopening the file. The pixels
+are unchanged: a real S1 and S2 scene give the same pixel digest before and after.
+
 ## Performance
 
 One 16-core machine, real scenes end to end, Sentinel-2 counting three products

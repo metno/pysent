@@ -231,6 +231,34 @@ def atomic_output(final_path: Path) -> Iterator[Path]:
         temporary.unlink(missing_ok=True)
 
 
+def _provenance_text(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (tuple, list)):
+        return ",".join(_provenance_text(v) for v in value)
+    if isinstance(value, float):
+        return repr(value)
+    return str(value)
+
+
+def provenance(**values: object) -> dict[str, str]:
+    """The settings that determined a product's pixels, as GDAL metadata strings.
+
+    Stamped into the default domain under ``PYSENT_<NAME>`` (plain ``gdalinfo``
+    shows it; a custom domain would need ``-mdd``) and returned beside the
+    product, so a caller records the same mapping without reopening the file.
+    ``None`` means "does not apply" and is left out.
+    """
+    from . import __version__
+
+    stamped = {"PYSENT_VERSION": __version__}
+    for name, value in values.items():
+        if value is not None:
+            stamped[f"PYSENT_{name.upper()}"] = _provenance_text(value)
+    stamped["TIFFTAG_SOFTWARE"] = f"pysent {__version__}"
+    return stamped
+
+
 # --------------------------------------------------------------------------- #
 # Product fan-out
 # --------------------------------------------------------------------------- #

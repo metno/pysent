@@ -21,6 +21,7 @@ from ._runtime import (
     available_cpus,
     gdal_errors,
     gdal_runtime,
+    provenance,
     resolve_gdal_runtime,
     resolve_work_dir,
     run_product_jobs,
@@ -775,6 +776,7 @@ def _process_sentinel_s2_product(
     overview_factors: tuple[int, ...],
     stretch_method: str = S2_STRETCH_METHOD,
     stretch_gamma: float = S2_STRETCH_GAMMA,
+    preset: str = "full",
 ) -> dict[str, Any]:
     """Write one RGB product by selecting its three bands from the scene's warped stack."""
     if isinstance(stack, BaseException):
@@ -795,6 +797,14 @@ def _process_sentinel_s2_product(
             raise RuntimeError(f"Unable to select bands {', '.join(band_names)} from the Sentinel-2 stack")
         selected = None
 
+        stamp = provenance(
+            stretch_method=stretch_method if histogram_stretch else "none",
+            stretch_percentiles=tuple(percentiles) if histogram_stretch and stretch_method == "percentile" else None,
+            stretch_gamma=stretch_gamma if histogram_stretch else None,
+            target_epsg=stack["target_epsg"],
+            target_resolution=stack["target_resolution"],
+            preset=preset,
+        )
         # The final file is moved into place only once complete, so a failure or a
         # kill leaves no truncated output under the final name.
         with atomic_output(final_path) as partial_path:
@@ -823,6 +833,10 @@ def _process_sentinel_s2_product(
                     band = dataset.GetRasterBand(band_index)
                     if band is not None:
                         band.SetColorInterpretation(color)
+                # Inside atomic_output, so a stamped file is always a complete one.
+                # Item by item: SetMetadata would replace what the writer put there.
+                for key, value in stamp.items():
+                    dataset.SetMetadataItem(key, value)
             dataset = None
     finally:
         subset_path.unlink(missing_ok=True)
@@ -835,6 +849,7 @@ def _process_sentinel_s2_product(
         "target_resolution": stack["target_resolution"],
         "histogram_stretch": histogram_stretch,
         "stretch": stretch_stats,
+        "provenance": stamp,
     }
 
 
@@ -929,6 +944,7 @@ def _resolve_sentinel_s2_processing_settings(
     output_count: int,
 ) -> dict[str, Any]:
     processing = apply_preset(processing_options, S2_PRESETS)
+    preset = str((processing_options or {}).get("preset") or "full").strip().lower()
     histogram = processing.get("histogram_stretch")
     percentiles, method, gamma = _resolve_stretch_options(processing)
     block_size = _coerce_positive_int(processing.get("block_size"), 256)
@@ -968,6 +984,7 @@ def _resolve_sentinel_s2_processing_settings(
             stacklevel=3,
         )
     return {
+        "preset": preset,
         "target_epsg": target_epsg,
         "target_resolution": target_resolution,
         "resample_alg": resample_alg,
@@ -1055,6 +1072,7 @@ def process_sentinel_s2_safe(
                     "stretch_gamma": settings["stretch_gamma"],
                     "compression": settings["compression"],
                     "overview_factors": settings["overview_factors"],
+                    "preset": settings["preset"],
                 },
             )
             for product_name in product_names

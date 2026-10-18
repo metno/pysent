@@ -20,6 +20,7 @@ from ._runtime import (
     available_cpus,
     gdal_errors,
     in_child_process,
+    provenance,
     resolve_gdal_runtime,
     resolve_work_dir,
     run_product_jobs,
@@ -675,6 +676,8 @@ def _write_quicklook_from_warped(
     overview_factors: tuple[int, ...] = S1_OVERVIEW_FACTORS,
     target_epsg: str = S1_TARGET_EPSG,
     target_resolution: float = S1_TARGET_RESOLUTION,
+    warp_transform: str | None = None,
+    preset: str = "full",
 ) -> dict[str, Any]:
     with rasterio.open(warped_path) as src:
         data = src.read(1).astype(np.float32, copy=False)
@@ -689,6 +692,18 @@ def _write_quicklook_from_warped(
             percentiles=percentiles,
             use_numba=use_numba,
             method=stretch_method,
+        )
+        filtered = speckle_filter == "lee"
+        stamp = provenance(
+            warp_transform=warp_transform,
+            stretch_method=stretch_method,
+            stretch_percentiles=tuple(percentiles),
+            speckle_filter=speckle_filter,
+            speckle_window=speckle_window if filtered else None,
+            speckle_looks=(speckle or {}).get("looks") if filtered else None,
+            target_epsg=target_epsg,
+            target_resolution=target_resolution,
+            preset=preset,
         )
         profile = src.profile.copy()
         profile.update(
@@ -711,6 +726,8 @@ def _write_quicklook_from_warped(
             if factors:
                 dst.build_overviews(factors, Resampling.average)
                 dst.update_tags(ns="rio_overview", resampling="average")
+            # output_path is atomic_output's partial file: a stamped file is a complete one.
+            dst.update_tags(**stamp)
         return {
             "stretch": stretch,
             "speckle": speckle,
@@ -719,6 +736,7 @@ def _write_quicklook_from_warped(
             "target_epsg": target_epsg,
             "target_resolution": target_resolution,
             "used_numba": bool(use_numba and NUMBA_AVAILABLE),
+            "provenance": stamp,
         }
 
 
@@ -744,8 +762,13 @@ def _run_sentinel_s1_product(
     compression: str,
     overview_factors: tuple[int, ...],
     warp_kwargs: dict[str, Any] | None = None,
+    preset: str = "full",
 ) -> dict[str, Any]:
     final_path = Path(output_path)
+    # Only the SAFE warp is GCP-based; the NetCDF path has no transform to record.
+    warp_transform = None
+    if warp_kwargs and "use_tps" in warp_kwargs:
+        warp_transform = "thin-plate-spline" if warp_kwargs["use_tps"] else "polynomial-gcp"
     scratch_root = Path(work_dir) if work_dir else final_path.parent
     # Intermediates live in a private scratch directory and the final file is
     # moved into place only once complete, so a failure or a kill leaves neither
@@ -778,6 +801,8 @@ def _run_sentinel_s1_product(
             overview_factors=overview_factors,
             target_epsg=target_epsg,
             target_resolution=target_resolution,
+            warp_transform=warp_transform,
+            preset=preset,
         )
     return {
         "variable": variable,
@@ -803,6 +828,7 @@ def _resolve_sentinel_s1_processing_settings(
     output_count: int,
 ) -> dict[str, Any]:
     processing = apply_preset(processing_options, S1_PRESETS)
+    preset = str((processing_options or {}).get("preset") or "full").strip().lower()
     percentiles = _resolve_stretch_percentiles(processing)
     stretch_method = str(processing.get("stretch_method") or S1_STRETCH_METHOD).strip().lower()
     if stretch_method not in {"db", "linear"}:
@@ -840,6 +866,7 @@ def _resolve_sentinel_s1_processing_settings(
     gdal_num_threads = _resolve_gdal_num_threads(requested_gdal_threads, product_workers)
     warp_memory_limit_mb = _resolve_warp_memory_limit_mb(processing.get("warp_memory_limit_mb"))
     return {
+        "preset": preset,
         "percentiles": percentiles,
         "stretch_method": stretch_method,
         "speckle_filter": speckle_filter,
@@ -893,6 +920,7 @@ def _sentinel_s1_jobs(
                 "speckle_looks": settings["speckle_looks"],
                 "compression": settings["compression"],
                 "overview_factors": settings["overview_factors"],
+                "preset": settings["preset"],
                 **{key: settings[key] for key in extra},
             },
         )
