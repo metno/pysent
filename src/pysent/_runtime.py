@@ -86,8 +86,17 @@ def available_cpus() -> int:
 
 
 def in_child_process() -> bool:
-    """True inside any ``multiprocessing`` child: ``Pool`` and ``ProcessPoolExecutor`` workers alike."""
-    return multiprocessing.parent_process() is not None
+    """True inside any worker process: ``multiprocessing`` ``Pool`` and ``ProcessPoolExecutor`` children, and Celery's.
+
+    Celery's prefork pool is ``billiard``. Its children are registered as
+    ``multiprocessing.current_process()`` (a ``ForkPoolWorker``) but
+    ``multiprocessing.parent_process()`` answers ``None`` there, so the parent
+    check alone misses them. Only the main process is called ``MainProcess``.
+    """
+    return (
+        multiprocessing.parent_process() is not None
+        or multiprocessing.current_process().name != "MainProcess"
+    )
 
 
 # --------------------------------------------------------------------------- #
