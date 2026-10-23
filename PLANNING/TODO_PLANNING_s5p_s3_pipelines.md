@@ -355,6 +355,18 @@ The job model needs an idempotency key over the sorted inputs and options, parti
 
 ## C. Open questions for the user
 
+**Answers so far (2026-10-23). All provisional: the owner said to go ahead, but a domain expert may review them later and change the approach, so each answered choice stays behind an option and is cited by its Q number in commits and PRs.**
+
+| Q | Answer |
+|---|---|
+| Q1 | confirmed as written |
+| Q2 | float is reserved for the WCS; the WMS uses styled single-band colormaps (the message was cut off after this; see the note under Q2) |
+| Q3 | keep the recommended defaults (0.75 NO2, 0.5 the others), **and expose the threshold as a parameter of the API when a product is requested**. This is the per-product `qa_min` (S5P) and `mask_flags` (S3) of B.3, which the service passes through from its request. The consequences are listed under Q3. |
+| Q4 | `auto` |
+| Q5 | `average` |
+| Q6–Q16 | as recommended (the italic recommendations below) |
+
+
 Asked just-in-time, before the phase that needs the answer. *Italics are the recommendation.* Pictures for each are on the owner page (link in the header table).
 
 - **Q1 (before Phase 0). Scope and order.** B.1 reorders your suggestion: detection first, S3 foundation with VG1/V10, then WFR/LFR, then SLSTR L2, true colour last; `O3__PR` columns included; `O3_TCL`, `L1B`, `NP_BD*`, SYN, RBT, VGP deferred; FRP and SRAL separate. *Confirm, or say which of WFR / LST matters more to your users than VG1.*
@@ -362,6 +374,8 @@ Asked just-in-time, before the phase that needs the answer. *Italics are the rec
 - **Q2 (before Phase 1). Output form.** S1 and S2 write 8-bit stretched images; for S5P/S3 the values matter (point queries, WCS, comparing days). *Float32 physical-units GeoTIFFs, NaN nodata, with the colour range carried as a style hint and the service styling them in MapServer; an 8-bit rendered copy only for thumbnails.* Alternative: 8-bit RGBA like S1/S2 (small, ready to display, values lost). Also decides the float compression (`DEFLATE`+predictor 3 versus the repo's `LZW`).
   **Answer (2026-10-23, provisional: a domain expert may review it later): float is reserved for the WCS; the WMS uses styled single-band colormaps.** The message was cut off here, so the rest is not recorded. To confirm at the start of Phase 1: the Float32 GeoTIFF is what WCS serves, and WMS colour comes from a single-band colormap applied by the service, not from an RGB rendered by pysent; whether pysent also writes an 8-bit copy for thumbnails is still open.
 - **Q3 (Phase 1). NO2 `qa_min` default.** *0.75, ESA's recommendation*, but it keeps 25.6 % of the Europe granule against 80.7 % at 0.5 (picture 1) because most pixels sit in a single class at 0.74 whose meaning I have not verified. Low `qa` NO2 over cloud and snow is misleading at high latitudes, but 0.75 may leave a map that looks empty. Your call; the field exists either way.
+  **Answer (2026-10-23, provisional):** defaults kept; the threshold is also a request parameter. What that implies: (1) `qa_min` is validated per request (0.00 to 1.00 in steps of 0.01) and recorded in the `PYSENT_*` provenance and the result, so a file says which threshold made it; (2) **the output file name must carry the threshold** (or the service must key its cache on it), because two requests that differ only in `qa_min` otherwise overwrite each other and the bulk runner's "skip if it exists" rule would return the wrong map: pysent takes `output_names` from the caller, so this is a service-side checklist item; (3) the mask is applied at processing time, so a different threshold means a re-run (a second or less for an NRTI granule, 3 to 7 s for an orbit);
+  (4) for S3 the equivalent is `mask_flags` (a list of flag names, or `default`/`none`). Open option, not decided: also store the quality value as a second band (UInt8, 0 to 100) so a threshold could be applied later without reprocessing; it makes the file larger and depends on what the WMS styling can do with a second band.
 - **Q4 (Phase 1). Grid policy.** `auto`: EPSG:4326 at 0.05° when the swath neither crosses ±180° nor contains a pole nor reaches south of ~30°N; otherwise EPSG:32661 at 5 km (S1's CRS), 32761 in the south. *`auto`.* Fixed 4326 is wrong at poles and the seam (5.5 % holes, a smear across longitudes; picture 4) and a global orbit still shows fringe artefacts at the polar cap; fixed 32661 cannot hold a global orbit.
 - **Q5 (Phase 1). Resampling default.** *`average`* (matches the exact-footprint reference, +30–45 % time, picture 2) over `near` (visible along-track streaks).
 - **Q6 (Phase 1). Stored and displayed units.** *Store native units (mol m⁻², ppb, K); display units are style/query concerns, conversion factor recorded.* Alternative: store µmol m⁻² or °C so a GetFeatureInfo needs no conversion.
