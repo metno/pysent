@@ -157,12 +157,19 @@ def contains_pole(lat: np.ndarray) -> bool:
         return bool(np.nanmax(np.abs(lat)) >= POLAR_LATITUDE)
 
 
+# One degree of latitude, for turning a ground sampling in metres into the
+# degrees a geographic grid wants. Good to a few per cent, which is far finer
+# than the choice of grid step needs.
+METRES_PER_DEGREE = 111_320.0
+
+
 def choose_grid(
     lat: np.ndarray,
     lon: np.ndarray,
     *,
     epsg: int | str = "auto",
     resolution: float | None = None,
+    ground_sampling_m: float | None = None,
 ) -> tuple[int, float]:
     """Pick the output projection and resolution for this swath.
 
@@ -177,6 +184,14 @@ def choose_grid(
     * anything else - the ordinary mid-latitude case - goes on **EPSG:4326** at
       0.05°.
 
+    ``resolution`` is in the *chosen* CRS's own units, so it can only be given
+    by a caller who already knows which CRS that will be.
+    ``ground_sampling_m`` is the alternative for a caller who does not: a
+    distance on the ground, converted to degrees or left in metres once the CRS
+    is known. A product whose native sampling differs from the family's passes
+    this, since it cannot know whether the granule will land on a geographic or
+    a projected grid.
+
     Returns ``(epsg, resolution)``, the resolution in degrees for EPSG:4326 and
     in metres otherwise.
     """
@@ -184,6 +199,8 @@ def choose_grid(
         chosen = int(epsg)
         if resolution is not None:
             return chosen, float(resolution)
+        if ground_sampling_m is not None:
+            return chosen, _ground_sampling_in(chosen, ground_sampling_m)
         return chosen, DEFAULT_LATLON_RESOLUTION if chosen == EPSG_LATLON else DEFAULT_POLAR_RESOLUTION
 
     with np.errstate(invalid="ignore"):
@@ -193,10 +210,25 @@ def choose_grid(
     if not spans_orbit and (crosses_antimeridian(lon) or contains_pole(lat)):
         northern = (lat_min + lat_max) / 2.0 >= 0.0
         chosen = EPSG_POLAR_NORTH if northern else EPSG_POLAR_SOUTH
-        return chosen, float(resolution) if resolution is not None else DEFAULT_POLAR_RESOLUTION
+        return chosen, _resolution_for(chosen, resolution, ground_sampling_m)
 
     # Mid-latitudes, and whole orbits for want of anything better.
-    return EPSG_LATLON, float(resolution) if resolution is not None else DEFAULT_LATLON_RESOLUTION
+    return EPSG_LATLON, _resolution_for(EPSG_LATLON, resolution, ground_sampling_m)
+
+
+def _ground_sampling_in(epsg: int, ground_sampling_m: float) -> float:
+    """``ground_sampling_m`` expressed in the units of ``epsg``."""
+    if int(epsg) == EPSG_LATLON:
+        return float(ground_sampling_m) / METRES_PER_DEGREE
+    return float(ground_sampling_m)
+
+
+def _resolution_for(epsg: int, resolution: float | None, ground_sampling_m: float | None) -> float:
+    if resolution is not None:
+        return float(resolution)
+    if ground_sampling_m is not None:
+        return _ground_sampling_in(epsg, ground_sampling_m)
+    return DEFAULT_LATLON_RESOLUTION if int(epsg) == EPSG_LATLON else DEFAULT_POLAR_RESOLUTION
 
 
 def _spatial_reference(epsg: int) -> osr.SpatialReference:
