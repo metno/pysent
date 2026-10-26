@@ -68,8 +68,10 @@ from .errors import EmptySceneError
 __all__ = [
     "S5P_PRESETS",
     "S5P_PRODUCTS",
+    "S5P_TYPE_PRODUCTS",
     "S5P_QUALITY_VARIABLE",
     "build_sentinel_s5p_output_filename",
+    "default_sentinel_s5p_products",
     "normalize_sentinel_s5p_product_map",
     "process_sentinel_s5p_netcdf",
 ]
@@ -92,9 +94,128 @@ S5P_PRODUCTS: dict[str, dict[str, Any]] = {
         "colormap": "viridis",
         "label": "Tropospheric NO₂ column",
     },
+    "co": {
+        "variable": f"{PRODUCT_GROUP}/carbonmonoxide_total_column",
+        "units": "mol m-2",
+        "qa_min": 0.5,
+        "value_range": (0.02, 0.04),
+        "colormap": "viridis",
+        "label": "CO total column",
+    },
+    "hcho": {
+        "variable": f"{PRODUCT_GROUP}/formaldehyde_tropospheric_vertical_column",
+        "units": "mol m-2",
+        "qa_min": 0.5,
+        "value_range": (0.0, 5e-4),
+        "colormap": "viridis",
+        "label": "Tropospheric HCHO column",
+    },
+    "so2": {
+        "variable": f"{PRODUCT_GROUP}/sulfurdioxide_total_vertical_column",
+        "units": "mol m-2",
+        "qa_min": 0.5,
+        "value_range": (0.0, 2.5e-3),
+        "colormap": "viridis",
+        "label": "SO₂ total column",
+    },
+    "o3": {
+        "variable": f"{PRODUCT_GROUP}/ozone_total_vertical_column",
+        "units": "mol m-2",
+        "qa_min": 0.5,
+        "value_range": (0.12, 0.15),
+        "colormap": "viridis",
+        "label": "Total ozone column",
+    },
+    "ch4": {
+        "variable": f"{PRODUCT_GROUP}/methane_mixing_ratio_bias_corrected",
+        "units": "ppb",
+        "qa_min": 0.5,
+        "value_range": (1850.0, 2000.0),
+        "colormap": "viridis",
+        "label": "Methane mixing ratio",
+    },
+    "aer_ai": {
+        "variable": f"{PRODUCT_GROUP}/aerosol_index_354_388",
+        "units": "1",
+        "qa_min": 0.5,
+        # Diverging about zero, which is the physically meaningful centre:
+        # negative is clean or cloudy, positive is absorbing aerosol.
+        "value_range": (-2.0, 2.0),
+        "colormap": "rdbu",
+        "label": "UV aerosol index",
+    },
+    "cloud": {
+        "variable": f"{PRODUCT_GROUP}/cloud_fraction",
+        "units": "1",
+        "qa_min": 0.5,
+        # A fraction: 0 to 1 by definition, not from the percentiles.
+        "value_range": (0.0, 1.0),
+        "colormap": "grey",
+        "label": "Cloud fraction",
+    },
+    "aer_lh": {
+        "variable": f"{PRODUCT_GROUP}/aerosol_mid_height",
+        "units": "m",
+        "qa_min": 0.5,
+        "value_range": (0.0, 9000.0),
+        "colormap": "viridis",
+        "label": "Aerosol mid height",
+    },
+    "o3_pr_total": {
+        "variable": f"{PRODUCT_GROUP}/ozone_total_column",
+        "units": "mol m-2",
+        "qa_min": 0.5,
+        "value_range": (0.12, 0.15),
+        "colormap": "viridis",
+        "label": "Total ozone column (profile product)",
+        # The profile product is on a 75x77 grid of about 29 km pixels, against
+        # 3.5-7 km for every other Level-2 type. The family default of 0.05 deg
+        # would oversample it roughly fivefold and claim a resolution it does
+        # not have, so this type carries its own - as a distance on the ground,
+        # because the granule may land on a geographic or a projected grid and
+        # the same number cannot mean both.
+        "ground_sampling_m": 28_000.0,
+    },
+    "o3_pr_tropospheric": {
+        "variable": f"{PRODUCT_GROUP}/ozone_tropospheric_column",
+        "units": "mol m-2",
+        "qa_min": 0.5,
+        "value_range": (0.0, 0.04),
+        "colormap": "viridis",
+        "label": "Tropospheric ozone column (profile product)",
+        "ground_sampling_m": 28_000.0,
+    },
+}
+
+# Which products each Sentinel-5P product type can yield. Lets a caller hand in
+# a file and ask what it is for, rather than having to know.
+S5P_TYPE_PRODUCTS: dict[str, tuple[str, ...]] = {
+    "L2__NO2___": ("no2",),
+    "L2__CO____": ("co",),
+    "L2__HCHO__": ("hcho",),
+    "L2__SO2___": ("so2",),
+    "L2__O3____": ("o3",),
+    "L2__CH4___": ("ch4",),
+    "L2__AER_AI": ("aer_ai",),
+    "L2__CLOUD_": ("cloud",),
+    "L2__AER_LH": ("aer_lh",),
+    "L2__O3__PR": ("o3_pr_total", "o3_pr_tropospheric"),
 }
 
 S5P_DEFAULT_PRODUCTS = ("no2",)
+
+
+def default_sentinel_s5p_products(input_dataset: str) -> tuple[str, ...]:
+    """The products this file is for, worked out from its own name.
+
+    A Sentinel-5P file holds one trace gas, so "derive whatever this file is
+    for" is the common request and a caller should not have to look it up.
+    Falls back to NO2 when the name says nothing.
+    """
+    from .profiles import detect_nbs_sentinel_product
+
+    product_type = detect_nbs_sentinel_product(str(input_dataset))["product_type"]
+    return S5P_TYPE_PRODUCTS.get(product_type, S5P_DEFAULT_PRODUCTS)
 
 # A quicklook trades resolution for speed, the same idea as the Sentinel-2 preset.
 S5P_PRESETS: dict[str, dict[str, Any]] = {
@@ -122,7 +243,9 @@ _STYLED_CEILING = 255
 # --------------------------------------------------------------------------- #
 # The request
 # --------------------------------------------------------------------------- #
-def normalize_sentinel_s5p_product_map(products: Any) -> dict[str, dict[str, Any]]:
+def normalize_sentinel_s5p_product_map(
+    products: Any, *, default_products: tuple[str, ...] | None = None
+) -> dict[str, dict[str, Any]]:
     """Validate a requested product map and fill in the defaults.
 
     ``products`` is ``{product_key: {field: value}}``; a value of ``None`` or an
@@ -131,7 +254,7 @@ def normalize_sentinel_s5p_product_map(products: Any) -> dict[str, dict[str, Any
     before anything is opened.
     """
     if products in (None, "", {}):
-        products = {name: {} for name in S5P_DEFAULT_PRODUCTS}
+        products = {name: {} for name in (default_products or S5P_DEFAULT_PRODUCTS)}
     if not isinstance(products, dict):
         raise ValueError(f"products must be a mapping of product name to options, not {type(products).__name__}")
 
@@ -188,6 +311,7 @@ def normalize_sentinel_s5p_product_map(products: Any) -> dict[str, dict[str, Any
             "value_range": value_range,
             "colormap": str(requested.get("colormap") or defaults["colormap"]),
             "label": defaults["label"],
+            "ground_sampling_m": defaults.get("ground_sampling_m"),
         }
     if not normalized:
         raise ValueError("no products were requested")
@@ -520,11 +644,14 @@ def _process_one_product(
     if factor != 1.0:
         masked = (masked * np.float32(factor)).astype(np.float32)
 
+    # Precedence: an explicit request, then the preset, then this product's own
+    # native sampling (only the ozone profile has one), then the family default.
     epsg, resolution = choose_grid(
         lat,
         lon,
         epsg=settings["target_epsg"] or options["grid"]["epsg"],
-        resolution=settings["target_resolution"] or options["grid"]["res"],
+        resolution=options["grid"]["res"] or settings["target_resolution"],
+        ground_sampling_m=options.get("ground_sampling_m"),
     )
     bounds = grid_bounds(lat, lon, epsg, resolution)
     cells = ((bounds[2] - bounds[0]) / resolution) * ((bounds[3] - bounds[1]) / resolution)
@@ -741,7 +868,9 @@ def process_sentinel_s5p_netcdf(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    requested = normalize_sentinel_s5p_product_map(products)
+    requested = normalize_sentinel_s5p_product_map(
+        products, default_products=default_sentinel_s5p_products(input_dataset)
+    )
     settings = _resolve_processing_settings(processing_options)
     names = dict(output_names or {})
     for product, options in requested.items():

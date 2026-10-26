@@ -69,3 +69,22 @@ def s5p_no2_window() -> Path:
     if not path.exists():
         pytest.skip("s5p_no2_window.nc missing - run scripts/make_test_data.py --platform s5p")
     return path
+
+
+@pytest.fixture(scope="session")
+def s5p_archive() -> Path:
+    """A directory of full-size real Sentinel-5P granules, one per product type.
+
+    These are too large to commit (4-600 MB each), so the tests that need them
+    skip unless ``PYSENT_S5P_ARCHIVE`` points at a directory holding them. Fetch
+    them with the titles in ``PLANNING/TODO_PLANNING_s5p_s3_pipelines.md`` B.7.
+    """
+    import os
+
+    location = os.environ.get("PYSENT_S5P_ARCHIVE")
+    if not location:
+        pytest.skip("set PYSENT_S5P_ARCHIVE to a directory of real S5P granules")
+    path = Path(location)
+    if not path.is_dir() or not any(path.glob("S5P_*.nc")):
+        pytest.skip(f"{path} holds no S5P_*.nc granules")
+    return path
