@@ -94,6 +94,32 @@
       "modified": "2026-08-10T14:31:19+00:00",
       "title": "S2C_MSIL2A_20260810T092031_N0512_R093_T35VPE_20260810T124910"
     },
+    "S3": {
+      "artifacts": {
+        "synergy_window": {
+          "dtype": "mixed",
+          "members": {
+            "NDVI.nc": {
+              "dtype": "Byte",
+              "variable": "NDVI"
+            },
+            "sm.nc": {
+              "dtype": "UInt16",
+              "variable": "SM"
+            }
+          },
+          "path": "s3_synergy_window.zip",
+          "sen3_directory": "S3B_SY_2_VG1____20250720T000000_20250720T235959_20250723T142353_EUROPE____________ESA_O_NT_002.SEN3",
+          "size": [
+            384,
+            384
+          ]
+        }
+      },
+      "identifier": "060d5054-3c7c-3e54-b366-ae502eac3f19",
+      "note": "384x384 window over southern Norway, cut from the EUROPE daily tile; members STORED, flag table and 1/112 deg grid intact",
+      "title": "S3B_SY_2_VG1____20250720T000000_20250720T235959_20250723T142353_EUROPE____________ESA_O_NT_002"
+    },
     "S5P": {
       "artifacts": {
         "no2_window": {
