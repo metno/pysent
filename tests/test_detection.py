@@ -231,7 +231,7 @@ def test_out_of_scope_products_are_refused_with_the_reason(title, expected):
         resolve_sentinel_pipeline(title)
 
 
-@pytest.mark.parametrize("title", [S3_WFR_PS1, S3_VG1, S5P_CO_NRTI])
+@pytest.mark.parametrize("title", [S3_WFR_PS1, S3_VG1])
 def test_planned_products_refuse_until_their_phase_lands(title):
     """Recognised, routed in the table, but no pipeline exists yet.
 
@@ -279,7 +279,10 @@ def test_the_ready_set_is_exactly_what_has_a_pipeline():
     """Flipping a row of the table to ``ready`` is how a phase makes its work
     reachable, so the set is pinned here rather than left to drift."""
     assert sorted(supported_sentinel_product_types()) == [
-        "S1 GRD", "S1 GRDH", "S1 GRDM", "S2 MSIL1C", "S5P L2__NO2___",
+        "S1 GRD", "S1 GRDH", "S1 GRDM", "S2 MSIL1C",
+        "S5P L2__AER_AI", "S5P L2__AER_LH", "S5P L2__CH4___", "S5P L2__CLOUD_",
+        "S5P L2__CO____", "S5P L2__HCHO__", "S5P L2__NO2___", "S5P L2__O3__PR",
+        "S5P L2__O3____", "S5P L2__SO2___",
     ]
 
 

@@ -668,3 +668,156 @@ def test_statistics_of_an_all_nan_array_are_nan_rather_than_an_error():
     statistics = value_statistics(np.full((3, 3), np.nan, dtype=np.float32))
     assert all(np.isnan(value) for value in statistics.values())
     assert valid_fraction(np.full((3, 3), np.nan, dtype=np.float32)) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# The product table (phase 2)
+# --------------------------------------------------------------------------- #
+def test_every_product_in_the_table_is_well_formed():
+    from pysent.s5p import _COLOUR_ANCHORS
+
+    for key, entry in S5P_PRODUCTS.items():
+        assert entry["variable"].startswith("/PRODUCT/"), key
+        assert 0.0 <= entry["qa_min"] <= 1.0, key
+        low, high = entry["value_range"]
+        assert low < high, key
+        assert entry["colormap"] in _COLOUR_ANCHORS, key
+        assert entry["label"] and entry["label"][0].isupper(), key
+        assert entry["units"], key
+
+
+def test_the_aerosol_index_diverges_about_zero():
+    """It is the one product whose zero is meaningful rather than its floor:
+    negative is clean or cloudy air, positive is absorbing aerosol."""
+    entry = S5P_PRODUCTS["aer_ai"]
+    low, high = entry["value_range"]
+    assert low < 0 < high
+    assert low == -high
+    assert entry["colormap"] == "rdbu"
+
+
+def test_cloud_fraction_spans_its_whole_definition():
+    """Taken from the definition, not from the measured percentiles: a granule's
+    1st percentile was 0.36, and a range starting there would make clear sky
+    unreadable."""
+    assert S5P_PRODUCTS["cloud"]["value_range"] == (0.0, 1.0)
+
+
+def test_the_methane_range_covers_the_measured_values():
+    """The plan proposed 1800-1950 ppb from an audit that had no unmasked
+    methane at all. A daylight granule gives a 99th percentile of 1962."""
+    low, high = S5P_PRODUCTS["ch4"]["value_range"]
+    assert low <= 1868 and high >= 1962
+
+
+@pytest.mark.parametrize(
+    "filename, expected",
+    [
+        ("S5P_NRTI_L2__NO2____20261009T111407_x_46578_03_020901_y.nc", ("no2",)),
+        ("S5P_NRTI_L2__CO_____20261009T011407_x_46572_03_020901_y.nc", ("co",)),
+        ("S5P_NRTI_L2__AER_AI_20261009T011407_x_46572_03_020901_y.nc", ("aer_ai",)),
+        ("S5P_NRTI_L2__CLOUD__20261009T011407_x_46572_03_020800_y.nc", ("cloud",)),
+        ("S5P_NRTI_L2__O3__PR_20261009T011407_x_46572_03_020901_y.nc",
+         ("o3_pr_total", "o3_pr_tropospheric")),
+        ("something-unrecognisable.nc", ("no2",)),
+    ],
+)
+def test_a_file_says_which_products_it_is_for(filename, expected):
+    from pysent.s5p import default_sentinel_s5p_products
+
+    assert default_sentinel_s5p_products(filename) == expected
+
+
+def test_every_ready_type_has_products_and_every_product_has_a_type():
+    """The routing table and the product table must not drift apart."""
+    from pysent.profiles import SENTINEL_PRODUCT_TYPES
+    from pysent.s5p import S5P_TYPE_PRODUCTS
+
+    ready = {
+        product_type
+        for (family, product_type), (_, status, _) in SENTINEL_PRODUCT_TYPES.items()
+        if family == "S5P" and status == "ready"
+    }
+    assert ready == set(S5P_TYPE_PRODUCTS), "a ready S5P type with no products, or the reverse"
+    named = {name for names in S5P_TYPE_PRODUCTS.values() for name in names}
+    assert named == set(S5P_PRODUCTS), "a product with no type, or a type naming an unknown product"
+
+
+# --------------------------------------------------------------------------- #
+# A product's own resolution
+# --------------------------------------------------------------------------- #
+def test_a_products_resolution_is_a_ground_distance_not_a_crs_unit():
+    """The regression for a bug this phase introduced and caught.
+
+    The ozone profile product needs ~28 km cells rather than the family's
+    0.05 deg. Expressed as ``0.25`` degrees it worked on a geographic grid and
+    asked for 0.25 *metres* on a polar one - 114 trillion cells, which only the
+    output-size guard stopped. A product cannot know which grid its granule
+    will land on, so it states metres on the ground and the grid converts.
+    """
+    from pysent._swath import METRES_PER_DEGREE
+
+    lat, lon = _swath((40.0, 65.0), (-2.0, 46.0))
+    _, degrees = choose_grid(lat, lon, ground_sampling_m=28_000.0)
+    assert degrees == pytest.approx(28_000.0 / METRES_PER_DEGREE, rel=1e-9)
+
+    polar_lat, polar_lon = _swath((70.0, 89.0), (-180.0, 180.0))
+    epsg, metres = choose_grid(polar_lat, polar_lon, ground_sampling_m=28_000.0)
+    assert epsg == EPSG_POLAR_NORTH
+    assert metres == 28_000.0
+
+
+def test_an_explicit_resolution_still_wins_over_a_ground_sampling():
+    lat, lon = _swath((40.0, 65.0), (-2.0, 46.0))
+    assert choose_grid(lat, lon, resolution=0.1, ground_sampling_m=28_000.0)[1] == 0.1
+
+
+def test_the_ozone_profile_products_ask_for_coarser_cells():
+    """75x77 pixels of about 29 km, so the family default would oversample it."""
+    for key in ("o3_pr_total", "o3_pr_tropospheric"):
+        assert S5P_PRODUCTS[key]["ground_sampling_m"] == 28_000.0
+    assert "ground_sampling_m" not in S5P_PRODUCTS["no2"]
+
+
+# --------------------------------------------------------------------------- #
+# Against the real granules, when they are available
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("product", sorted(S5P_PRODUCTS))
+def test_each_product_derives_a_plausible_map_from_its_real_granule(s5p_archive, product, tmp_path):
+    """One granule per type, checked for the variable, the width and the range.
+
+    Skips the granules that are all fill: a night pass carries no usable
+    formaldehyde, methane, SO2 or aerosol height, which is normal and is what
+    EmptySceneError exists for.
+    """
+    from pysent.s5p import S5P_TYPE_PRODUCTS, default_sentinel_s5p_products
+
+    product_type = next(
+        (key for key, names in S5P_TYPE_PRODUCTS.items() if product in names), None
+    )
+    assert product_type is not None
+    candidates = sorted(s5p_archive.glob(f"S5P_*{product_type}*.nc"))
+    if not candidates:
+        pytest.skip(f"no {product_type} granule in the archive directory")
+
+    low, high = S5P_PRODUCTS[product]["value_range"]
+    produced = []
+    for granule in candidates:
+        assert default_sentinel_s5p_products(granule.name) == S5P_TYPE_PRODUCTS[product_type]
+        try:
+            result = process_sentinel_s5p_netcdf(
+                input_dataset=str(granule),
+                output_dir=tmp_path / granule.name[:24] / product,
+                products={product: {}},
+                processing_options={"styled": False, "thumbnail": False},
+            )[0]
+        except EmptySceneError:
+            continue
+        produced.append(result)
+        # The median of a real map has to sit inside the colour range, or the
+        # range is wrong for the product.
+        median = result["value_stats"]["p50"]
+        assert low <= median <= high, f"{granule.name}: median {median:g} outside {low:g}..{high:g}"
+
+    if not produced:
+        pytest.skip(f"every {product_type} granule available is all fill")
