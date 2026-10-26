@@ -88,3 +88,17 @@ def s5p_archive() -> Path:
     if not path.is_dir() or not any(path.glob("S5P_*.nc")):
         pytest.skip(f"{path} holds no S5P_*.nc granules")
     return path
+
+
+@pytest.fixture(scope="session")
+def s3_synergy_window() -> Path:
+    """A 384x384 window of a real Synergy VG1 tile, as a small STORED zip.
+
+    Keeps the ``.SEN3`` layout, the member names, the byte packing, the full
+    flag table and a manifest, so the reader's archive path, flag selection and
+    unpacking are all exercised without the 143 MB product.
+    """
+    path = DATA_DIR / "s3_synergy_window.zip"
+    if not path.exists():
+        pytest.skip("s3_synergy_window.zip missing - run scripts/make_test_data.py --platform s3")
+    return path
