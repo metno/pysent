@@ -69,11 +69,16 @@ __all__ = [
     "process_sentinel_s2_safe",
     "stretch_sentinel_s2_rgb",
     # errors
+    "EmptyInputError",
     "EmptySceneError",
     "PartialFailure",
-    # platform / archive
+    "UnsupportedProductError",
+    # platform / routing / archive
     "detect_nbs_sentinel_platform",
+    "detect_nbs_sentinel_product",
     "resolve_safe_archive_from_uuid",
+    "resolve_sentinel_pipeline",
+    "supported_sentinel_product_types",
 ]
 
 _SUBMODULES = {"archive", "csw", "errors", "profiles", "qa", "s1", "s2"}
@@ -93,10 +98,15 @@ _EXPORTS = {
     "normalize_sentinel_s2_product_map": "s2",
     "process_sentinel_s2_safe": "s2",
     "stretch_sentinel_s2_rgb": "s2",
+    "EmptyInputError": "errors",
     "EmptySceneError": "errors",
     "PartialFailure": "errors",
+    "UnsupportedProductError": "errors",
     "detect_nbs_sentinel_platform": "profiles",
+    "detect_nbs_sentinel_product": "profiles",
     "resolve_safe_archive_from_uuid": "archive",
+    "resolve_sentinel_pipeline": "profiles",
+    "supported_sentinel_product_types": "profiles",
 }
 
 
