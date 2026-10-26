@@ -94,3 +94,59 @@ def test_s1_renamed_zip_finds_the_safe_directory_inside(tmp_path):
 def test_s1_safe_directory_resolves_to_manifest(tmp_path):
     safe_dir = tmp_path / f"{S1_NAME}.SAFE"
     assert _resolve_safe_manifest_path(f"{safe_dir}/") == f"{safe_dir}/manifest.safe"
+
+
+# --------------------------------------------------------------------------- #
+# Zero-byte archive stubs
+# --------------------------------------------------------------------------- #
+def test_a_zero_byte_product_is_rejected_before_gdal_opens_it(tmp_path):
+    """The archive stores a 0-byte placeholder when a product never arrived.
+
+    Measured in the catalogue: 30 of 90 sampled near-real-time Sentinel-5P
+    files and 38 of 53 sampled Sentinel-3 ``NR`` files were zero bytes. Opening
+    one gives a driver-level parse error that reads like a corrupt product, so
+    the size is checked first and the message says what is actually wrong.
+    """
+    from pysent._safe import resolve_safe_root
+    from pysent.errors import EmptyInputError
+
+    stub = tmp_path / f"{S1_NAME}.zip"
+    stub.touch()
+    assert stub.stat().st_size == 0
+
+    with pytest.raises(EmptyInputError, match="empty file"):
+        resolve_safe_root(str(stub))
+
+
+def test_a_zero_byte_stub_is_rejected_through_the_vsizip_spelling(tmp_path):
+    from pysent._safe import resolve_safe_root
+    from pysent.errors import EmptyInputError
+
+    stub = tmp_path / f"{S1_NAME}.zip"
+    stub.touch()
+    with pytest.raises(EmptyInputError, match="empty file"):
+        resolve_safe_root(f"/vsizip/{stub}")
+
+
+def test_a_real_product_and_an_unpacked_directory_still_resolve(tmp_path):
+    """The guard must not reject anything it cannot size, nor a real product."""
+    from pysent._safe import resolve_safe_root
+
+    product = tmp_path / f"{S1_NAME}.zip"
+    with zipfile.ZipFile(product, "w") as archive:
+        archive.writestr(f"{S1_NAME}.SAFE/manifest.safe", "<xfdu/>")
+    assert resolve_safe_root(str(product)).endswith(f"{S1_NAME}.SAFE")
+
+    unpacked = tmp_path / f"{S1_NAME}.SAFE"
+    unpacked.mkdir()
+    assert resolve_safe_root(str(unpacked)) == str(unpacked)
+
+
+def test_a_record_with_no_download_reference_says_so():
+    """17 % of sampled Sentinel-3 records carry no reference, so the path is empty."""
+    from pysent._safe import resolve_safe_root
+    from pysent.errors import EmptyInputError
+
+    for missing in ("", "   ", None):
+        with pytest.raises(EmptyInputError, match="no input dataset"):
+            resolve_safe_root(missing)
