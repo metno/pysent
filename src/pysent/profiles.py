@@ -145,8 +145,35 @@ _TITLE_S5P = re.compile(r"S5P_(?P<stream>[A-Z]{4})_(?P<type>.{10})_")
 _TITLE_S3 = re.compile(r"S3[A-D]_(?P<instrument>[A-Z]{2})_(?P<level>[0-9])_(?P<type>.{6})_")
 _TITLE_S1 = re.compile(r"S1[A-D]_(?P<mode>[A-Z]{2})_(?P<type>[A-Z_]{4})_")
 _TITLE_S2 = re.compile(r"S2[A-D]_(?P<type>MSIL[0-9A-Z]{2})")
-# Archive layout, e.g. .../nbsArchive/2026/09/22/TR-L2-NO2/... or OL-L2-WFR, SY-L2-VG1.
-_PATH_TYPE = re.compile(r"(?<![A-Z0-9])(?P<instrument>[A-Z]{2})-L(?P<level>[0-9])-(?P<type>[A-Z0-9_]+)(?![A-Z0-9])")
+# Archive layout, e.g. .../nbsArchive/S5P/2026/10/09/TR-L2-NO2/... or OL-L2-WFR,
+# SY-L2-VG1. The type may itself contain dashes: TR-L2-AER-AI, TR-L2-O3-TCL.
+_PATH_TYPE = re.compile(
+    r"(?<![A-Z0-9])(?P<instrument>[A-Z]{2})-L(?P<level>[0-9])-(?P<type>[A-Z0-9]+(?:-[A-Z0-9]+)*)(?![A-Z0-9])"
+)
+
+# The Sentinel-5P directory names, mapped to the type as a product *title*
+# spells it. A rule cannot derive these: the archive writes ``TR-L2-O3-PR`` for
+# a type whose real name is ``L2__O3__PR``, with two underscores, and
+# ``TR-L2-AER-AI`` for ``L2__AER_AI``, with one. Listed explicitly and checked
+# against the archive's own directory listing, because getting it wrong is not
+# cosmetic: ``TR-L2-O3-TCL`` would otherwise reduce to ``L2__O3____`` and a
+# deliberately deferred product would be processed as a supported one.
+_S5P_ARCHIVE_TYPES = {
+    "NO2": "L2__NO2___",
+    "CO": "L2__CO____",
+    "HCHO": "L2__HCHO__",
+    "SO2": "L2__SO2___",
+    "O3": "L2__O3____",
+    "O3-PR": "L2__O3__PR",
+    "O3-TCL": "L2__O3_TCL",
+    "AER-AI": "L2__AER_AI",
+    "AER-LH": "L2__AER_LH",
+    "CH4": "L2__CH4___",
+    "CLOUD": "L2__CLOUD_",
+    "NP-BD3": "L2__NP_BD3",
+    "NP-BD6": "L2__NP_BD6",
+    "NP-BD7": "L2__NP_BD7",
+}
 _S5P_STREAMS = ("NRTI", "OFFL", "RPRO")
 _S3_INSTRUMENTS = ("OL", "SL", "SY", "SR")
 
@@ -215,14 +242,18 @@ def detect_nbs_sentinel_product(*values: str) -> dict[str, str]:
                 continue
             instrument, level, short = match.group("instrument", "level", "type")
             if instrument == "TR":
-                # The archive abbreviates the Sentinel-5P type; pad it back out
-                # to the ten characters the title uses, so both spellings agree.
-                product_type = f"L{level}__{short}".ljust(10, "_")[:10]
+                # The archive abbreviates the Sentinel-5P type. Only the names
+                # it actually uses are accepted: an unknown one is left for the
+                # caller to see as "type not recognised" rather than guessed at
+                # and silently routed to the wrong pipeline.
+                product_type = _S5P_ARCHIVE_TYPES.get(short, "")
                 path_family = "S5P"
             elif instrument in _S3_INSTRUMENTS:
-                product_type = f"{instrument}_{level}_{short}"
+                product_type = f"{instrument}_{level}_{short.replace('-', '_')}"
                 path_family = "S3"
             else:
+                continue
+            if not product_type:
                 continue
             # These directory names belong to one family each, so a path with no
             # filename in it still routes instead of being refused as unknown.

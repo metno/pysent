@@ -105,20 +105,89 @@ def test_detect_product_from_real_titles(title, family, platform, product_type, 
     }
 
 
-@pytest.mark.parametrize(
-    "path, family, product_type",
-    [
-        # The archive abbreviates the type in a directory name, and a path may
-        # carry no filename at all.
-        ("/nbsArchive/2026/09/22/TR-L2-NO2/", "S5P", "L2__NO2___"),
-        ("/nbsArchive/2026/09/22/TR-L2-AER_AI/", "S5P", "L2__AER_AI"),
-        ("/nbsArchive/2026/09/22/OL-L2-WFR/", "S3", "OL_2_WFR"),
-        ("/nbsArchive/2026/09/22/SY-L2-VG1/", "S3", "SY_2_VG1"),
-    ],
-)
-def test_detect_product_from_archive_path_alone(path, family, product_type):
-    detected = detect_nbs_sentinel_product(path)
+# Every Sentinel-5P directory the archive actually has, taken from its own
+# listing for 2026-10-09, with the type as a product title spells it. The
+# dashes are the trap: a rule that turned them into underscores would give
+# "L2__O3_PR_" for the ozone profile, whose real name is "L2__O3__PR", and
+# would reduce "TR-L2-O3-TCL" to "L2__O3____" - quietly turning a deferred
+# product into a supported one.
+ARCHIVE_DIRECTORIES = [
+    ("TR-L2-NO2", "S5P", "L2__NO2___"),
+    ("TR-L2-CO", "S5P", "L2__CO____"),
+    ("TR-L2-HCHO", "S5P", "L2__HCHO__"),
+    ("TR-L2-SO2", "S5P", "L2__SO2___"),
+    ("TR-L2-O3", "S5P", "L2__O3____"),
+    ("TR-L2-O3-PR", "S5P", "L2__O3__PR"),
+    ("TR-L2-O3-TCL", "S5P", "L2__O3_TCL"),
+    ("TR-L2-AER-AI", "S5P", "L2__AER_AI"),
+    ("TR-L2-AER-LH", "S5P", "L2__AER_LH"),
+    ("TR-L2-CH4", "S5P", "L2__CH4___"),
+    ("TR-L2-CLOUD", "S5P", "L2__CLOUD_"),
+    ("TR-L2-NP-BD3", "S5P", "L2__NP_BD3"),
+    ("TR-L2-NP-BD6", "S5P", "L2__NP_BD6"),
+    ("TR-L2-NP-BD7", "S5P", "L2__NP_BD7"),
+]
+
+S3_ARCHIVE_DIRECTORIES = [
+    ("OL-L2-WFR", "OL_2_WFR"),
+    ("OL-L2-LFR", "OL_2_LFR"),
+    ("SY-L2-VG1", "SY_2_VG1"),
+    ("SL-L2-LST", "SL_2_LST"),
+]
+
+
+@pytest.mark.parametrize("directory, family, product_type", ARCHIVE_DIRECTORIES)
+def test_detect_product_from_archive_path_alone(directory, family, product_type):
+    """A path may carry no filename at all, only the archive's directory name."""
+    detected = detect_nbs_sentinel_product(f"/nbsArchive/S5P/2026/10/09/{directory}/")
     assert (detected["family"], detected["product_type"]) == (family, product_type)
+
+
+@pytest.mark.parametrize("directory, product_type", S3_ARCHIVE_DIRECTORIES)
+def test_detect_sentinel3_product_from_archive_path_alone(directory, product_type):
+    """Sentinel-3 types follow a rule, so these are derived rather than listed."""
+    detected = detect_nbs_sentinel_product(f"/nbsArchive/S3/2026/10/09/{directory}/")
+    assert (detected["family"], detected["product_type"]) == ("S3", product_type)
+
+
+def test_a_platform_token_in_the_path_wins_over_the_directory_name():
+    """A contradictory path must not be resolved by mixing the two halves.
+
+    ``/nbsArchive/S5P/.../OL-L2-WFR/`` cannot be both. The explicit platform
+    token is authoritative, which leaves a family and type that do not go
+    together - and that combination is refused rather than routed.
+    """
+    detected = detect_nbs_sentinel_product("/nbsArchive/S5P/2026/10/09/OL-L2-WFR/")
+    assert detected["family"] == "S5P"
+    with pytest.raises(UnsupportedProductError, match="not a product type pysent knows"):
+        resolve_sentinel_pipeline(detected)
+
+
+def test_the_archive_type_names_agree_with_the_real_filenames():
+    """The directory name and the filename must resolve to the same type.
+
+    Checked against real filenames, because the two spellings are independent:
+    the directory is ``TR-L2-O3-PR`` and the file is ``S5P_NRTI_L2__O3__PR_...``.
+    """
+    pairs = [
+        ("TR-L2-O3-PR", "S5P_NRTI_L2__O3__PR_20261009T011407_x_46572_03_020901_y.nc"),
+        ("TR-L2-AER-AI", "S5P_NRTI_L2__AER_AI_20261009T011407_x_46572_03_020901_y.nc"),
+        ("TR-L2-AER-LH", "S5P_NRTI_L2__AER_LH_20261009T011407_x_46572_03_020901_y.nc"),
+        ("TR-L2-CLOUD", "S5P_NRTI_L2__CLOUD__20261009T011407_x_46572_03_020800_y.nc"),
+        ("TR-L2-CO", "S5P_NRTI_L2__CO_____20261009T011407_x_46572_03_020901_y.nc"),
+    ]
+    for directory, filename in pairs:
+        from_directory = detect_nbs_sentinel_product(f"/nbsArchive/S5P/2026/10/09/{directory}/")
+        from_filename = detect_nbs_sentinel_product(filename)
+        assert from_directory["product_type"] == from_filename["product_type"], directory
+
+
+def test_an_unknown_archive_directory_is_not_guessed_at():
+    """Better "type not recognised" than a guess that routes to the wrong pipeline."""
+    detected = detect_nbs_sentinel_product("/nbsArchive/S5P/2026/10/09/TR-L2-FUTURE-THING/")
+    assert detected["product_type"] == ""
+    with pytest.raises(UnsupportedProductError, match="not its product type"):
+        resolve_sentinel_pipeline("/nbsArchive/S5P/2026/10/09/TR-L2-FUTURE-THING/")
 
 
 def test_the_title_wins_over_the_archive_path():
