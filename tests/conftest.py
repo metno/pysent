@@ -55,3 +55,17 @@ def s1_vh(data_manifest) -> Path:
 def s2_rgb(data_manifest) -> Path:
     """512x512 UInt16 3-band (B4/B3/B2) window of a real Sentinel-2 scene."""
     return _artifact(data_manifest, "S2", "rgb")
+
+
+@pytest.fixture(scope="session")
+def s5p_no2_window() -> Path:
+    """60 scanlines of a real Sentinel-5P NO2 granule, as a tiny NetCDF.
+
+    Keeps the product's group layout and packing - ``/PRODUCT`` arrays, the
+    byte-packed ``qa_value`` with its 0.01 scale, the real fill values - so the
+    masking and unpacking paths see what a real file gives them.
+    """
+    path = DATA_DIR / "s5p_no2_window.nc"
+    if not path.exists():
+        pytest.skip("s5p_no2_window.nc missing - run scripts/make_test_data.py --platform s5p")
+    return path

@@ -289,12 +289,97 @@ def build_s2(record: dict[str, str], out_dir: Path, size: int) -> dict[str, Any]
 
 
 # --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
+# Sentinel-5P
+# --------------------------------------------------------------------------- #
+S5P_NO2_VARIABLE = "nitrogendioxide_tropospheric_column"
+S5P_ARRAYS = ("latitude", "longitude", "qa_value", S5P_NO2_VARIABLE)
+
+
+def build_s5p(source: str, out_path: Path, *, scanlines: int) -> dict[str, Any]:
+    """Cut the first ``scanlines`` rows of an S5P granule into a tiny NetCDF.
+
+    The extract keeps the real group layout (``/PRODUCT``), the real packing
+    (``qa_value`` as a byte with a 0.01 scale and 255 as fill) and the real fill
+    values, because those are exactly what the pipeline has to get right. The
+    arrays are written through GDAL's multidimensional API so the script needs
+    no netCDF4 binding.
+
+    Only the rows requested cross the network when ``source`` is a
+    ``/vsicurl/`` URL, so this stays cheap against a 68 MB granule.
+    """
+    from pysent._swath import open_array, open_root
+
+    root = open_root(source)
+    # Read the window from each array, keeping the stored dtype and packing.
+    windows: dict[str, Any] = {}
+    for name in S5P_ARRAYS:
+        array = open_array(root, f"/PRODUCT/{name}")
+        raw = array.ReadAsArray()
+        if raw.ndim >= 3 and raw.shape[0] == 1:
+            raw = raw[0]
+        windows[name] = {
+            "data": raw[:scanlines],
+            "nodata": array.GetNoDataValueAsDouble(),
+            "scale": array.GetScale(),
+            "offset": array.GetOffset(),
+        }
+
+    rows, columns = windows["latitude"]["data"].shape
+    driver = gdal.GetDriverByName("netCDF")
+    out_path.unlink(missing_ok=True)
+    dataset = driver.CreateMultiDimensional(str(out_path))
+    group = dataset.GetRootGroup().CreateGroup("PRODUCT")
+    scanline = group.CreateDimension("scanline", None, None, rows)
+    ground_pixel = group.CreateDimension("ground_pixel", None, None, columns)
+
+    numpy_to_gdal = {
+        "float32": gdal.GDT_Float32,
+        "float64": gdal.GDT_Float64,
+        "uint8": gdal.GDT_Byte,
+    }
+    written: dict[str, Any] = {}
+    for name, window in windows.items():
+        data = window["data"]
+        gdal_type = numpy_to_gdal.get(str(data.dtype))
+        if gdal_type is None:
+            raise SystemExit(f"{name}: unexpected dtype {data.dtype}")
+        array = group.CreateMDArray(name, [scanline, ground_pixel], gdal.ExtendedDataType.Create(gdal_type))
+        # netCDF refuses to define a fill value once the variable holds data,
+        # so the packing is declared before anything is written.
+        if window["nodata"] is not None:
+            array.SetNoDataValueDouble(window["nodata"])
+        if window["scale"] not in (None, 1.0):
+            array.SetScale(window["scale"])
+        if window["offset"] not in (None, 0.0):
+            array.SetOffset(window["offset"])
+        array.Write(data.tobytes())
+        written[name] = {"dtype": str(data.dtype), "shape": list(data.shape)}
+    dataset = None
+
+    return {
+        "no2_window": {
+            "path": str(out_path.relative_to(REPO_ROOT)) if out_path.is_relative_to(REPO_ROOT) else str(out_path),
+            "size": [columns, rows],
+            "dtype": "mixed",
+            "bytes": out_path.stat().st_size,
+            "arrays": written,
+            "variable": S5P_NO2_VARIABLE,
+        }
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="output directory (default: tests/data)")
     parser.add_argument("--days", type=int, default=7, help="how far back to search the catalogue (default: 7)")
     parser.add_argument("--window", type=int, default=512, help="extract size in pixels (default: 512)")
-    parser.add_argument("--platform", choices=["s1", "s2", "both"], default="both")
+    parser.add_argument("--platform", choices=["s1", "s2", "s5p", "both", "all"], default="both")
+    parser.add_argument("--s5p-source", metavar="PATH_OR_URL",
+                        help="an S5P NO2 granule to cut the test window from (local path or /vsicurl/ URL)")
+    parser.add_argument("--s5p-scanlines", type=int, default=60,
+                        help="how many scanlines to keep in the S5P window (default: 60)")
     parser.add_argument("--bbox", type=float, nargs=4, default=NORWAY_BBOX,
                         metavar=("MINX", "MINY", "MAXX", "MAXY"), help="search area (default: Norway)")
     args = parser.parse_args(argv)
