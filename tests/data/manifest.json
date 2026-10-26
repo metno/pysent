@@ -93,6 +93,52 @@
       "identifier": "920793aa-0e04-4ee0-889a-edbc779ffd99",
       "modified": "2026-08-10T14:31:19+00:00",
       "title": "S2C_MSIL2A_20260810T092031_N0512_R093_T35VPE_20260810T124910"
+    },
+    "S5P": {
+      "artifacts": {
+        "no2_window": {
+          "arrays": {
+            "latitude": {
+              "dtype": "float32",
+              "shape": [
+                60,
+                450
+              ]
+            },
+            "longitude": {
+              "dtype": "float32",
+              "shape": [
+                60,
+                450
+              ]
+            },
+            "nitrogendioxide_tropospheric_column": {
+              "dtype": "float32",
+              "shape": [
+                60,
+                450
+              ]
+            },
+            "qa_value": {
+              "dtype": "uint8",
+              "shape": [
+                60,
+                450
+              ]
+            }
+          },
+          "dtype": "mixed",
+          "path": "s5p_no2_window.nc",
+          "size": [
+            450,
+            60
+          ],
+          "variable": "nitrogendioxide_tropospheric_column"
+        }
+      },
+      "identifier": "abb81966-31ff-496c-b878-a31109d99b39",
+      "note": "first 60 scanlines; a daylight granule over Europe, 40-65N, 0.2 % fill before masking",
+      "title": "S5P_NRTI_L2__NO2____20261009T111407_20261009T111907_46578_03_020901_20261009T115729"
     }
   },
   "search": {
