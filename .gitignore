@@ -21,3 +21,7 @@ executed/
 /AGENT/
 /memory/
 /scratchpad/
+
+# Real Sentinel granules fetched for measurements: far too large to commit.
+# The committed test windows live in tests/data/ instead.
+.s5pdata/
