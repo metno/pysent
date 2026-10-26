@@ -445,3 +445,23 @@ Asked just-in-time, before the phase that needs the answer. *Italics are the rec
   - **Still open for the owner: Q7's colour range.** `no2` ships the plan's proposed 0–1e-4 mol m⁻² with `viridis`, and the styled copy bakes it into pixels, so this needs confirming from pictures before bulk output exists. The float product is unaffected and the styling step reads it back, so a change re-renders rather than re-warps.
 - **2026-10-26 — Phase 0 follow-up: the archive directory names use dashes.** Found while fetching the Phase 2 test files, by listing what the archive actually contains. The directories are `TR-L2-AER-AI`, `TR-L2-O3-PR`, `TR-L2-O3-TCL`, `TR-L2-NP-BD3`…, and the path parser's `[A-Z0-9_]+` stopped at the first dash: **5 of the 14 real Sentinel-5P directory names parsed wrongly** (`TR-L2-AER-AI` → `L2__AER___`, `TR-L2-O3-TCL` → `L2__O3____`). Harmless today, because every affected type is still refused — but `TR-L2-O3-TCL` reducing to plain O3 would, the moment Phase 2 flips O3 to `ready`, process a deliberately deferred product as a supported one. That is precisely the silent misroute Phase 0 exists to prevent, so it is fixed now rather than later.
   A substitution rule cannot do this (the archive writes `TR-L2-O3-PR` for a type whose real name is `L2__O3__PR`, with two underscores), so the 14 names are an explicit map, checked against the archive's own listing and cross-checked against real filenames. An unknown directory now yields no type at all instead of a guess. Sentinel-3 keeps the derived rule, with dashes translated to underscores.
+- **2026-10-26 — Phase 2 groundwork (no pipeline code yet).** Fetched one NRTI granule per remaining Level-2 type and checked B.2's proposals against the files, so Phase 2 starts from verified names rather than from the audit's notes. Branch `feature/s5p-s3-phase2`, stacked on Phase 1.
+  - **All nine proposed variable names exist, and every width matches A6**: CO and CH4 215, AER_LH 448, the UV/VIS types 450. B.2's table can be used as written.
+  - **Measured ranges** (`qa_min` 0.5, best available granule per type, p01 / p50 / p99):
+
+    | Product | Units | Valid | p01 | p50 | p99 | B.2 proposed range | Verdict |
+    |---|---|---:|---:|---:|---:|---|---|
+    | `co` | mol m⁻² | 1.9 % | 0.0251 | 0.0307 | 0.0356 | 0.02 – 0.05 | fits |
+    | `hcho` | mol m⁻² | 59.6 % | −3.40e−4 | 6.37e−5 | 4.66e−4 | 0 – 4e−4 | p99 just over; 5e−4 is safer |
+    | `so2` | mol m⁻² | 27.6 % | −1.92e−3 | 2.11e−5 | 2.35e−3 | 0 – 2e−3 | p99 just over; noise-dominated anyway |
+    | `o3` | mol m⁻² | 9.8 % | 0.1235 | 0.1346 | 0.1423 | 0.10 – 0.16 | fits |
+    | `ch4` | ppb | 6.4 % | 1868 | 1930 | 1962 | 1800 – 1950 | **p99 1962 exceeds it**; 1800–2000 fits |
+    | `aer_ai` | 1 | 41.9 % | −1.54 | −0.28 | 1.84 | −2 – 4 | fits |
+    | `cloud` | 1 | 7.2 % | 0.36 | 0.93 | 1.00 | 0 – 1 | fits by definition |
+    | `aer_lh` | m | 6.3 % | 185 | 554 | 8505 | 0 – 10,000 | fits |
+    | `o3__pr` | mol m⁻² | 12.2 % | 0.1251 | 0.1362 | 0.1442 | (as `o3`) | fits |
+
+  - **Closes an A14 gap:** the audit could not measure CH4 because every file it had was 100 % fill. A daylight granule gives 6.4 % valid and 1868–1962 ppb, so the proposed range can be checked after all — and it needs widening at the top.
+  - **New finding, not in the audit: `O3__PR` is on a much coarser grid.** A15 established that the 2-D columns exist but not their shape. They are **75 × 77**, about **29 km across track and 28 km along track**, against 3.5–7 km for every other Level-2 type. The default 0.05° (≈5.5 km) grid would oversample it about fivefold, producing a blocky map that pretends to a resolution it does not have. Phase 2 must give this type its own default resolution (0.25°, ≈28 km) rather than inheriting the family default. Both `ozone_total_column` and `ozone_tropospheric_column` are present and plausible (p50 0.136 and 0.0178 mol m⁻²).
+  - **Night granules are useless for range work.** The 01:14 UTC pass returned 0 % valid for HCHO, SO2, CH4 and AER_LH; the 09:34–11:14 passes were refetched for those. Worth remembering when choosing Phase 2's committed test windows: cut them from daylight granules or the fixtures test nothing.
+  - **Still to decide before Phase 2 writes code:** the per-type colour ranges are Q7 again, nine times over. The owner has the NO2 comparison page; the sensible ask is a *rule* (for example "p01 to p99 of a reference daylight granule, rounded outwards") rather than nine separate answers.
