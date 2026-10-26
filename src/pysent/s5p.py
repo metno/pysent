@@ -48,6 +48,15 @@ from ._runtime import (
     run_product_jobs,
     scratch_dir,
 )
+from ._output import (
+    COLOUR_ANCHORS,
+    colour_table,
+    creation_options,
+    finish_float_product,
+    styled_bytes,
+    write_styled_copy,
+    write_thumbnail,
+)
 from ._swath import (
     DEFAULT_LATLON_RESOLUTION,
     DEFAULT_POLAR_RESOLUTION,
@@ -233,11 +242,6 @@ _UNIT_FACTORS: dict[str, tuple[float, str]] = {
     "ppb": (1.0, "ppb"),
 }
 
-_THUMBNAIL_PIXELS = 256
-# Valid data is written into 1..255 so that 0 can mean "no data" and nothing
-# else, the same convention the Sentinel-2 output uses.
-_STYLED_FLOOR = 1
-_STYLED_CEILING = 255
 
 
 # --------------------------------------------------------------------------- #
@@ -429,165 +433,6 @@ def _resolve_processing_settings(processing_options: dict[str, Any] | None) -> d
 # --------------------------------------------------------------------------- #
 # Writing
 # --------------------------------------------------------------------------- #
-def _creation_options(settings: dict[str, Any], *, float_data: bool) -> list[str]:
-    options = ["TILED=YES", f"COMPRESS={settings['compression']}"]
-    if settings.get("gdal_num_threads"):
-        options.append(f"NUM_THREADS={settings['gdal_num_threads']}")
-    if float_data and settings["compression"] in ("DEFLATE", "ZSTD", "LZW"):
-        options.append(f"PREDICTOR={settings['predictor']}")
-    return options
-
-
-def _styled_bytes(values: np.ndarray, value_range: tuple[float, float]) -> np.ndarray:
-    """Scale physical values into 1..255, with 0 reserved for no data.
-
-    Values outside the range are clipped rather than dropped: a negative NO2
-    column is instrument noise, and the plan's decision is to keep it in the
-    data and clip it in the style.
-    """
-    low, high = value_range
-    with np.errstate(invalid="ignore"):
-        scaled = (values.astype(np.float64) - low) / (high - low)
-        scaled = np.clip(scaled, 0.0, 1.0)
-        out = np.rint(scaled * (_STYLED_CEILING - _STYLED_FLOOR) + _STYLED_FLOOR)
-    return np.where(np.isfinite(values), out, 0).astype(np.uint8)
-
-
-def _colour_table(colormap: str):
-    """A 256-entry GDAL colour table, 0 transparent and 1..255 the ramp.
-
-    Written out rather than taken from a plotting library so the output needs no
-    dependency beyond GDAL, and so the ramp is stable across versions.
-    """
-    from osgeo import gdal
-
-    anchors = _COLOUR_ANCHORS.get(colormap.strip().lower())
-    if anchors is None:
-        known = ", ".join(sorted(_COLOUR_ANCHORS))
-        raise ValueError(f"{colormap!r} is not a colormap pysent ships; it has: {known}")
-
-    table = gdal.ColorTable()
-    table.SetColorEntry(0, (0, 0, 0, 0))
-    positions = np.linspace(0.0, 1.0, len(anchors))
-    for index in range(_STYLED_FLOOR, _STYLED_CEILING + 1):
-        fraction = (index - _STYLED_FLOOR) / (_STYLED_CEILING - _STYLED_FLOOR)
-        red = float(np.interp(fraction, positions, [anchor[0] for anchor in anchors]))
-        green = float(np.interp(fraction, positions, [anchor[1] for anchor in anchors]))
-        blue = float(np.interp(fraction, positions, [anchor[2] for anchor in anchors]))
-        table.SetColorEntry(index, (int(round(red)), int(round(green)), int(round(blue)), 255))
-    return table
-
-
-# Anchor colours sampled from the named ramps. Perceptually ordered, so a
-# greyscale print still reads low-to-high.
-_COLOUR_ANCHORS: dict[str, list[tuple[int, int, int]]] = {
-    "viridis": [(68, 1, 84), (59, 82, 139), (33, 145, 140), (94, 201, 98), (253, 231, 37)],
-    "magma": [(0, 0, 4), (81, 18, 124), (183, 55, 121), (252, 137, 97), (252, 253, 191)],
-    "grey": [(0, 0, 0), (255, 255, 255)],
-    # Diverging, for the aerosol index in phase 2.
-    "rdbu": [(5, 48, 97), (146, 197, 222), (247, 247, 247), (244, 165, 130), (103, 0, 31)],
-}
-
-
-def _write_styled_copy(
-    *,
-    source_path: str,
-    output_path: Path,
-    value_range: tuple[float, float],
-    colormap: str,
-    settings: dict[str, Any],
-    metadata: dict[str, str],
-) -> None:
-    """The 8-bit copy a map service can serve without applying a colour ramp.
-
-    Paletted rather than RGB: one band with a colour table is a third of the
-    size, keeps one value per pixel so a reader can still recover the class,
-    and carries transparency for no data.
-    """
-    from osgeo import gdal
-
-    source = gdal.Open(source_path)
-    values = source.GetRasterBand(1).ReadAsArray()
-    styled = _styled_bytes(values, value_range)
-
-    with atomic_output(output_path) as temporary:
-        driver = gdal.GetDriverByName("GTiff")
-        dataset = driver.Create(
-            str(temporary),
-            styled.shape[1],
-            styled.shape[0],
-            1,
-            gdal.GDT_Byte,
-            options=_creation_options(settings, float_data=False),
-        )
-        dataset.SetGeoTransform(source.GetGeoTransform())
-        dataset.SetProjection(source.GetProjection())
-        band = dataset.GetRasterBand(1)
-        # The palette must be set before the first pixel is written: libtiff
-        # cannot change PhotometricInterpretation once a strip has gone out.
-        band.SetRasterColorTable(_colour_table(colormap))
-        band.SetRasterColorInterpretation(gdal.GCI_PaletteIndex)
-        band.SetNoDataValue(0)
-        band.WriteArray(styled)
-        dataset.SetMetadata({**metadata, "PYSENT_STYLE_RANGE": f"{value_range[0]},{value_range[1]}"})
-        if settings["overview_factors"]:
-            dataset.BuildOverviews("NEAREST", settings["overview_factors"])
-        dataset.FlushCache()
-        dataset = None
-    source = None
-
-
-def _write_thumbnail(*, source_path: str, output_path: Path, value_range: tuple[float, float], colormap: str) -> None:
-    """A small paletted PNG for a catalogue page, decimated on read."""
-    from osgeo import gdal
-
-    source = gdal.Open(source_path)
-    width, height = source.RasterXSize, source.RasterYSize
-    longest = max(width, height)
-    scale = min(1.0, _THUMBNAIL_PIXELS / longest)
-    target_width, target_height = max(1, round(width * scale)), max(1, round(height * scale))
-
-    # Averaging keeps a sparse map visible; nearest would drop most valid pixels
-    # of a granule where only a quarter of them survived the quality mask.
-    transform = source.GetGeoTransform()
-    bounds = (
-        transform[0],
-        transform[3] + transform[5] * height,
-        transform[0] + transform[1] * width,
-        transform[3],
-    )
-    resampled = gdal.Warp(
-        "/vsimem/s5p_thumbnail.tif",
-        source,
-        format="GTiff",
-        width=target_width,
-        height=target_height,
-        # Bounds and projection are given explicitly: left to work them out,
-        # GDAL reports "unable to compute output bounds" on a whole-orbit
-        # raster and carries on, which is exactly the kind of quiet result the
-        # plan says not to trust.
-        outputBounds=bounds,
-        dstSRS=source.GetProjection(),
-        resampleAlg="average",
-        dstNodata=float("nan"),
-        outputType=gdal.GDT_Float32,
-    )
-    values = resampled.GetRasterBand(1).ReadAsArray()
-    resampled = None
-    gdal.Unlink("/vsimem/s5p_thumbnail.tif")
-    source = None
-
-    styled = _styled_bytes(values, value_range)
-    with atomic_output(output_path) as temporary:
-        memory = gdal.GetDriverByName("MEM").Create("", styled.shape[1], styled.shape[0], 1, gdal.GDT_Byte)
-        band = memory.GetRasterBand(1)
-        band.WriteArray(styled)
-        band.SetNoDataValue(0)
-        band.SetRasterColorTable(_colour_table(colormap))
-        gdal.GetDriverByName("PNG").CreateCopy(str(temporary), memory)
-        memory = None
-
-
 # --------------------------------------------------------------------------- #
 # One product
 # --------------------------------------------------------------------------- #
@@ -674,10 +519,10 @@ def _process_one_product(
             bounds=bounds,
             resampling=options["resampling"],
             scratch=scratch,
-            creation_options=_creation_options(settings, float_data=True),
+            creation_options=creation_options(settings, float_data=True),
             num_threads=settings["gdal_num_threads"],
         )
-        _finish_float_product(
+        finish_float_product(
             path=str(temporary),
             settings=settings,
             metadata=_product_metadata(
@@ -737,7 +582,7 @@ def _process_one_product(
 
     if settings["styled"]:
         styled_path = float_path.with_name(f"{float_path.stem}_styled.tif")
-        _write_styled_copy(
+        write_styled_copy(
             source_path=str(float_path),
             output_path=styled_path,
             value_range=options["value_range"],
@@ -757,7 +602,7 @@ def _process_one_product(
 
     if settings["thumbnail"]:
         thumbnail_path = float_path.with_name(f"{float_path.stem}_thumb.png")
-        _write_thumbnail(
+        write_thumbnail(
             source_path=str(float_path),
             output_path=thumbnail_path,
             value_range=options["value_range"],
@@ -799,23 +644,6 @@ def _product_metadata(
         style_range=f"{options['value_range'][0]:g},{options['value_range'][1]:g}",
         colormap=options["colormap"],
     )
-
-
-def _finish_float_product(*, path: str, settings: dict[str, Any], metadata: dict[str, str]) -> None:
-    from osgeo import gdal
-
-    dataset = gdal.Open(path, gdal.GA_Update)
-    dataset.SetMetadata(metadata)
-    if settings["overview_factors"]:
-        # Nodata-aware averaging, so an overview of a sparse map does not pull
-        # the no-data value into its neighbours.
-        gdal.SetConfigOption("GDAL_OVR_PROPAGATE_NODATA", "YES")
-        try:
-            dataset.BuildOverviews("AVERAGE", settings["overview_factors"])
-        finally:
-            gdal.SetConfigOption("GDAL_OVR_PROPAGATE_NODATA", None)
-    dataset.FlushCache()
-    dataset = None
 
 
 # --------------------------------------------------------------------------- #

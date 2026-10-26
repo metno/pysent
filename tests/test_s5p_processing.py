@@ -388,10 +388,10 @@ def test_the_thumbnail_is_small_and_paletted(s5p_no2_window, tmp_path):
 
 def test_values_outside_the_colour_range_are_clipped_not_dropped():
     """A negative NO2 column is noise, not missing data: it must still be drawn."""
-    from pysent.s5p import _styled_bytes
+    from pysent._output import styled_bytes
 
     values = np.array([[-5e-5, 0.0, 5e-5, 2e-4, np.nan]], dtype=np.float32)
-    styled = _styled_bytes(values, (0.0, 1e-4))
+    styled = styled_bytes(values, (0.0, 1e-4))
     assert styled.tolist() == [[1, 1, 128, 255, 0]]
 
 
@@ -487,7 +487,7 @@ def test_a_failed_run_leaves_no_file_under_the_final_name(s5p_no2_window, tmp_pa
     def explode(*args, **kwargs):
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr(module, "_finish_float_product", explode)
+    monkeypatch.setattr(module, "finish_float_product", explode)
     with pytest.raises(RuntimeError, match="disk full"):
         process_sentinel_s5p_netcdf(
             input_dataset=str(s5p_no2_window), output_dir=tmp_path, products={"no2": {}}
@@ -636,10 +636,10 @@ def test_an_unknown_context_or_empty_policy_is_refused():
 
 
 def test_an_unknown_colormap_names_the_ones_that_exist():
-    from pysent.s5p import _colour_table
+    from pysent._output import colour_table
 
     with pytest.raises(ValueError, match="viridis"):
-        _colour_table("chartreuse")
+        colour_table("chartreuse")
 
 
 def test_the_output_name_is_derived_from_the_input():
@@ -674,14 +674,14 @@ def test_statistics_of_an_all_nan_array_are_nan_rather_than_an_error():
 # The product table (phase 2)
 # --------------------------------------------------------------------------- #
 def test_every_product_in_the_table_is_well_formed():
-    from pysent.s5p import _COLOUR_ANCHORS
+    from pysent._output import COLOUR_ANCHORS
 
     for key, entry in S5P_PRODUCTS.items():
         assert entry["variable"].startswith("/PRODUCT/"), key
         assert 0.0 <= entry["qa_min"] <= 1.0, key
         low, high = entry["value_range"]
         assert low < high, key
-        assert entry["colormap"] in _COLOUR_ANCHORS, key
+        assert entry["colormap"] in COLOUR_ANCHORS, key
         assert entry["label"] and entry["label"][0].isupper(), key
         assert entry["units"], key
 

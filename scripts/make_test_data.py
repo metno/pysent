@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import tempfile
+import zipfile
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -370,12 +372,172 @@ def build_s5p(source: str, out_path: Path, *, scanlines: int) -> dict[str, Any]:
     }
 
 
+
+# --------------------------------------------------------------------------- #
+# Sentinel-3
+# --------------------------------------------------------------------------- #
+S3_SYNERGY_MEMBERS = (("NDVI.nc", "NDVI"), ("sm.nc", "SM"))
+
+
+def build_s3_synergy(source: str, out_path: Path, *, window: int) -> dict[str, Any]:
+    """Cut a window out of a Synergy VG1/V10 tile into a small STORED zip.
+
+    Keeps everything the pipeline reads: the ``.SEN3`` directory layout, the
+    member names, the byte packing (NDVI is ``raw*0.004-0.08`` with 255 as
+    fill), the flag table on the status variable, the 1/112 degree grid, and a
+    manifest carrying the product type, baseline, times and footprint.
+
+    Members are stored uncompressed, like the real products, so the reader's
+    range-read path is exercised rather than bypassed.
+    """
+    from pysent._sen3 import extract_member, open_sen3_variable, read_sen3_manifest, sen3_root
+
+    root = sen3_root(source)
+    manifest = read_sen3_manifest(root)
+    product_name = str(manifest.get("productName") or "S3A_SY_2_VG1.SEN3")
+    inner = Path(product_name).stem + ".SEN3" if not product_name.endswith(".SEN3") else product_name
+
+    with tempfile.TemporaryDirectory() as work:
+        scratch = Path(work)
+        members: dict[str, Path] = {}
+        written: dict[str, Any] = {}
+        offset_x = offset_y = None
+        for member, variable in S3_SYNERGY_MEMBERS:
+            dataset = open_sen3_variable(extract_member(root, member, scratch), variable)
+            band = dataset.GetRasterBand(1)
+            if offset_x is None:
+                # A window with real data in it, not the corner of the tile:
+                # a Synergy tile is mostly sea and cloud.
+                offset_x, offset_y = _pick_window(dataset, window)
+            raw = band.ReadAsArray(offset_x, offset_y, window, window)
+            transform = list(dataset.GetGeoTransform())
+            transform[0] += offset_x * transform[1]
+            transform[3] += offset_y * transform[5]
+
+            # Read everything off the band before the dataset is released: a
+            # band whose dataset has been collected is invalid.
+            data_type = band.DataType
+            scale, offset, nodata = band.GetScale(), band.GetOffset(), band.GetNoDataValue()
+            # The flag table has to survive: the pipeline selects by name.
+            attributes = {
+                key: value
+                for key, value in band.GetMetadata().items()
+                if key.startswith("flag_") or key in ("units", "long_name")
+            }
+            dataset = None
+
+            # Written through the multidimensional API with CF coordinate
+            # variables, because the classic netCDF writer names every variable
+            # "Band1" and the pipeline opens members by their real name. The
+            # lat/lon arrays are also what makes GDAL derive a geotransform.
+            path = scratch / member
+            _write_cf_grid(
+                path=path,
+                variable=variable,
+                data=raw,
+                data_type=data_type,
+                transform=transform,
+                scale=scale,
+                offset=offset,
+                nodata=nodata,
+                attributes=attributes,
+            )
+            members[member] = path
+            written[member] = {"variable": variable, "dtype": gdal.GetDataTypeName(data_type)}
+
+        manifest_xml = _synergy_manifest_xml(manifest, transform, window)
+        out_path.unlink(missing_ok=True)
+        with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_STORED) as archive:
+            for member, path in members.items():
+                archive.write(path, f"{inner}/{member}")
+            archive.writestr(f"{inner}/xfdumanifest.xml", manifest_xml)
+
+    return {
+        "synergy_window": {
+            "path": str(out_path.relative_to(REPO_ROOT)) if out_path.is_relative_to(REPO_ROOT) else str(out_path),
+            "size": [window, window],
+            "dtype": "mixed",
+            "bytes": out_path.stat().st_size,
+            "members": written,
+            "sen3_directory": inner,
+        }
+    }
+
+
+def _synergy_manifest_xml(manifest: dict[str, Any], transform: list[float], window: int) -> str:
+    """A minimal xfdumanifest.xml carrying what the reader looks for."""
+    west, north = transform[0], transform[3]
+    east = west + transform[1] * window
+    south = north + transform[5] * window
+    # posList is latitude then longitude, closed, as the real manifests write it.
+    ring = [(north, west), (north, east), (south, east), (south, west), (north, west)]
+    positions = " ".join(f"{lat:.6f} {lon:.6f}" for lat, lon in ring)
+    times = manifest.get("time", {})
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<xfdu:XFDU xmlns:xfdu="urn:ccsds:schema:xfdu:1" '
+        'xmlns:sentinel3="http://www.esa.int/safe/sentinel/sentinel-3/1.0" '
+        'xmlns:gml="http://www.opengis.net/gml">\n'
+        "  <metadataSection>\n"
+        f"    <sentinel3:productName>{manifest.get('productName', '')}</sentinel3:productName>\n"
+        f"    <sentinel3:productType>{manifest.get('productType', 'SY_2_VG1___')}</sentinel3:productType>\n"
+        f"    <sentinel3:baselineCollection>{manifest.get('baselineCollection', '002')}"
+        "</sentinel3:baselineCollection>\n"
+        f"    <sentinel3:startTime>{times.get('start', '')}</sentinel3:startTime>\n"
+        f"    <sentinel3:stopTime>{times.get('end', '')}</sentinel3:stopTime>\n"
+        f"    <gml:posList>{positions}</gml:posList>\n"
+        "  </metadataSection>\n"
+        "</xfdu:XFDU>\n"
+    )
+
+
+
+def _write_cf_grid(*, path: Path, variable: str, data: Any, data_type: int,
+                   transform: list[float], scale, offset, nodata, attributes: dict[str, str]) -> None:
+    """One variable on a regular lat/lon grid, as a CF netCDF file."""
+    import numpy as np
+
+    height, width = data.shape
+    longitudes = transform[0] + (np.arange(width) + 0.5) * transform[1]
+    latitudes = transform[3] + (np.arange(height) + 0.5) * transform[5]
+
+    dataset = gdal.GetDriverByName("netCDF").CreateMultiDimensional(str(path))
+    root = dataset.GetRootGroup()
+    dim_y = root.CreateDimension("lat", "HORIZONTAL_Y", "NORTH", height)
+    dim_x = root.CreateDimension("lon", "HORIZONTAL_X", "EAST", width)
+    double = gdal.ExtendedDataType.Create(gdal.GDT_Float64)
+
+    axis_y = root.CreateMDArray("lat", [dim_y], double)
+    axis_y.SetUnit("degrees_north")
+    axis_y.Write(latitudes.astype(np.float64).tobytes())
+    axis_x = root.CreateMDArray("lon", [dim_x], double)
+    axis_x.SetUnit("degrees_east")
+    axis_x.Write(longitudes.astype(np.float64).tobytes())
+
+    array = root.CreateMDArray(variable, [dim_y, dim_x], gdal.ExtendedDataType.Create(data_type))
+    # Packing and fill value before the data: netCDF refuses to define a fill
+    # value once the variable holds anything.
+    if nodata is not None:
+        array.SetNoDataValueDouble(nodata)
+    if scale not in (None, 1.0):
+        array.SetScale(scale)
+    if offset not in (None, 0.0):
+        array.SetOffset(offset)
+    for key, value in attributes.items():
+        attribute = array.CreateAttribute(key, [], gdal.ExtendedDataType.CreateString())
+        attribute.Write(str(value))
+    array.Write(data.tobytes())
+    dataset = None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="output directory (default: tests/data)")
     parser.add_argument("--days", type=int, default=7, help="how far back to search the catalogue (default: 7)")
     parser.add_argument("--window", type=int, default=512, help="extract size in pixels (default: 512)")
-    parser.add_argument("--platform", choices=["s1", "s2", "s5p", "both", "all"], default="both")
+    parser.add_argument("--platform", choices=["s1", "s2", "s5p", "s3", "both", "all"], default="both")
+    parser.add_argument("--s3-source", metavar="PATH_OR_URL",
+                        help="a Synergy VG1/V10 product to cut the test window from")
     parser.add_argument("--s5p-source", metavar="PATH_OR_URL",
                         help="an S5P NO2 granule to cut the test window from (local path or /vsicurl/ URL)")
     parser.add_argument("--s5p-scanlines", type=int, default=60,

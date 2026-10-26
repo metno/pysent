@@ -52,6 +52,7 @@ __all__ = [
     "qa",
     "s1",
     "s2",
+    "s3",
     "s5p",
     # sentinel-1
     "S1_SUPPORTED_AMPLITUDE_VARIABLES",
@@ -69,6 +70,11 @@ __all__ = [
     "normalize_sentinel_s2_product_map",
     "process_sentinel_s2_safe",
     "stretch_sentinel_s2_rgb",
+    # sentinel-3
+    "S3_PRODUCTS",
+    "build_sentinel_s3_output_filename",
+    "normalize_sentinel_s3_product_map",
+    "process_sentinel_s3_safe",
     # sentinel-5p
     "S5P_PRODUCTS",
     "build_sentinel_s5p_output_filename",
@@ -87,7 +93,7 @@ __all__ = [
     "supported_sentinel_product_types",
 ]
 
-_SUBMODULES = {"archive", "csw", "errors", "profiles", "qa", "s1", "s2", "s5p"}
+_SUBMODULES = {"archive", "csw", "errors", "profiles", "qa", "s1", "s2", "s3", "s5p"}
 
 _EXPORTS = {
     "S1_SUPPORTED_AMPLITUDE_VARIABLES": "s1",
@@ -104,6 +110,10 @@ _EXPORTS = {
     "normalize_sentinel_s2_product_map": "s2",
     "process_sentinel_s2_safe": "s2",
     "stretch_sentinel_s2_rgb": "s2",
+    "S3_PRODUCTS": "s3",
+    "build_sentinel_s3_output_filename": "s3",
+    "normalize_sentinel_s3_product_map": "s3",
+    "process_sentinel_s3_safe": "s3",
     "S5P_PRODUCTS": "s5p",
     "build_sentinel_s5p_output_filename": "s5p",
     "normalize_sentinel_s5p_product_map": "s5p",
