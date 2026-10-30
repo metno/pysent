@@ -22,6 +22,10 @@ from ._runtime import atomic_output
 
 __all__ = [
     "COLOUR_ANCHORS",
+    "rgb_bytes",
+    "write_rgb_product",
+    "write_rgb_styled",
+    "write_rgb_thumbnail",
     "STYLED_CEILING",
     "STYLED_FLOOR",
     "THUMBNAIL_PIXELS",
@@ -297,3 +301,167 @@ def finish_float_product(*, path: str, settings: dict[str, Any], metadata: dict[
             gdal.SetConfigOption("GDAL_OVR_PROPAGATE_NODATA", None)
     dataset.FlushCache()
     dataset = None
+
+
+def rgb_bytes(
+    bands: list[np.ndarray],
+    value_range: tuple[float, float],
+    *,
+    gamma: float = 1.0,
+) -> np.ndarray:
+    """Three reflectance bands as an 8-bit RGB array, shaped ``(rows, cols, 3)``.
+
+    ``gamma`` below one lifts the dark end, which a true-colour composite needs:
+    reflectance over water and vegetation sits in the bottom tenth of the range
+    while cloud fills the top, so a linear ramp gives a black sea under white
+    cloud and nothing in between.
+
+    Values above the range clip to white, which is the right answer for cloud -
+    including the small share of cloud pixels whose top-of-atmosphere
+    reflectance genuinely exceeds one.
+    """
+    if len(bands) != 3:
+        raise ValueError(f"a true-colour composite needs three bands, not {len(bands)}")
+    low, high = value_range
+    if not low < high:
+        raise ValueError(f"value_range must be (low, high) with low < high, not {(low, high)}")
+    if gamma <= 0:
+        raise ValueError(f"gamma must be positive, not {gamma}")
+
+    rows, columns = bands[0].shape
+    out = np.zeros((rows, columns, 3), dtype=np.uint8)
+    with np.errstate(invalid="ignore"):
+        for index, band in enumerate(bands):
+            # float32, not float64. The output is eight bits, so the extra
+            # precision buys nothing, and at full resolution each band is
+            # 67 million cells - three float64 copies came to 1.6 GB and were
+            # enough on their own to exhaust a 4 GB worker.
+            scaled = np.clip((band.astype(np.float32) - low) / (high - low), 0.0, 1.0)
+            if gamma != 1.0:
+                scaled = np.power(scaled, gamma)
+            out[:, :, index] = np.rint(
+                np.where(np.isfinite(band), scaled * (STYLED_CEILING - STYLED_FLOOR) + STYLED_FLOOR, 0)
+            ).astype(np.uint8)
+    return out
+
+
+def write_rgb_product(
+    *,
+    path: str,
+    bands: list[np.ndarray],
+    transform: tuple[float, ...],
+    projection: str,
+    settings: dict[str, Any],
+    metadata: dict[str, str],
+    descriptions: list[str],
+) -> None:
+    """The three bands as a Float32 GeoTIFF, in whatever unit they came in.
+
+    A true-colour composite is a picture, but the numbers behind it are still a
+    measurement, so they are kept as well - honestly labelled, since a
+    top-of-atmosphere reflectance derived here is not a validated product.
+    """
+    from osgeo import gdal
+
+    rows, columns = bands[0].shape
+    dataset = gdal.GetDriverByName("GTiff").Create(
+        path, columns, rows, len(bands), gdal.GDT_Float32,
+        options=creation_options(settings, float_data=True),
+    )
+    dataset.SetGeoTransform(tuple(float(value) for value in transform))
+    dataset.SetProjection(projection)
+    for index, band in enumerate(bands):
+        raster = dataset.GetRasterBand(index + 1)
+        raster.SetNoDataValue(float("nan"))
+        raster.WriteArray(np.asarray(band, dtype=np.float32))
+        raster.SetDescription(descriptions[index])
+    dataset.SetMetadata(metadata)
+    dataset.FlushCache()
+    dataset = None
+
+
+def write_rgb_styled(
+    *,
+    source_path: str,
+    output_path: Path,
+    value_range: tuple[float, float],
+    gamma: float,
+    settings: dict[str, Any],
+    metadata: dict[str, str],
+) -> None:
+    """The picture: an 8-bit RGB GeoTIFF with an alpha band for no data."""
+    from osgeo import gdal
+
+    source = gdal.Open(source_path)
+    bands = [source.GetRasterBand(index + 1).ReadAsArray() for index in range(3)]
+    transform, projection = source.GetGeoTransform(), source.GetProjection()
+    source = None
+
+    rgb = rgb_bytes(bands, value_range, gamma=gamma)
+    alpha = np.where(np.isfinite(bands[0]), 255, 0).astype(np.uint8)
+    rows, columns = alpha.shape
+
+    with atomic_output(output_path) as temporary:
+        dataset = gdal.GetDriverByName("GTiff").Create(
+            str(temporary), columns, rows, 4, gdal.GDT_Byte,
+            options=creation_options(settings, float_data=False) + ["PHOTOMETRIC=RGB", "ALPHA=YES"],
+        )
+        dataset.SetGeoTransform(transform)
+        dataset.SetProjection(projection)
+        for index in range(3):
+            dataset.GetRasterBand(index + 1).WriteArray(rgb[:, :, index])
+        dataset.GetRasterBand(4).WriteArray(alpha)
+        dataset.SetMetadata({
+            **metadata,
+            "PYSENT_STYLE_RANGE": f"{value_range[0]:g},{value_range[1]:g}",
+            "PYSENT_STYLE_GAMMA": f"{gamma:g}",
+            "PYSENT_STYLE_SCALE": "linear",
+        })
+        if settings["overview_factors"]:
+            dataset.BuildOverviews("AVERAGE", settings["overview_factors"])
+        dataset.FlushCache()
+        dataset = None
+
+
+def write_rgb_thumbnail(
+    *,
+    source_path: str,
+    output_path: Path,
+    value_range: tuple[float, float],
+    gamma: float,
+) -> None:
+    """A small RGB PNG, averaged from the full resolution."""
+    from osgeo import gdal
+
+    source = gdal.Open(source_path)
+    width, height = source.RasterXSize, source.RasterYSize
+    scale = min(1.0, THUMBNAIL_PIXELS / max(width, height))
+    target_width, target_height = max(1, round(width * scale)), max(1, round(height * scale))
+    transform = source.GetGeoTransform()
+    bounds = (
+        transform[0],
+        transform[3] + transform[5] * height,
+        transform[0] + transform[1] * width,
+        transform[3],
+    )
+    resampled = gdal.Warp(
+        "/vsimem/s3_rgb_thumbnail.tif", source, format="GTiff",
+        width=target_width, height=target_height,
+        outputBounds=bounds, dstSRS=source.GetProjection(),
+        resampleAlg="average", dstNodata=float("nan"), outputType=gdal.GDT_Float32,
+    )
+    bands = [resampled.GetRasterBand(index + 1).ReadAsArray() for index in range(3)]
+    resampled = None
+    gdal.Unlink("/vsimem/s3_rgb_thumbnail.tif")
+    source = None
+
+    rgb = rgb_bytes(bands, value_range, gamma=gamma)
+    alpha = np.where(np.isfinite(bands[0]), 255, 0).astype(np.uint8)
+    rows, columns = alpha.shape
+    with atomic_output(output_path) as temporary:
+        memory = gdal.GetDriverByName("MEM").Create("", columns, rows, 4, gdal.GDT_Byte)
+        for index in range(3):
+            memory.GetRasterBand(index + 1).WriteArray(rgb[:, :, index])
+        memory.GetRasterBand(4).WriteArray(alpha)
+        gdal.GetDriverByName("PNG").CreateCopy(str(temporary), memory)
+        memory = None

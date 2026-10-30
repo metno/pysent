@@ -38,6 +38,10 @@ S3_VG1 = (
     "S3A_SY_2_VG1____20260101T000000_20260101T235959_20260103T120000"
     "_EUROPE____________PS1_O_NT_002.SEN3"
 )
+S3_VGP = (
+    "S3A_SY_2_VGP____20260101T000000_20260101T235959_20260103T120000"
+    "_EUROPE____________PS1_O_NT_002.SEN3"
+)
 S3_AOD = (
     "S3A_SL_2_AOD____20260926T084807_20260926T085107_20260927T125720_0179_144_221"
     "_1980_MAR_O_NT_004.SEN3"
@@ -226,7 +230,7 @@ def test_supported_products_route_to_their_pipeline(title, pipeline):
     [
         (S1_SLC, "single-look complex"),
         (S2_L2A, "surface reflectance"),
-        (S3_EFR, "radiance only"),
+        (S3_VGP, "355 Mpx"),
         (S5P_O3TCL_RPRO, "gridded product"),
     ],
 )
@@ -249,7 +253,7 @@ def test_planned_products_refuse_until_their_phase_lands(title):
 
 def test_refusals_say_what_is_supported():
     with pytest.raises(UnsupportedProductError, match="S2 MSIL1C"):
-        resolve_sentinel_pipeline(S3_EFR)
+        resolve_sentinel_pipeline(S3_VGP)
 
 
 def test_resolve_accepts_a_detection_dict_and_an_object():
@@ -284,7 +288,8 @@ def test_the_ready_set_is_exactly_what_has_a_pipeline():
     reachable, so the set is pinned here rather than left to drift."""
     assert sorted(supported_sentinel_product_types()) == [
         "S1 GRD", "S1 GRDH", "S1 GRDM", "S2 MSIL1C",
-        "S3 OL_2_LFR", "S3 OL_2_LRR", "S3 OL_2_WFR", "S3 OL_2_WRR",
+        "S3 OL_1_EFR", "S3 OL_1_ERR", "S3 OL_2_LFR", "S3 OL_2_LRR",
+        "S3 OL_2_WFR", "S3 OL_2_WRR",
         "S3 SL_2_LST", "S3 SL_2_WST", "S3 SY_2_V10", "S3 SY_2_VG1",
         "S5P L2__AER_AI", "S5P L2__AER_LH", "S5P L2__CH4___", "S5P L2__CLOUD_",
         "S5P L2__CO____", "S5P L2__HCHO__", "S5P L2__NO2___", "S5P L2__O3__PR",
