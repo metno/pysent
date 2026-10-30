@@ -116,3 +116,31 @@ def s3_olci_window() -> Path:
     if not path.exists():
         pytest.skip("s3_olci_window.zip missing - run scripts/make_test_data.py --platform s3")
     return path
+
+
+@pytest.fixture(scope="session")
+def s3_slstr_lst_window() -> Path:
+    """A 256x256 window of a real SLSTR land-surface-temperature frame.
+
+    Carries all three members the product needs - the Int16 temperature in
+    kelvin with its exception word, the Int32 micro-degree geolocation, and the
+    16-flag confidence word - so the two-source mask and the kelvin-to-celsius
+    conversion are exercised offline.
+    """
+    path = DATA_DIR / "s3_slstr_lst_window.zip"
+    if not path.exists():
+        pytest.skip("s3_slstr_lst_window.zip missing - run scripts/make_test_data.py --platform s3")
+    return path
+
+
+@pytest.fixture(scope="session")
+def s3_slstr_sst_window() -> Path:
+    """A 256x256 window of a real SLSTR sea-surface-temperature frame.
+
+    The member keeps its generated GHRSST name, so the pattern lookup that
+    tells the two-view retrieval from the nadir-only one is exercised too.
+    """
+    path = DATA_DIR / "s3_slstr_sst_window.zip"
+    if not path.exists():
+        pytest.skip("s3_slstr_sst_window.zip missing - run scripts/make_test_data.py --platform s3")
+    return path
