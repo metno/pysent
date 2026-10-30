@@ -245,9 +245,9 @@ def test_an_enumerated_flag_is_not_confused_with_a_bit():
         {"name": "land", "mask": 8, "value": 8},
     ]
     flags = np.array([[0, 1, 2, 3, 8, 11]], dtype=np.uint16)
-    assert flag_selection(flags, table, ["clear"]).tolist() == [[True, False, False, False, True, False]]
-    assert flag_selection(flags, table, ["cloud"]).tolist() == [[False, False, False, True, False, True]]
-    assert flag_selection(flags, table, ["land"]).tolist() == [[False, False, False, False, True, True]]
+    assert flag_selection(flags, table, ["clear"])[0].tolist() == [[True, False, False, False, True, False]]
+    assert flag_selection(flags, table, ["cloud"])[0].tolist() == [[False, False, False, True, False, True]]
+    assert flag_selection(flags, table, ["land"])[0].tolist() == [[False, False, False, False, True, True]]
 
 
 def test_an_unknown_flag_name_is_refused_rather_than_ignored():

@@ -530,6 +530,163 @@ def _write_cf_grid(*, path: Path, variable: str, data: Any, data_type: int,
     dataset = None
 
 
+
+def _write_swath_members(path: Path, variables: list[dict[str, Any]]) -> None:
+    """Several variables on one swath grid, in one netCDF file.
+
+    A real OLCI member holds a group of variables - ``geo_coordinates.nc`` has
+    altitude, latitude and longitude - so the fixture has to as well, or the
+    reader opens a file whose shape it has never seen. A swath carries no
+    coordinate axes: the geolocation is its own member and reaches the warp
+    separately.
+    """
+    first = variables[0]["data"]
+    height, width = first.shape
+    dataset = gdal.GetDriverByName("netCDF").CreateMultiDimensional(str(path))
+    root = dataset.GetRootGroup()
+    rows = root.CreateDimension("rows", None, None, height)
+    columns = root.CreateDimension("columns", None, None, width)
+    for spec in variables:
+        array = root.CreateMDArray(
+            spec["name"], [rows, columns], gdal.ExtendedDataType.Create(spec["data_type"])
+        )
+        # Packing before data: netCDF will not define a fill value afterwards.
+        if spec["nodata"] is not None:
+            array.SetNoDataValueDouble(spec["nodata"])
+        if spec["scale"] not in (None, 1.0):
+            array.SetScale(spec["scale"])
+        if spec["offset"] not in (None, 0.0):
+            array.SetOffset(spec["offset"])
+        for key, value in spec["attributes"].items():
+            attribute = array.CreateAttribute(key, [], gdal.ExtendedDataType.CreateString())
+            attribute.Write(str(value))
+        array.Write(spec["data"].tobytes())
+    dataset = None
+
+
+# Member -> the variables of it the swath path reads.
+S3_OLCI_MEMBERS = {
+    "geo_coordinates.nc": ("latitude", "longitude"),
+    "chl_nn.nc": ("CHL_NN",),
+    "wqsf.nc": ("WQSF",),
+}
+
+
+def build_s3_olci(source: str, out_path: Path, *, window: int) -> dict[str, Any]:
+    """Cut a window out of an OLCI water product into a small STORED zip.
+
+    Keeps what the swath path depends on: the Int32 micro-degree geolocation
+    with its 1e-6 scale, the log10-packed science variable whose ``lg(...)``
+    units announce the packing, and the 64-bit quality word with its full flag
+    table. The window is chosen where the mask keeps something, since most of a
+    frame is land or cloud and a corner would test only the empty-scene path.
+    """
+    import numpy as np
+
+    from pysent._sen3 import (extract_member, flag_selection, open_sen3_variable,
+                              read_flag_table, read_packed, read_sen3_manifest, sen3_root)
+
+    root = sen3_root(source)
+    manifest = read_sen3_manifest(root)
+    product_name = str(manifest.get("productName") or "S3A_OL_2_WFR.SEN3")
+    inner = product_name if product_name.endswith(".SEN3") else Path(product_name).stem + ".SEN3"
+
+    with tempfile.TemporaryDirectory() as work:
+        scratch = Path(work)
+        science = open_sen3_variable(extract_member(root, "chl_nn.nc", scratch), "CHL_NN")
+        values = read_packed(science.GetRasterBand(1))
+        science = None
+        flag_dataset = open_sen3_variable(extract_member(root, "wqsf.nc", scratch), "WQSF")
+        flag_band = flag_dataset.GetRasterBand(1)
+        table = read_flag_table(flag_band)
+        flags = flag_band.ReadAsArray()
+        flag_dataset = None
+        water, _ = flag_selection(flags, table, ["WATER"])
+        usable = np.isfinite(values) & water
+
+        rows, columns = usable.shape
+        best = (-1, 0, 0)
+        stride = max(1, window // 2)
+        for y in range(0, max(1, rows - window), stride):
+            for x in range(0, max(1, columns - window), stride):
+                count = int(usable[y:y + window, x:x + window].sum())
+                if count > best[0]:
+                    best = (count, y, x)
+        count, offset_y, offset_x = best
+        print(f"       window at row {offset_y}, col {offset_x}: {count} usable pixels", flush=True)
+
+        files: dict[str, Path] = {}
+        written: dict[str, Any] = {}
+        for member, names in S3_OLCI_MEMBERS.items():
+            local = extract_member(root, member, scratch)
+            specs = []
+            for name in names:
+                dataset = open_sen3_variable(local, name)
+                band = dataset.GetRasterBand(1)
+                spec = {
+                    "name": name,
+                    "data": band.ReadAsArray(offset_x, offset_y, window, window),
+                    "data_type": band.DataType,
+                    "scale": band.GetScale(),
+                    "offset": band.GetOffset(),
+                    "nodata": band.GetNoDataValue(),
+                    "attributes": {k: v for k, v in band.GetMetadata().items()
+                                   if k.startswith("flag_") or k in ("units", "long_name")},
+                }
+                dataset = None
+                specs.append(spec)
+                written[f"{member}:{name}"] = {"dtype": gdal.GetDataTypeName(spec["data_type"])}
+            cut = scratch / f"cut_{member}"
+            _write_swath_members(cut, specs)
+            files[member] = cut
+
+        out_path.unlink(missing_ok=True)
+        with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_STORED) as archive:
+            for member, path in files.items():
+                archive.write(path, f"{inner}/{member}")
+            archive.writestr(f"{inner}/xfdumanifest.xml",
+                             _olci_manifest_xml(manifest, values, offset_y, offset_x, window, root, scratch))
+
+    return {"olci_window": {"path": str(out_path.relative_to(REPO_ROOT))
+                            if out_path.is_relative_to(REPO_ROOT) else str(out_path),
+                            "size": [window, window], "bytes": out_path.stat().st_size,
+                            "members": written, "sen3_directory": inner,
+                            "usable_pixels": count}}
+
+
+def _olci_manifest_xml(manifest: dict[str, Any], values, offset_y: int, offset_x: int,
+                       window: int, root: str, scratch: Path) -> str:
+    """A manifest for the cut window, with a footprint from its own corners."""
+    from pysent._sen3 import extract_member, open_sen3_variable, read_packed
+
+    geo = extract_member(root, "geo_coordinates.nc", scratch)
+    lat_ds = open_sen3_variable(geo, "latitude")
+    lon_ds = open_sen3_variable(geo, "longitude")
+    lat = read_packed(lat_ds.GetRasterBand(1))[offset_y:offset_y + window, offset_x:offset_x + window]
+    lon = read_packed(lon_ds.GetRasterBand(1))[offset_y:offset_y + window, offset_x:offset_x + window]
+    lat_ds = lon_ds = None
+    corners = [(lat[0, 0], lon[0, 0]), (lat[0, -1], lon[0, -1]),
+               (lat[-1, -1], lon[-1, -1]), (lat[-1, 0], lon[-1, 0]), (lat[0, 0], lon[0, 0])]
+    positions = " ".join(f"{float(a):.6f} {float(b):.6f}" for a, b in corners)
+    times = manifest.get("time", {})
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<xfdu:XFDU xmlns:xfdu="urn:ccsds:schema:xfdu:1" '
+        'xmlns:sentinel3="http://www.esa.int/safe/sentinel/sentinel-3/1.0" '
+        'xmlns:gml="http://www.opengis.net/gml">\n'
+        "  <metadataSection>\n"
+        f"    <sentinel3:productName>{manifest.get('productName', '')}</sentinel3:productName>\n"
+        f"    <sentinel3:productType>{manifest.get('productType', 'OL_2_WFR___')}</sentinel3:productType>\n"
+        f"    <sentinel3:baselineCollection>{manifest.get('baselineCollection', '004')}"
+        "</sentinel3:baselineCollection>\n"
+        f"    <sentinel3:startTime>{times.get('start', '')}</sentinel3:startTime>\n"
+        f"    <sentinel3:stopTime>{times.get('end', '')}</sentinel3:stopTime>\n"
+        f"    <gml:posList>{positions}</gml:posList>\n"
+        "  </metadataSection>\n"
+        "</xfdu:XFDU>\n"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="output directory (default: tests/data)")

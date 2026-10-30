@@ -186,7 +186,22 @@ def open_sen3_variable(local_member: str, variable: str) -> Any:
     return dataset
 
 
-def read_packed(band: Any, *, decimate: int = 1, log10: bool = False) -> np.ndarray:
+# A log-packed variable says so in its own units: CHL_NN is "lg(re mg.m-3)",
+# TSM_NN "lg(re g.m-3)", kd_490 "lg(re m-1)". Checked across both processing
+# baselines and against the variables that are *not* log-packed (IWV "kg.m-2",
+# PAR "microeinstein.m-2.s-1", GIFAPAR and OTCI with no units at all), so the
+# convention can be detected rather than hard-coded per product - which also
+# means it keeps working when a baseline renames a variable.
+_LOG_UNITS_PREFIX = "lg("
+
+
+def is_log_packed(band: Any) -> bool:
+    """True when the band's own units say it holds a base-10 logarithm."""
+    units = str(band.GetMetadata().get("units", "") or "").strip().lower()
+    return units.startswith(_LOG_UNITS_PREFIX)
+
+
+def read_packed(band: Any, *, decimate: int = 1, log10: bool | str = "auto") -> np.ndarray:
     """Read a band as float32, fill as NaN, ``scale``/``offset`` applied.
 
     ``decimate`` reads every n-th pixel by asking GDAL for a smaller buffer,
@@ -195,7 +210,8 @@ def read_packed(band: Any, *, decimate: int = 1, log10: bool = False) -> np.ndar
     ``log10`` applies the final ``10**x`` that the OLCI water products need:
     they store ``log10(value)`` packed into a byte, so a pipeline that forgets
     it maps chlorophyll onto roughly -3..2 instead of 0.001..100 - a plausible
-    looking picture of the wrong quantity.
+    looking picture of the wrong quantity. The default ``"auto"`` reads the
+    band's units, which name the packing; pass ``True`` or ``False`` to force it.
     """
     width = max(1, band.XSize // max(1, int(decimate)))
     height = max(1, band.YSize // max(1, int(decimate)))
@@ -213,6 +229,8 @@ def read_packed(band: Any, *, decimate: int = 1, log10: bool = False) -> np.ndar
         values = values * float(scale)
     if offset not in (None, 0.0):
         values = values + float(offset)
+    if log10 == "auto":
+        log10 = is_log_packed(band)
     if log10:
         values = np.power(10.0, values)
 
@@ -262,23 +280,79 @@ def _flag_numbers(text: Any) -> list[int]:
     return [int(float(item)) for item in re.findall(r"-?\d+(?:\.\d+)?", str(text))]
 
 
-def flag_selection(flags: np.ndarray, table: list[dict[str, Any]], names: list[str]) -> np.ndarray:
-    """A boolean array that is true where any of ``names`` is set.
+def flag_selection(
+    flags: np.ndarray,
+    table: list[dict[str, Any]],
+    names: list[str],
+    *,
+    allow_missing: bool = False,
+) -> tuple[np.ndarray, list[str]]:
+    """Where any of ``names`` is set, and which of them this product lacks.
 
-    Unknown names raise with the list the file does define, because a silently
-    ignored flag name is a mask that quietly does nothing - and a mask that does
+    A name the file does not define raises by default, because a silently
+    ignored flag is a mask that quietly does nothing - and a mask that does
     nothing looks exactly like a product with unusually good data.
+
+    ``allow_missing`` is for a *default* mask rather than a requested one. Flag
+    sets differ between processing baselines: baseline 004 of an OLCI water
+    product defines 57 flags and baseline 003 only 53, so a default list that
+    names ``CLOUD_SHADOW`` is correct for one and impossible for the other.
+    Refusing the whole product there would be wrong, so the missing names are
+    skipped and returned, for the caller to record rather than discard.
     """
     known = {row["name"]: row for row in table}
-    unknown = [name for name in names if name not in known]
-    if unknown:
+    missing = [name for name in names if name not in known]
+    if missing and not allow_missing:
         raise ValueError(
-            f"flag(s) {', '.join(unknown)} are not defined in this product; it has: "
+            f"flag(s) {', '.join(missing)} are not defined in this product; it has: "
             f"{', '.join(sorted(known)) or 'no flags'}"
         )
 
     selected = np.zeros(flags.shape, dtype=bool)
     for name in names:
-        row = known[name]
+        row = known.get(name)
+        if row is None:
+            continue
         selected |= (flags.astype(np.int64) & row["mask"]) == row["value"]
-    return selected
+    return selected, missing
+
+
+def resolve_variable(
+    root: str,
+    candidates: list[tuple[str, str]],
+    scratch: Path,
+) -> tuple[str, str, str]:
+    """Find the first ``(member, variable)`` candidate this product actually has.
+
+    Variable names move between processing baselines: the same quantity is
+    ``trsp.nc:kd_490`` under baseline 004 and ``trsp.nc:KD490_M07`` under 003,
+    and the chlorophyll variants are ``chlor_a.nc:chlor_a`` against
+    ``chl_oc4me.nc:CHL_OC4ME``. The packing moves too - that pair differs in
+    both scale and offset - which is why the values are read from the file
+    rather than from a table.
+
+    Returns ``(local_path, member, variable)``. Raises with everything it looked
+    for when none matches, because "variable not found" on its own does not say
+    whether the product is unexpected or the table is out of date.
+    """
+    members = set(sen3_members(root))
+    tried: list[str] = []
+    for member, variable in candidates:
+        tried.append(f"{member}:{variable}")
+        if member not in members:
+            continue
+        local = extract_member(root, member, scratch)
+        try:
+            dataset = gdal.Open(f'NETCDF:"{local}":{variable}')
+        except RuntimeError:
+            # With GDAL exceptions enabled a missing variable raises rather than
+            # returning None, and a miss is the expected outcome in this loop.
+            dataset = None
+        if dataset is not None:
+            dataset = None
+            return local, member, variable
+    raise ValueError(
+        f"none of {', '.join(tried)} is in this product. Its members are: "
+        f"{', '.join(sorted(members))}. A processing baseline this table does not cover "
+        "would look exactly like this."
+    )
