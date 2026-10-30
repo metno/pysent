@@ -231,7 +231,7 @@ def test_out_of_scope_products_are_refused_with_the_reason(title, expected):
         resolve_sentinel_pipeline(title)
 
 
-@pytest.mark.parametrize("title", [S3_WFR_PS1, S3_LST_PS2])
+@pytest.mark.parametrize("title", [S3_LST_PS2])
 def test_planned_products_refuse_until_their_phase_lands(title):
     """Recognised, routed in the table, but no pipeline exists yet.
 
@@ -245,7 +245,7 @@ def test_planned_products_refuse_until_their_phase_lands(title):
 
 def test_refusals_say_what_is_supported():
     with pytest.raises(UnsupportedProductError, match="S2 MSIL1C"):
-        resolve_sentinel_pipeline(S3_WFR_PS1)
+        resolve_sentinel_pipeline(S3_EFR)
 
 
 def test_resolve_accepts_a_detection_dict_and_an_object():
@@ -280,6 +280,7 @@ def test_the_ready_set_is_exactly_what_has_a_pipeline():
     reachable, so the set is pinned here rather than left to drift."""
     assert sorted(supported_sentinel_product_types()) == [
         "S1 GRD", "S1 GRDH", "S1 GRDM", "S2 MSIL1C",
+        "S3 OL_2_LFR", "S3 OL_2_LRR", "S3 OL_2_WFR", "S3 OL_2_WRR",
         "S3 SY_2_V10", "S3 SY_2_VG1",
         "S5P L2__AER_AI", "S5P L2__AER_LH", "S5P L2__CH4___", "S5P L2__CLOUD_",
         "S5P L2__CO____", "S5P L2__HCHO__", "S5P L2__NO2___", "S5P L2__O3__PR",
