@@ -75,6 +75,7 @@ __all__ = [
     "build_sentinel_s3_output_filename",
     "normalize_sentinel_s3_product_map",
     "process_sentinel_s3_safe",
+    "restyle_sentinel_s3_product",
     # sentinel-5p
     "S5P_PRODUCTS",
     "build_sentinel_s5p_output_filename",
@@ -114,6 +115,7 @@ _EXPORTS = {
     "build_sentinel_s3_output_filename": "s3",
     "normalize_sentinel_s3_product_map": "s3",
     "process_sentinel_s3_safe": "s3",
+    "restyle_sentinel_s3_product": "s3",
     "S5P_PRODUCTS": "s5p",
     "build_sentinel_s5p_output_filename": "s5p",
     "normalize_sentinel_s5p_product_map": "s5p",

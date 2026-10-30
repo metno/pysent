@@ -123,6 +123,22 @@ COLOUR_ANCHORS: dict[str, list[tuple[int, int, int]]] = {
 }
 
 
+def _matches_codes(codes: np.ndarray, wanted: tuple[int, ...]) -> np.ndarray:
+    """Where a reason band holds one of ``wanted``.
+
+    The reason band rides through the same warp as the values, so cells outside
+    the swath carry the warp's NoData - NaN - rather than a code. Rounding that
+    to an integer is undefined, so the comparison is done on the finite cells
+    only and everything else counts as no reason at all.
+    """
+    finite = np.isfinite(codes)
+    matched = np.zeros(codes.shape, dtype=bool)
+    rounded = np.rint(np.where(finite, codes, 0.0)).astype(np.int64)
+    for code in wanted:
+        matched |= rounded == int(code)
+    return matched & finite
+
+
 def write_styled_copy(
     *,
     source_path: str,
@@ -132,6 +148,8 @@ def write_styled_copy(
     settings: dict[str, Any],
     metadata: dict[str, str],
     log_scale: bool = False,
+    hide_codes: tuple[int, ...] = (),
+    reason_band: int | None = None,
 ) -> None:
     """The 8-bit copy a map service can serve without applying a colour ramp.
 
@@ -143,6 +161,14 @@ def write_styled_copy(
 
     source = gdal.Open(source_path)
     values = source.GetRasterBand(1).ReadAsArray()
+    # The browse image may hide pixels the float product keeps. The two outputs
+    # answer to different audiences: a coverage service serves people who can
+    # filter for themselves, a map service serves a picture that should not have
+    # cloud edges in it. Which pixels those are is read back from the reason
+    # band, so this needs no access to the source product.
+    if hide_codes and reason_band and source.RasterCount >= reason_band:
+        codes = source.GetRasterBand(reason_band).ReadAsArray()
+        values = np.where(_matches_codes(codes, hide_codes), np.nan, values)
     styled = styled_bytes(values, value_range, log_scale=log_scale)
 
     with atomic_output(output_path) as temporary:
@@ -177,7 +203,9 @@ def write_styled_copy(
 
 
 def write_thumbnail(*, source_path: str, output_path: Path, value_range: tuple[float, float],
-                    colormap: str, log_scale: bool = False) -> None:
+                    colormap: str, log_scale: bool = False,
+                    hide_codes: tuple[int, ...] = (), reason_band: int | None = None,
+                    materialise: bool = False) -> None:
     """A small paletted PNG for a catalogue page, decimated on read."""
     from osgeo import gdal
 
@@ -196,6 +224,32 @@ def write_thumbnail(*, source_path: str, output_path: Path, value_range: tuple[f
         transform[0] + transform[1] * width,
         transform[3],
     )
+    hiding = bool(hide_codes) and bool(reason_band) and source.RasterCount >= (reason_band or 1)
+    if hiding or materialise:
+        # Band 1 is read out and handed to the warp as an array, for two
+        # reasons. It is where browse-hidden pixels are removed, so a thumbnail
+        # does not blend cloud-edge values into their neighbours. And it makes
+        # the result independent of whether the product has overviews: given
+        # them, gdal.Warp averages a pre-averaged level rather than the data,
+        # which on a sparse map drops coarse cells holding only a pixel or two -
+        # measured on one window, 30.1 % of cells drawn from the overviews
+        # against 33.5 % from the full resolution.
+        #
+        # Off by default, because turning it on changes what an existing
+        # pipeline renders. Sentinel-3 asks for it; Sentinel-5P does not, so its
+        # thumbnails stay byte-for-byte what they were.
+        full = source.GetRasterBand(1).ReadAsArray()
+        if hiding:
+            codes = source.GetRasterBand(reason_band).ReadAsArray()
+            full = np.where(_matches_codes(codes, hide_codes), np.nan, full)
+        materialised = gdal.GetDriverByName("MEM").Create("", width, height, 1, gdal.GDT_Float32)
+        materialised.SetGeoTransform(source.GetGeoTransform())
+        materialised.SetProjection(source.GetProjection())
+        band = materialised.GetRasterBand(1)
+        band.SetNoDataValue(float("nan"))
+        band.WriteArray(full)
+        source = materialised
+
     resampled = gdal.Warp(
         "/vsimem/s5p_thumbnail.tif",
         source,
