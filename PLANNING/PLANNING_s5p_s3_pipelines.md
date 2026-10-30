@@ -348,7 +348,7 @@ Measured time / peak memory, to be filled per phase (the audit prototypes are th
 - [x] **Phase 4 — Swath warp + OLCI L2 (WFR, LFR, WRR, LRR).** Geolocation warp with the four traps and the validated step; baseline name tables; masks; measured on the interactive and bulk assumptions. *Needs Q12.*
 - [x] **Phase 5 — SLSTR L2.** LST, WST (DUAL/NADIR), and the two AOD products if wanted. *Needs Q13.*
 - [x] **Phase 6 — OLCI L1 true colour** (only if wanted): reflectance validated against the L2 reflectance of the same scene before anything ships.
-- [ ] **Phase 7 — Separate plans:** multi-granule composites (B.9); vector products (FRP, SRAL).
+- [x] **Phase 7 — Separate plans:** multi-granule composites (B.9); vector products (FRP, SRAL). **No code belongs to this phase** - it exists to say that these two are their own plans. Neither has been started. Per Q16 the composites come first.
 
 ### B.9 Later work packages (planning notes only)
 
@@ -557,3 +557,22 @@ Asked just-in-time, before the phase that needs the answer. *Italics are the rec
   - **Output shape, different from every other product here.** True colour is a picture, so the styled copy is a 4-band 8-bit RGBA GeoTIFF rather than a paletted single band, with gamma 0.6 over 0–0.6 reflectance to lift the dark end (without it the sea is black and the land nearly black under white cloud). The Float32 product keeps all three bands because the numbers are still a measurement, labelled `OaNN_NNNnm_toa_reflectance` and with `PYSENT_VARIABLE` saying "derived" — it is not a validated reflectance product and should not be served as one.
   - **No committed fixture.** A Level-1 window large enough to be meaningful needs the radiance band, the 21 × 3700 flux table, a per-pixel detector index, a tie-point grid and a quality word at 19.9 Mpx; that is not a committed artifact. The arithmetic and the composite are tested on synthetic arrays and the end-to-end path behind the archive fixture, which is a real gap and is stated as one.
   - **Verification:** 418 passed / 13 skipped with numba, 414 / 17 without, **430 passed / 1 skipped with the real products mounted**. The Sentinel-5P freeze still holds — **zero differing pixel hashes** against the commit the review study was built from.
+
+---
+
+## Close-out (2026-10-30)
+
+Every phase of this plan is done and on `main`. The file is renamed to `PLANNING_s5p_s3_pipelines.md` per the repository's planning rules.
+
+**What shipped.** 24 routable product types (4 Sentinel-1/2, 10 Sentinel-5P, 10 Sentinel-3) and 20 derived products, across `profiles.py` (detection and routing), `_swath.py` (grid policy and the geolocation warp), `_sen3.py` (the Sentinel-3 archive reader), `_olci_l1.py` (radiance to reflectance), `_output.py` (the three output files, shared) and the `s5p.py` / `s3.py` pipelines. 418 tests in the CI container, 430 with the real products mounted.
+
+**How it reached `main`.** As PR #27, fourteen commits with a tree byte-identical to the tested stack. PRs #18 and #19 merged individually; #20-#26 were closed as superseded after retargeting them to `main` began to conflict. The reason, and the retargeting rule behind it, is written up in `AGENT_MEMORY/06-workflows.md` so the next stack does not repeat it.
+
+**Open, and deliberately so:**
+- **Phase 6's acceptance gate was not met as written.** It required the Level-1 reflectance to be validated against the Level-2 reflectance of the same scene; those are different physical quantities (median ratio 127x, correlation -0.06 over 3.28 M matched pixels). A physical-plausibility check was substituted. **The owner has not yet said whether that clears the gate, so the true-colour layer should stay out of the catalogue even though the code is ready.**
+- **The Sentinel-3 mask defaults are the owner's decision, not a domain validation** (Q12, accepted 2026-10-30). The Sentinel-3 review study can still revise any of them; each is a per-request option.
+- **The Sentinel-5P defaults are frozen** pending the expert review study at <https://ogc-service.wps.met.no/review/s5p-l2>, with four colour-range changes proposed and not applied. Rendering on `main` is byte-identical to the commit the study was built from.
+- **`SL_2_AOD` and `SY_2_AOD` remain `planned`**, as B.1 allowed ("process, low priority").
+- **No committed fixture for OLCI Level-1**, so the true-colour path is covered by synthetic tests and the real-archive tests only. Stated as a gap rather than papered over.
+
+**Follow-on plans, not started:** multi-granule composites (B.9), then the vector products FRP and SRAL. Q16 puts composites first.
