@@ -336,15 +336,25 @@ def test_a_requested_mask_is_strict_about_a_flag_that_does_not_exist():
 # Keep and reject
 # --------------------------------------------------------------------------- #
 def test_a_water_product_keeps_water_and_rejects_the_failure_conditions():
+    """The hard tier is about validity, not contamination.
+
+    A pixel that is invalid, over land, or whose retrieval reported failure has
+    no value worth keeping in any output. A pixel merely beside a cloud does,
+    which is why the cloud-margin flags sit in the browse tier instead.
+    """
     entry = S3_PRODUCTS["chl"]
     assert entry["mask_flags"] == ("WATER",)
-    for name in ("INVALID", "LAND", "CLOUD", "CLOUD_MARGIN", "AC_FAIL", "OCNN_FAIL"):
+    for name in ("INVALID", "LAND", "CLOUD", "AC_FAIL", "OCNN_FAIL"):
         assert name in entry["reject_flags"], name
+    for name in ("CLOUD_MARGIN", "CLOUD_AMBIGUOUS", "CLOUD_SHADOW"):
+        assert name in entry["browse_reject_flags"], name
+        assert name not in entry["reject_flags"], name
 
 
 def test_a_land_product_keeps_land():
     assert S3_PRODUCTS["gifapar"]["mask_flags"] == ("LAND",)
     assert "HISOLZEN" in S3_PRODUCTS["gifapar"]["reject_flags"]
+    assert "CLOUD_MARGIN" in S3_PRODUCTS["gifapar"]["browse_reject_flags"]
 
 
 def test_keep_and_reject_are_separate_questions():
@@ -474,7 +484,8 @@ def test_the_swath_output_is_projected_and_carries_its_provenance(s3_olci_window
     assert tags["PYSENT_BASELINE"] == "004"
     assert tags["PYSENT_GEOLOC_STEP"] == "1"
     assert tags["PYSENT_MASK_FLAGS"] == "WATER"
-    assert "CLOUD_MARGIN" in tags["PYSENT_REJECT_FLAGS"]
+    assert "LAND" in tags["PYSENT_REJECT_FLAGS"]
+    assert "CLOUD_MARGIN" in tags["PYSENT_BROWSE_REJECT_FLAGS"]
 
 
 def test_the_result_reports_which_member_and_variable_were_used(s3_olci_window, tmp_path):

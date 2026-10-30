@@ -342,12 +342,16 @@ def _write_geolocation_tiff(path: str, data: np.ndarray) -> None:
     dataset = None
 
 
-def _write_value_tiff(path: str, data: np.ndarray) -> None:
+def _write_value_tiff(path: str, data: np.ndarray, companion: np.ndarray | None = None) -> None:
     driver = gdal.GetDriverByName("GTiff")
-    dataset = driver.Create(path, data.shape[1], data.shape[0], 1, gdal.GDT_Float32)
+    count = 1 if companion is None else 2
+    dataset = driver.Create(path, data.shape[1], data.shape[0], count, gdal.GDT_Float32)
     band = dataset.GetRasterBand(1)
     band.WriteArray(np.asarray(data, dtype=np.float32))
     band.SetNoDataValue(float("nan"))
+    if companion is not None:
+        second = dataset.GetRasterBand(2)
+        second.WriteArray(np.asarray(companion, dtype=np.float32))
     dataset.FlushCache()
     dataset = None
 
@@ -391,6 +395,7 @@ def warp_swath(
     num_threads: int | None = None,
     geoloc_step: int = 1,
     minimum_valid: int | None = None,
+    categorical: np.ndarray | None = None,
 ) -> str:
     """Resample a swath onto a map grid and write it as a Float32 GeoTIFF.
 
@@ -404,6 +409,10 @@ def warp_swath(
     as a pixel's top-left corner and the whole result shifts by half a source
     pixel.
     """
+    if categorical is not None and categorical.shape != values.shape:
+        raise ValueError(
+            f"the categorical band is {categorical.shape} but the values are {values.shape}"
+        )
     if values.shape != lat.shape or values.shape != lon.shape:
         raise ValueError(
             f"values {values.shape}, latitude {lat.shape} and longitude {lon.shape} must have the same shape"
@@ -429,7 +438,15 @@ def warp_swath(
     lon_path = str(scratch / "swath_longitude.tif")
     vrt_path = str(scratch / "swath_values.vrt")
 
-    _write_value_tiff(value_path, values)
+    if categorical is None:
+        _write_value_tiff(value_path, values)
+    else:
+        # Both bands go through one warp, so the companion lands on exactly the
+        # grid the values did. Nearest resampling throughout, because a code is
+        # not a quantity and averaging two reasons gives a third one that means
+        # nothing.
+        _write_value_tiff(value_path, values, companion=categorical)
+        resampling = "near"
     _write_geolocation_tiff(lat_path, lat[::geoloc_step, ::geoloc_step])
     _write_geolocation_tiff(lon_path, lon[::geoloc_step, ::geoloc_step])
 
@@ -455,6 +472,14 @@ def warp_swath(
     vrt.FlushCache()
     vrt = None
 
+    # GDAL's geolocation warp writes hole-filling work files to CPL_TMPDIR, or
+    # to the current directory when that is unset. In a read-only container
+    # neither is writable and **the hole fill fails silently** - one ERROR 4 in
+    # the log and a result with holes in it. Pointing it at the scratch
+    # directory, which the caller already had to provide, removes the question.
+    previous_tmpdir = gdal.GetConfigOption("CPL_TMPDIR")
+    gdal.SetConfigOption("CPL_TMPDIR", str(scratch))
+
     options: dict[str, Any] = {
         "format": "GTiff",
         "dstSRS": f"EPSG:{int(epsg)}",
@@ -472,7 +497,10 @@ def warp_swath(
         # Either a count or GDAL's own "ALL_CPUS"; both are valid here.
         options["warpOptions"] = [f"NUM_THREADS={num_threads}"]
 
-    gdal.Warp(output_path, vrt_path, **options)
+    try:
+        gdal.Warp(output_path, vrt_path, **options)
+    finally:
+        gdal.SetConfigOption("CPL_TMPDIR", previous_tmpdir)
 
     # Never trust the warp: check it produced something. An unscaled or
     # otherwise unusable geolocation array does not raise - GDAL logs "too many
