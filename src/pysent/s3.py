@@ -101,11 +101,13 @@ EPSG_LATLON = 4326
 OLCI_GROUND_SAMPLING_M = 300.0
 SLSTR_GROUND_SAMPLING_M = 1000.0
 
-# Masks below are **proposals read off the flag names in the files**, not taken
-# from the product notices, which were not available when this was written. The
-# plan records them as open question Q12, and a reviewer who knows these
-# products should confirm the defaults before a layer is published. Every one of
-# them is a per-request option, so a reversal is a request change.
+# The masks below were read off the flag names in the files rather than from the
+# product notices, which were not available when this was written. The owner
+# accepted them as the defaults on 2026-10-30 (open question Q12), so they are a
+# decision rather than a proposal - but a decision to ship, not a statement that
+# a domain expert has checked them. The Sentinel-3 review study is where they
+# can still be revised, and every one of them is a per-request option, so a
+# revision is a request change and not a code change.
 #
 # "keep" flags must be set; "reject" flags must not be. That is how the product
 # documentation phrases a mask, and it is not expressible as one list: a water
