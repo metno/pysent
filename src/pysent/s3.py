@@ -81,10 +81,13 @@ __all__ = [
     "S3_PRESETS",
     "S3_PRODUCTS",
     "S3_TYPE_PRODUCTS",
+    "BROWSE_HIDDEN_REASONS",
+    "REJECT_REASONS",
     "build_sentinel_s3_output_filename",
     "default_sentinel_s3_products",
     "normalize_sentinel_s3_product_map",
     "process_sentinel_s3_safe",
+    "restyle_sentinel_s3_product",
 ]
 
 # The grid the Synergy composites come on: 1/112 degree, about 1 km.
@@ -119,6 +122,9 @@ S3_PRODUCTS: dict[str, dict[str, Any]] = {
         # enumeration value rather than a bit - read_flag_table handles both.
         "mask_flags": ("clear",),
         "reject_flags": (),
+        # The Synergy status word has no marginal tier: its classes are the
+        # whole decision, so nothing is kept in the float and hidden later.
+        "browse_reject_flags": (),
         "flag_member": "sm.nc",
         "flag_variable": "SM",
     },
@@ -126,14 +132,16 @@ S3_PRODUCTS: dict[str, dict[str, Any]] = {
 
 # What a water product rejects. Eleven conditions, each of which makes a
 # chlorophyll retrieval meaningless rather than merely uncertain.
+# Conditions under which the retrieval is not a measurement: dropped from every
+# output.
 _WFR_REJECT = (
-    "INVALID", "LAND", "CLOUD", "CLOUD_AMBIGUOUS", "CLOUD_MARGIN", "SNOW_ICE",
-    "SATURATED", "HIGHGLINT", "WHITECAPS", "AC_FAIL", "CLOUD_SHADOW",
+    "INVALID", "LAND", "CLOUD", "SNOW_ICE",
+    "SATURATED", "HIGHGLINT", "WHITECAPS", "AC_FAIL",
 )
-_LFR_REJECT = (
-    "INVALID", "CLOUD", "CLOUD_AMBIGUOUS", "CLOUD_MARGIN", "SNOW_ICE",
-    "SATURATED", "HISOLZEN",
-)
+_LFR_REJECT = ("INVALID", "CLOUD", "SNOW_ICE", "SATURATED", "HISOLZEN")
+# Conditions under which it may be contaminated: kept in the float product with
+# the reason recorded, hidden in the browse image. See BROWSE_HIDDEN_REASONS.
+_MARGINAL_CLOUD = ("CLOUD_AMBIGUOUS", "CLOUD_MARGIN", "CLOUD_SHADOW")
 
 S3_PRODUCTS.update({
     "chl": {
@@ -156,6 +164,7 @@ S3_PRODUCTS.update({
         "label": "Chlorophyll-a concentration",
         "mask_flags": ("WATER",),
         "reject_flags": _WFR_REJECT + ("OCNN_FAIL",),
+        "browse_reject_flags": _MARGINAL_CLOUD,
         "flag_member": "wqsf.nc",
         "flag_variable": "WQSF",
     },
@@ -169,6 +178,7 @@ S3_PRODUCTS.update({
         "label": "Total suspended matter",
         "mask_flags": ("WATER",),
         "reject_flags": _WFR_REJECT + ("OCNN_FAIL",),
+        "browse_reject_flags": _MARGINAL_CLOUD,
         "flag_member": "wqsf.nc",
         "flag_variable": "WQSF",
     },
@@ -182,6 +192,7 @@ S3_PRODUCTS.update({
         "label": "Diffuse attenuation at 490 nm",
         "mask_flags": ("WATER",),
         "reject_flags": _WFR_REJECT,
+        "browse_reject_flags": _MARGINAL_CLOUD,
         "flag_member": "wqsf.nc",
         "flag_variable": "WQSF",
     },
@@ -195,6 +206,7 @@ S3_PRODUCTS.update({
         "label": "Green instantaneous FAPAR",
         "mask_flags": ("LAND",),
         "reject_flags": _LFR_REJECT + ("GIFAPAR_FAIL",),
+        "browse_reject_flags": _MARGINAL_CLOUD,
         "flag_member": "lqsf.nc",
         "flag_variable": "LQSF",
     },
@@ -208,6 +220,7 @@ S3_PRODUCTS.update({
         "label": "Terrestrial chlorophyll index",
         "mask_flags": ("LAND",),
         "reject_flags": _LFR_REJECT + ("OTCI_FAIL",),
+        "browse_reject_flags": _MARGINAL_CLOUD,
         "flag_member": "lqsf.nc",
         "flag_variable": "LQSF",
     },
@@ -249,17 +262,73 @@ S3_SWATH_PRESETS: dict[str, dict[str, Any]] = {
     "quicklook": {"target_resolution": None, "overview_factors": [2, 4], "geoloc_step": 16},
 }
 
-# Why a pixel carries no value, for the optional second band. A point query can
-# then answer "masked: cloud" instead of "no data", which is the difference
-# between a map that looks broken and one that explains itself.
+# Why a pixel carries no value, for the second band. A point query can then
+# answer "masked: cloud" instead of "no data", which is the difference between a
+# map that looks broken and one that explains itself.
 REJECT_REASONS: dict[str, int] = {
     "valid": 0,
     "fill": 1,
+    # Synergy status enumeration.
     "cloud": 2,
     "uncertain": 3,
     "unfilled": 4,
-    "other": 5,
+    # OLCI, kept apart because they are different kinds of doubt.
+    "snow_ice": 5,
+    "invalid": 6,
+    "land": 7,
+    "retrieval_failed": 8,
+    "cloud_margin": 9,
+    "cloud_ambiguous": 10,
+    "cloud_shadow": 11,
+    "other": 15,
 }
+
+# A flag name to the reason it stands for. Anything unlisted becomes "other",
+# which is still more use to a point query than "no data".
+_FLAG_REASONS: dict[str, str] = {
+    "CLOUD": "cloud",
+    "CLOUD_MARGIN": "cloud_margin",
+    "CLOUD_AMBIGUOUS": "cloud_ambiguous",
+    "CLOUD_SHADOW": "cloud_shadow",
+    "SNOW_ICE": "snow_ice",
+    "INVALID": "invalid",
+    "LAND": "land",
+    "AC_FAIL": "retrieval_failed",
+    "OCNN_FAIL": "retrieval_failed",
+    "CHLOR_A_FAIL": "retrieval_failed",
+    "GIFAPAR_FAIL": "retrieval_failed",
+    "OTCI_FAIL": "retrieval_failed",
+    "OTCI_BAD_IN": "retrieval_failed",
+    "SATURATED": "invalid",
+    "HIGHGLINT": "other",
+    "WHITECAPS": "other",
+    "HISOLZEN": "other",
+    "cloud": "cloud",
+    "uncertain": "uncertain",
+    "unfilled": "unfilled",
+}
+
+# Reasons the browse image hides although the float product keeps them.
+#
+# The split exists because the two outputs answer to different audiences. The
+# Float32 product serves a coverage service, whose users can filter for
+# themselves and are better served by having the pixel and the reason than by
+# having neither. The styled copy serves a map service, where a cloud edge in
+# the picture is simply wrong.
+#
+# What goes in here is doubt about *contamination*: a pixel next to a cloud,
+# possibly a cloud, or in a cloud's shadow. What stays out is doubt about
+# *validity*: an invalid pixel, or one whose own retrieval reported failure,
+# has no value worth keeping anywhere.
+#
+# It also happens to be where the data is. On a marine frame the water mask
+# discarded 59 % of the pixels that had a value, and CLOUD_MARGIN alone was
+# 70 % of that loss - a safety buffer around cloud, not a cloud detection.
+BROWSE_HIDDEN_REASONS: tuple[int, ...] = (
+    REJECT_REASONS["cloud_margin"],
+    REJECT_REASONS["cloud_ambiguous"],
+    REJECT_REASONS["cloud_shadow"],
+)
 
 
 def default_sentinel_s3_products(input_dataset: str) -> tuple[str, ...]:
@@ -483,6 +552,41 @@ def _resolve_processing_settings(processing_options: dict[str, Any] | None) -> d
 # --------------------------------------------------------------------------- #
 # One product
 # --------------------------------------------------------------------------- #
+def _swath_reject_codes(
+    *,
+    values: np.ndarray,
+    flags: np.ndarray | None,
+    table: list[dict[str, Any]],
+    kept: np.ndarray,
+    browse_clean: np.ndarray,
+    reject: list[str],
+    marginal: list[str],
+) -> np.ndarray:
+    """Why each pixel is not a plain measurement, as :data:`REJECT_REASONS` codes.
+
+    Evaluated from least to most decisive, so a pixel ends up with the firmest
+    reason that applies: one that is both beside a cloud and invalid reads as
+    invalid.
+
+    The last step is the subtle one. ``valid`` is written only where the pixel
+    survived the hard mask **and** carries no marginal doubt. A pixel the float
+    product keeps but the browse image hides has to retain its marginal code -
+    that code is the only thing that tells the styled copy to hide it, and the
+    only thing a point query can report.
+    """
+    codes = np.full(values.shape, REJECT_REASONS["other"], dtype=np.float32)
+    if flags is not None and table:
+        # Marginal first, then hard, so a hard reason overwrites a marginal one.
+        for group in (marginal, reject):
+            for name in group:
+                reason = _FLAG_REASONS.get(name, "other")
+                selected, _ = flag_selection(flags, table, [name], allow_missing=True)
+                codes[selected] = REJECT_REASONS[reason]
+    codes[~np.isfinite(values)] = REJECT_REASONS["fill"]
+    codes[kept & browse_clean] = REJECT_REASONS["valid"]
+    return codes
+
+
 def _reject_codes(
     *,
     values: np.ndarray,
@@ -537,6 +641,7 @@ def _assemble_result(
     values = written.GetRasterBand(1).ReadAsArray()
     transform = written.GetGeoTransform()
     width, height = written.RasterXSize, written.RasterYSize
+    extra_has_reason = written.RasterCount >= 2
     written = None
 
     bounds = [
@@ -577,9 +682,14 @@ def _assemble_result(
             "path": str(float_path),
             "method": "sample_raster",
             "band": 1,
-            "reject_reason_band": 2 if settings["reject_reason"] else None,
-            "reject_reasons": REJECT_REASONS if settings["reject_reason"] else None,
+            "reject_reason_band": 2 if extra_has_reason else None,
+            "reject_reasons": REJECT_REASONS if extra_has_reason else None,
         },
+        # Pixels the float product keeps but the browse image hides, so a
+        # caller knows the two are not the same picture.
+        "browse_hidden_reasons": [
+            name for name, code in REJECT_REASONS.items() if code in BROWSE_HIDDEN_REASONS
+        ] if extra_has_reason and options["browse_reject_flags"] else [],
         "time": manifest.get("time", {}),
         "provenance": metadata,
     }
@@ -591,6 +701,8 @@ def _assemble_result(
             source_path=str(float_path), output_path=styled_path,
             value_range=options["value_range"], colormap=options["colormap"],
             settings=settings, metadata=metadata, log_scale=options["log_scale"],
+            hide_codes=BROWSE_HIDDEN_REASONS if extra_has_reason else (),
+            reason_band=2 if extra_has_reason else None,
         )
         result["styled_path"] = str(styled_path)
 
@@ -600,6 +712,10 @@ def _assemble_result(
             source_path=str(float_path), output_path=thumbnail_path,
             value_range=options["value_range"], colormap=options["colormap"],
             log_scale=options["log_scale"],
+            hide_codes=BROWSE_HIDDEN_REASONS if extra_has_reason else (),
+            reason_band=2 if extra_has_reason else None,
+            # Sentinel-3 thumbnails average the data, not the overviews.
+            materialise=True,
         )
         result["thumbnail_path"] = str(thumbnail_path)
 
@@ -725,9 +841,22 @@ def _process_swath_product(
         # A default mask may name a flag an older baseline does not define.
         allow_missing=options["flags_are_default"],
     )
+    marginal = list(options["browse_reject_flags"])
+    # True where no marginal doubt applies. The float product keeps the rest;
+    # the browse image hides them, told apart by the reason band.
+    if marginal and flags is not None and table:
+        selected, _ = flag_selection(flags, table, marginal, allow_missing=True)
+        browse_clean = ~selected
+    else:
+        browse_clean = np.ones(values.shape, dtype=bool)
+
     masked = np.where(kept, values, np.nan).astype(np.float32)
     kept_count = int(np.count_nonzero(kept))
     source_valid = valid_fraction(values)
+    reason_codes = _swath_reject_codes(
+        values=values, flags=flags, table=table, kept=kept, browse_clean=browse_clean,
+        reject=list(options["reject_flags"]), marginal=marginal,
+    )
 
     if kept_count == 0 and settings["on_empty"] == "raise":
         raise EmptySceneError(
@@ -778,6 +907,7 @@ def _process_swath_product(
             # kept source pixels is far below any real result and far above
             # zero, so it catches that without rejecting a coarse grid.
             minimum_valid=max(1, kept_count // 100),
+            categorical=reason_codes,
         )
         finish_float_product(path=str(temporary), settings=settings, metadata=metadata)
 
@@ -967,6 +1097,7 @@ def _product_metadata(
         variable=variable or options.get("variable"),
         mask_flags=",".join(options["mask_flags"]) or "none",
         reject_flags=",".join(options["reject_flags"]) or "none",
+        browse_reject_flags=",".join(options["browse_reject_flags"]) or "none",
         grid_epsg=str(int(epsg)),
         grid_resolution=f"{resolution:g}",
         decimate=str(decimate),
@@ -1064,3 +1195,107 @@ def process_sentinel_s3_safe(
                 workers=1,
                 runtime=settings["runtime"],
             )
+
+
+def restyle_sentinel_s3_product(
+    *,
+    product_path: str | Path,
+    output_dir: Path | None = None,
+    value_range: tuple[float, float] | None = None,
+    colormap: str | None = None,
+    log_scale: bool | None = None,
+    styled: bool = True,
+    thumbnail: bool = True,
+    processing_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Re-render the styled copy and thumbnail of a product already processed.
+
+    The expensive half of making one of these layers is the warp; the colour
+    range, the ramp and the linear-or-log choice cost nothing to change once the
+    Float32 product exists. So a range that turns out wrong is a re-render, not
+    a reprocess - which is what makes a colour decision reversible after
+    publication, and what lets a review study put several candidate ranges in
+    front of a reviewer without warping anything twice.
+
+    Everything not given is read back from the product's own ``PYSENT_*`` tags,
+    so a caller can change one thing and keep the rest. The float product is
+    opened read-only and never rewritten.
+
+    Returns the paths written and the style that was applied.
+    """
+    from osgeo import gdal
+
+    float_path = Path(product_path)
+    if not float_path.exists():
+        raise ValueError(f"{float_path} does not exist")
+
+    dataset = gdal.Open(str(float_path))
+    if dataset is None:
+        raise ValueError(f"{float_path} could not be opened")
+    tags = dataset.GetMetadata()
+    band_count = dataset.RasterCount
+    dataset = None
+
+    stored_range = tags.get("PYSENT_STYLE_RANGE", "")
+    if value_range is None:
+        try:
+            low, high = (float(part) for part in stored_range.split(","))
+        except ValueError:
+            raise ValueError(
+                f"{float_path.name} carries no usable PYSENT_STYLE_RANGE tag "
+                f"({stored_range!r}), so a value_range has to be given"
+            ) from None
+        value_range = (low, high)
+    low, high = (float(value) for value in value_range)
+    if not low < high:
+        raise ValueError(f"value_range must be (low, high) with low < high, not {(low, high)}")
+
+    colormap = colormap or tags.get("PYSENT_COLORMAP") or "viridis"
+    if colormap not in COLOUR_ANCHORS:
+        raise ValueError(
+            f"{colormap!r} is not a colormap pysent ships; it has: {', '.join(sorted(COLOUR_ANCHORS))}"
+        )
+    if log_scale is None:
+        log_scale = tags.get("PYSENT_STYLE_SCALE", "linear") == "log10"
+    if log_scale and low <= 0.0:
+        raise ValueError(f"a log colour scale needs a positive lower bound, not {low}")
+
+    settings = _resolve_processing_settings(processing_options)
+    destination = Path(output_dir) if output_dir else float_path.parent
+    destination.mkdir(parents=True, exist_ok=True)
+
+    metadata = {
+        **{key: value for key, value in tags.items() if key.startswith("PYSENT_")},
+        "PYSENT_STYLE_RANGE": f"{low:g},{high:g}",
+        "PYSENT_STYLE_SCALE": "log10" if log_scale else "linear",
+        "PYSENT_COLORMAP": colormap,
+    }
+    # The reason band is what lets the browse image hide what the float keeps.
+    hide = BROWSE_HIDDEN_REASONS if band_count >= 2 else ()
+    reason_band = 2 if band_count >= 2 else None
+
+    written: dict[str, Any] = {
+        "source": str(float_path),
+        "value_range": [low, high],
+        "colormap": colormap,
+        "scale": "log10" if log_scale else "linear",
+        "browse_hidden": bool(hide),
+    }
+    if styled:
+        styled_path = destination / f"{float_path.stem}_styled.tif"
+        write_styled_copy(
+            source_path=str(float_path), output_path=styled_path,
+            value_range=(low, high), colormap=colormap, settings=settings,
+            metadata=metadata, log_scale=log_scale,
+            hide_codes=hide, reason_band=reason_band,
+        )
+        written["styled_path"] = str(styled_path)
+    if thumbnail:
+        thumbnail_path = destination / f"{float_path.stem}_thumb.png"
+        write_thumbnail(
+            source_path=str(float_path), output_path=thumbnail_path,
+            value_range=(low, high), colormap=colormap, log_scale=log_scale,
+            hide_codes=hide, reason_band=reason_band, materialise=True,
+        )
+        written["thumbnail_path"] = str(thumbnail_path)
+    return written
