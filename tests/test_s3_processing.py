@@ -8,6 +8,7 @@ conventions, the assigned CRS - are tested against real structure rather than
 against a mock.
 """
 import zipfile
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -85,28 +86,34 @@ def test_a_compressed_member_is_reported_rather_than_rejected(tmp_path):
     assert check_members_stored(str(path)) == ["X.SEN3/NDVI.nc"]
 
 
-def test_extracting_a_member_sidesteps_the_userfaultfd_requirement(s3_synergy_window, tmp_path):
-    """GDAL's netCDF driver will not open a file inside a zip without Linux
-    ``userfaultfd``, which a container's default seccomp profile blocks. So the
-    member is copied out first - a byte copy, since it is STORED - and the copy
-    is opened. This test is the whole reason that indirection exists.
+def test_extracting_a_member_lets_the_netcdf_driver_open_it(s3_synergy_window, tmp_path):
+    """Why the reader copies a member out before opening it.
+
+    GDAL's netCDF driver cannot open a file inside a zip without Linux
+    ``userfaultfd``. Whether that syscall is available is a property of the
+    *host*, not of the data: a container under Docker's default seccomp profile
+    is refused, a plain CI runner is not. Production workers are containers, so
+    the copy is necessary - and because every member is STORED it is a byte
+    range read rather than an inflate.
+
+    What is asserted here is only that the copy works, since that has to hold
+    everywhere. Whether the in-place open happens to succeed is reported for
+    information and deliberately not asserted: an earlier version of this test
+    asserted it must fail, passed in a container and failed in CI.
     """
     root = sen3_root(str(s3_synergy_window))
     local = extract_member(root, "NDVI.nc", tmp_path)
     assert local.endswith("NDVI.nc")
+    assert Path(local).exists()
 
     dataset = open_sen3_variable(local, "NDVI")
     assert dataset.RasterXSize == 384
+    # The packing survives the copy, which is the other half of the point: the
+    # HDF5 driver can open the member in place but loses scale and nodata.
+    band = dataset.GetRasterBand(1)
+    assert band.GetScale() == pytest.approx(0.004, rel=1e-3)
+    assert band.GetNoDataValue() == 255
     dataset = None
-
-    # Opening it in place is what would fail, and it is what we avoid. GDAL
-    # reports it as an exception or as None depending on whether the caller has
-    # enabled exceptions, so either counts.
-    try:
-        in_place = gdal.Open(f'NETCDF:"{root}/NDVI.nc":NDVI')
-    except RuntimeError:
-        in_place = None
-    assert in_place is None, "opening a netCDF member inside a zip unexpectedly worked"
 
 
 def test_a_missing_member_names_what_the_product_has(s3_synergy_window, tmp_path):
