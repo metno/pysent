@@ -94,6 +94,13 @@ __all__ = [
 SYNERGY_RESOLUTION = 1.0 / 112.0
 EPSG_LATLON = 4326
 
+# Full-resolution ground sampling per instrument, as a distance on the ground
+# rather than in the units of a grid: a product cannot know whether its granule
+# will land on a geographic or a projected grid, and the same number cannot mean
+# both. The ozone-profile bug of phase 2 was exactly this mistake.
+OLCI_GROUND_SAMPLING_M = 300.0
+SLSTR_GROUND_SAMPLING_M = 1000.0
+
 # Masks below are **proposals read off the flag names in the files**, not taken
 # from the product notices, which were not available when this was written. The
 # plan records them as open question Q12, and a reviewer who knows these
@@ -226,8 +233,22 @@ S3_PRODUCTS.update({
     },
 })
 
-# Geolocation member, shared by every OLCI swath product.
+# Geolocation member and variable names, per instrument. OLCI keeps them in
+# their own member; SLSTR names them with an ``_in`` suffix for the nadir grid;
+# the sea-surface-temperature product keeps plain Float32 ``lat``/``lon`` beside
+# the data, needing no scaling at all.
 GEO_MEMBER = "geo_coordinates.nc"
+OLCI_GEOLOCATION = (GEO_MEMBER, "latitude", "longitude")
+SLSTR_GEOLOCATION = ("geodetic_in.nc", "latitude_in", "longitude_in")
+
+# Physical units are what gets stored. A conversion is applied before writing
+# and recorded in the provenance, so a file always says what its numbers are.
+_UNIT_CONVERSIONS: dict[str, tuple[float, float, str]] = {
+    # name: (scale, offset, label)
+    "native": (1.0, 0.0, ""),
+    "celsius": (1.0, -273.15, "degC"),
+    "kelvin": (1.0, 0.0, "K"),
+}
 # Above this many source pixels a decimated geolocation grid is faster. Measured
 # on real frames at 0.003 deg: a 1.4 Mpx frame warps in 2.8 s at step 1 against
 # 3.5 s at step 8, while a 19.9 Mpx frame takes 39.4 s at step 1 against 5.6 s
@@ -235,6 +256,66 @@ GEO_MEMBER = "geo_coordinates.nc"
 # the line for an interactive request.
 EXACT_WARP_PIXEL_LIMIT = 4_000_000
 AUTO_GEOLOCATION_STEP = 8
+
+S3_PRODUCTS.update({
+    "lst": {
+        "kind": "swath",
+        "candidates": (("LST_in.nc", "LST"),),
+        "geolocation": SLSTR_GEOLOCATION,
+        "units": "degC",
+        "unit": "celsius",
+        # Q7's rule gives 10-45 from a June Nordic frame (masked p01/p50/p99 of
+        # 12.0 / 26.2 / 43.0 °C), and a February polar frame medians at -31 °C.
+        # No single range satisfies both: the plan's note that "a Nordic winter
+        # wants -10 to 40" is the practical compromise, with the top widened to
+        # cover the measured summer p99. A polar winter scene will clip at the
+        # bottom, which is a real limitation and an open question for a
+        # reviewer rather than something to decide from two frames.
+        "value_range": (-10.0, 45.0),
+        "log_scale": False,
+        "colormap": "magma",
+        "label": "Land surface temperature",
+        "ground_sampling_m": SLSTR_GROUND_SAMPLING_M,
+        "mask_flags": ("land",),
+        "reject_flags": ("summary_cloud", "unfilled", "summary_pointing", "duplicate"),
+        "browse_reject_flags": (),
+        "flag_member": "flags_in.nc",
+        "flag_variable": "confidence_in",
+        # A second condition on a different variable. The exception word lives
+        # in the science member, not the flag member, and any bit set at all
+        # means the retrieval did not complete.
+        "extra_masks": (
+            {"member": "LST_in.nc", "variable": "exception", "reject_any": True},
+        ),
+    },
+    "sst": {
+        "kind": "swath",
+        # The GHRSST member names are generated, so they are matched by shape.
+        # DUAL is the two-view retrieval and the default; NADIR is the wider
+        # swath and is selectable by overriding the candidate.
+        "candidates": (("*_DUAL_*.nc", "sea_surface_temperature"),),
+        "geolocation": ("*_DUAL_*.nc", "lat", "lon"),
+        "units": "degC",
+        "unit": "celsius",
+        "value_range": (-2.0, 20.0),
+        "log_scale": False,
+        "colormap": "magma",
+        "label": "Sea surface temperature",
+        "ground_sampling_m": SLSTR_GROUND_SAMPLING_M,
+        "mask_flags": (),
+        "reject_flags": ("land", "ice"),
+        "browse_reject_flags": (),
+        "flag_member": "*_DUAL_*.nc",
+        "flag_variable": "l2p_flags",
+        # quality_level is an ordered enumeration, not a bit field: 0 no_data,
+        # 1 cloud, 2 worst, 3 low, 4 acceptable, 5 best. The mission's own
+        # recommendation for a quantitative use is 4 or better; 3 buys coverage
+        # at a cost in accuracy, which is Q13 and the owner's provisional answer.
+        "extra_masks": (
+            {"member": "*_DUAL_*.nc", "variable": "quality_level", "min_value": 4},
+        ),
+    },
+})
 
 # Which products each Sentinel-3 type yields.
 S3_TYPE_PRODUCTS: dict[str, tuple[str, ...]] = {
@@ -244,6 +325,8 @@ S3_TYPE_PRODUCTS: dict[str, tuple[str, ...]] = {
     "OL_2_WRR": ("chl", "tsm", "kd490"),
     "OL_2_LFR": ("gifapar", "otci"),
     "OL_2_LRR": ("gifapar", "otci"),
+    "SL_2_LST": ("lst",),
+    "SL_2_WST": ("sst",),
 }
 
 S3_DEFAULT_PRODUCTS = ("ndvi",)
@@ -342,8 +425,9 @@ def default_sentinel_s3_products(input_dataset: str) -> tuple[str, ...]:
 # --------------------------------------------------------------------------- #
 # The request
 # --------------------------------------------------------------------------- #
-_PRODUCT_OPTIONS = {"variable", "mask_flags", "reject_flags", "value_range", "colormap",
-                    "decimate", "unit", "geoloc_step", "log_scale"}
+_PRODUCT_OPTIONS = {"variable", "mask_flags", "reject_flags", "browse_reject_flags",
+                    "value_range", "colormap", "decimate", "unit", "geoloc_step",
+                    "log_scale", "extra_masks"}
 
 
 def normalize_sentinel_s3_product_map(
@@ -437,6 +521,12 @@ def normalize_sentinel_s3_product_map(
                 f"it has: {', '.join(sorted(COLOUR_ANCHORS))}"
             )
 
+        unit = str(requested.get("unit") or defaults.get("unit") or "native").strip().lower()
+        if unit not in _UNIT_CONVERSIONS:
+            raise ValueError(
+                f"product {key!r}: unit must be one of {', '.join(_UNIT_CONVERSIONS)}, not {unit!r}"
+            )
+
         log_scale = bool(requested.get("log_scale", defaults.get("log_scale", False)))
         if log_scale and low <= 0.0:
             raise ValueError(
@@ -452,6 +542,8 @@ def normalize_sentinel_s3_product_map(
             "kind": defaults.get("kind", "grid"),
             "variable": str(requested.get("variable") or defaults.get("variable") or ""),
             "candidates": defaults.get("candidates", ()),
+            "geolocation": defaults.get("geolocation", OLCI_GEOLOCATION),
+            "extra_masks": tuple(requested.get("extra_masks", defaults.get("extra_masks", ()))),
             "mask_flags": mask_flags,
             "reject_flags": reject_flags,
             "value_range": (low, high),
@@ -459,6 +551,7 @@ def normalize_sentinel_s3_product_map(
             "decimate": decimate,
             "geoloc_step": geoloc_step,
             "log_scale": log_scale,
+            "unit": unit,
             # Log *packing* is detected from the file's units; this is only the
             # override, and it is a different thing from the log colour scale.
             "log10": defaults.get("log10", "auto"),
@@ -552,6 +645,47 @@ def _resolve_processing_settings(processing_options: dict[str, Any] | None) -> d
 # --------------------------------------------------------------------------- #
 # One product
 # --------------------------------------------------------------------------- #
+def _apply_extra_mask(
+    *,
+    spec: dict[str, Any],
+    root: str,
+    scratch: Path,
+    shape: tuple[int, int],
+    decimate: int,
+) -> tuple[np.ndarray, str]:
+    """One further condition, as a rejection mask and a label for the provenance.
+
+    Three forms, each the natural reading of the variable it applies to:
+
+    ``reject_any``
+        any bit set at all. An exception word says the retrieval did not
+        complete, and there is no bit of it worth keeping.
+    ``min_value``
+        an ordered enumeration, kept at or above a level. Quality level runs
+        0 no-data, 1 cloud, 2 worst, 3 low, 4 acceptable, 5 best, so a
+        threshold is the only sensible reading - a bit test would be nonsense.
+    ``reject``
+        flag names, as elsewhere.
+    """
+    local = extract_member(root, spec["member"], scratch)
+    dataset = open_sen3_variable(local, spec["variable"])
+    band = dataset.GetRasterBand(1)
+    raw = band.ReadAsArray(buf_xsize=shape[1], buf_ysize=shape[0])
+    table = read_flag_table(band)
+    dataset = None
+
+    if spec.get("reject_any"):
+        return raw != 0, f"{spec['variable']}!=0"
+    if "min_value" in spec:
+        minimum = int(spec["min_value"])
+        return raw < minimum, f"{spec['variable']}>={minimum}"
+    names = list(spec.get("reject", ()))
+    if names:
+        selected, _ = flag_selection(raw, table, names, allow_missing=True)
+        return selected, f"{spec['variable']} not {','.join(names)}"
+    return np.zeros(shape, dtype=bool), spec["variable"]
+
+
 def _swath_reject_codes(
     *,
     values: np.ndarray,
@@ -561,6 +695,7 @@ def _swath_reject_codes(
     browse_clean: np.ndarray,
     reject: list[str],
     marginal: list[str],
+    extra_rejected: np.ndarray | None = None,
 ) -> np.ndarray:
     """Why each pixel is not a plain measurement, as :data:`REJECT_REASONS` codes.
 
@@ -582,6 +717,10 @@ def _swath_reject_codes(
                 reason = _FLAG_REASONS.get(name, "other")
                 selected, _ = flag_selection(flags, table, [name], allow_missing=True)
                 codes[selected] = REJECT_REASONS[reason]
+    if extra_rejected is not None:
+        # A further condition is firmer than a flag: it is why the value is not
+        # a measurement, so it outranks a contamination code.
+        codes[extra_rejected] = REJECT_REASONS["retrieval_failed"]
     codes[~np.isfinite(values)] = REJECT_REASONS["fill"]
     codes[kept & browse_clean] = REJECT_REASONS["valid"]
     return codes
@@ -610,8 +749,6 @@ def _reject_codes(
     return codes
 
 
-# OLCI full-resolution ground sampling. The quicklook grid is a multiple of it.
-OLCI_GROUND_SAMPLING_M = 300.0
 
 
 def _assemble_result(
@@ -813,9 +950,12 @@ def _process_swath_product(
     # Geolocation. Stored as Int32 micro-degrees with a 1e-6 scale, and GDAL
     # uses a GEOLOCATION array exactly as it finds it, so it has to be scaled
     # into real degrees first - read_packed does that and masks the fill.
-    geo_local = extract_member(root, GEO_MEMBER, scratch)
-    lat_ds = open_sen3_variable(geo_local, "latitude")
-    lon_ds = open_sen3_variable(geo_local, "longitude")
+    geo_member, lat_name, lon_name = options["geolocation"]
+    geo_local = extract_member(root, geo_member, scratch)
+    lat_ds = open_sen3_variable(geo_local, lat_name)
+    lon_ds = open_sen3_variable(geo_local, lon_name)
+    # read_packed applies whatever scaling the file declares, so an Int32
+    # micro-degree array and a plain Float32 one both come back in degrees.
     lat = read_packed(lat_ds.GetRasterBand(1), decimate=decimate, log10=False)
     lon = read_packed(lon_ds.GetRasterBand(1), decimate=decimate, log10=False)
     lat_ds = lon_ds = None
@@ -850,12 +990,31 @@ def _process_swath_product(
     else:
         browse_clean = np.ones(values.shape, dtype=bool)
 
+    # Further conditions on other variables. A product may need more than one:
+    # land surface temperature is masked by a confidence word *and* by an
+    # exception word that lives in the science member, and sea surface
+    # temperature by a flag word *and* by an ordered quality enumeration.
+    extra_rejected = np.zeros(values.shape, dtype=bool)
+    extra_applied: list[str] = []
+    for spec in options.get("extra_masks", ()):
+        rejected, label = _apply_extra_mask(
+            spec=spec, root=root, scratch=scratch, shape=values.shape, decimate=decimate,
+        )
+        extra_rejected |= rejected
+        extra_applied.append(label)
+    kept = kept & ~extra_rejected
+
+    unit_scale, unit_offset, unit_label = _UNIT_CONVERSIONS[options["unit"]]
+    if unit_scale != 1.0 or unit_offset != 0.0:
+        values = (values * np.float32(unit_scale) + np.float32(unit_offset)).astype(np.float32)
+
     masked = np.where(kept, values, np.nan).astype(np.float32)
     kept_count = int(np.count_nonzero(kept))
     source_valid = valid_fraction(values)
     reason_codes = _swath_reject_codes(
         values=values, flags=flags, table=table, kept=kept, browse_clean=browse_clean,
         reject=list(options["reject_flags"]), marginal=marginal,
+        extra_rejected=extra_rejected,
     )
 
     if kept_count == 0 and settings["on_empty"] == "raise":

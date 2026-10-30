@@ -655,13 +655,17 @@ def build_s3_olci(source: str, out_path: Path, *, window: int) -> dict[str, Any]
 
 
 def _olci_manifest_xml(manifest: dict[str, Any], values, offset_y: int, offset_x: int,
-                       window: int, root: str, scratch: Path) -> str:
+                       window: int, root: str, scratch: Path,
+                       geolocation: tuple[str, str, str] = ("geo_coordinates.nc", "latitude", "longitude")) -> str:
     """A manifest for the cut window, with a footprint from its own corners."""
-    from pysent._sen3 import extract_member, open_sen3_variable, read_packed
+    from pysent._sen3 import extract_member, find_member, open_sen3_variable, read_packed
 
-    geo = extract_member(root, "geo_coordinates.nc", scratch)
-    lat_ds = open_sen3_variable(geo, "latitude")
-    lon_ds = open_sen3_variable(geo, "longitude")
+    member, lat_name, lon_name = geolocation
+    if "*" in member:
+        member = find_member(root, member)
+    geo = extract_member(root, member, scratch)
+    lat_ds = open_sen3_variable(geo, lat_name)
+    lon_ds = open_sen3_variable(geo, lon_name)
     lat = read_packed(lat_ds.GetRasterBand(1))[offset_y:offset_y + window, offset_x:offset_x + window]
     lon = read_packed(lon_ds.GetRasterBand(1))[offset_y:offset_y + window, offset_x:offset_x + window]
     lat_ds = lon_ds = None
@@ -685,6 +689,108 @@ def _olci_manifest_xml(manifest: dict[str, Any], values, offset_y: int, offset_x
         "  </metadataSection>\n"
         "</xfdu:XFDU>\n"
     )
+
+
+
+# Member -> variables, per SLSTR product. The sea-surface-temperature member
+# name is generated, so it is matched by pattern and written back under a name
+# of the same shape, to keep the fixture exercising that lookup.
+S3_SLSTR_MEMBERS = {
+    "lst": {
+        "LST_in.nc": ("LST", "exception"),
+        "geodetic_in.nc": ("latitude_in", "longitude_in"),
+        "flags_in.nc": ("confidence_in",),
+    },
+    "sst": {
+        "*_DUAL_*.nc": ("sea_surface_temperature", "quality_level", "l2p_flags", "lat", "lon"),
+    },
+}
+
+
+def build_s3_slstr(source: str, out_path: Path, *, product: str, window: int) -> dict[str, Any]:
+    """Cut a window out of an SLSTR product into a small STORED zip.
+
+    The window is chosen where the product's own mask keeps something, since a
+    polar winter land-temperature frame and a cloudy sea-temperature one are
+    both almost entirely empty and a corner would test only the empty path.
+    """
+    import numpy as np
+
+    from pysent._sen3 import (extract_member, find_member, open_sen3_variable,
+                              read_packed, read_sen3_manifest, sen3_root)
+
+    root = sen3_root(source)
+    manifest = read_sen3_manifest(root)
+    product_name = str(manifest.get("productName") or "S3A_SL_2.SEN3")
+    inner = product_name if product_name.endswith(".SEN3") else Path(product_name).stem + ".SEN3"
+    layout = S3_SLSTR_MEMBERS[product]
+
+    with tempfile.TemporaryDirectory() as work:
+        scratch = Path(work)
+        # Where is there data? Use the science variable's own valid pixels.
+        science_member = "LST_in.nc" if product == "lst" else "*_DUAL_*.nc"
+        science_variable = "LST" if product == "lst" else "sea_surface_temperature"
+        resolved = find_member(root, science_member) if "*" in science_member else science_member
+        dataset = open_sen3_variable(extract_member(root, resolved, scratch), science_variable)
+        values = read_packed(dataset.GetRasterBand(1))
+        dataset = None
+        usable = np.isfinite(values)
+
+        rows, columns = usable.shape
+        best = (-1, 0, 0)
+        stride = max(1, window // 2)
+        for y in range(0, max(1, rows - window), stride):
+            for x in range(0, max(1, columns - window), stride):
+                count = int(usable[y:y + window, x:x + window].sum())
+                if count > best[0]:
+                    best = (count, y, x)
+        count, offset_y, offset_x = best
+        print(f"       window at row {offset_y}, col {offset_x}: {count} valid pixels", flush=True)
+
+        files: dict[str, Path] = {}
+        written: dict[str, Any] = {}
+        for member, names in layout.items():
+            resolved = find_member(root, member) if "*" in member else member
+            local = extract_member(root, resolved, scratch)
+            specs = []
+            for name in names:
+                dataset = open_sen3_variable(local, name)
+                band = dataset.GetRasterBand(1)
+                spec = {
+                    "name": name,
+                    "data": band.ReadAsArray(offset_x, offset_y, window, window),
+                    "data_type": band.DataType,
+                    "scale": band.GetScale(),
+                    "offset": band.GetOffset(),
+                    "nodata": band.GetNoDataValue(),
+                    "attributes": {k: v for k, v in band.GetMetadata().items()
+                                   if k.startswith("flag_") or k in ("units", "long_name")},
+                }
+                dataset = None
+                specs.append(spec)
+                written[f"{resolved}:{name}"] = {"dtype": gdal.GetDataTypeName(spec["data_type"])}
+            cut = scratch / f"cut_{Path(resolved).name}"
+            _write_swath_members(cut, specs)
+            files[resolved] = cut
+
+        out_path.unlink(missing_ok=True)
+        with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_STORED) as archive:
+            for member, path in files.items():
+                archive.write(path, f"{inner}/{member}")
+            archive.writestr(f"{inner}/xfdumanifest.xml",
+                             _olci_manifest_xml(manifest, values, offset_y, offset_x, window,
+                                                root, scratch, geolocation=_SLSTR_GEO[product]))
+
+    return {f"{product}_window": {
+        "path": str(out_path.relative_to(REPO_ROOT)) if out_path.is_relative_to(REPO_ROOT) else str(out_path),
+        "size": [window, window], "bytes": out_path.stat().st_size,
+        "members": written, "sen3_directory": inner, "valid_pixels": count}}
+
+
+_SLSTR_GEO = {
+    "lst": ("geodetic_in.nc", "latitude_in", "longitude_in"),
+    "sst": ("*_DUAL_*.nc", "lat", "lon"),
+}
 
 
 def main(argv: list[str] | None = None) -> int:

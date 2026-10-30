@@ -160,6 +160,33 @@ def _baseline_of(facts: dict[str, Any], root: str) -> str:
     return match.group(1) if match else ""
 
 
+def find_member(root: str, pattern: str) -> str:
+    """The one member matching a shell pattern, or a clear complaint.
+
+    Most SEN3 members have fixed names, but the sea-surface-temperature product
+    carries two GHRSST files whose names are generated - they contain the
+    acquisition and processing timestamps, as in
+    ``20260614175338-MAR-L2P_GHRSST-SSTskin-SLSTRB-NTC_DUAL_...nc`` - so they
+    can only be found by shape. Matching exactly one is required: two matches
+    means the pattern is too loose to say which view was used, which for DUAL
+    against NADIR is a difference in the measurement itself.
+    """
+    import fnmatch
+
+    members = sen3_members(root)
+    matches = [member for member in members if fnmatch.fnmatch(member, pattern)]
+    if not matches:
+        raise ValueError(
+            f"no member of this product matches {pattern!r}; it has: {', '.join(members)}"
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"{len(matches)} members match {pattern!r} ({', '.join(matches)}); "
+            "the pattern has to name one"
+        )
+    return matches[0]
+
+
 def extract_member(root: str, member: str, scratch: Path) -> str:
     """Copy one member out of the product and return the local path.
 
@@ -168,6 +195,8 @@ def extract_member(root: str, member: str, scratch: Path) -> str:
     container usually forbids. The member is STORED, so the copy is a plain
     range read and costs almost nothing.
     """
+    if any(character in member for character in "*?["):
+        member = find_member(root, member)
     destination = Path(scratch) / Path(member).name
     source = f"{root}/{member}"
     if gdal.VSIStatL(source) is None:
@@ -335,12 +364,26 @@ def resolve_variable(
     for when none matches, because "variable not found" on its own does not say
     whether the product is unexpected or the table is out of date.
     """
+    import fnmatch
+
     members = set(sen3_members(root))
     tried: list[str] = []
     for member, variable in candidates:
         tried.append(f"{member}:{variable}")
         if member not in members:
-            continue
+            # A generated member name is given as a pattern.
+            matches = [candidate for candidate in members if fnmatch.fnmatch(candidate, member)]
+            if not matches:
+                continue
+            if len(matches) > 1:
+                raise ValueError(
+                    f"{len(matches)} members match {member!r} ({', '.join(sorted(matches))}); "
+                    "the pattern has to name one"
+                )
+            # Report the member actually used, not the pattern. For sea surface
+            # temperature that is the difference between the two-view and the
+            # nadir-only retrieval, which is a difference in the measurement.
+            member = matches[0]
         local = extract_member(root, member, scratch)
         try:
             dataset = gdal.Open(f'NETCDF:"{local}":{variable}')
