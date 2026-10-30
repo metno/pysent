@@ -39,6 +39,9 @@ import numpy as np
 
 from ._output import (
     COLOUR_ANCHORS,
+    write_rgb_product,
+    write_rgb_styled,
+    write_rgb_thumbnail,
     creation_options,
     finish_float_product,
     write_styled_copy,
@@ -243,6 +246,8 @@ S3_PRODUCTS.update({
 # the data, needing no scaling at all.
 GEO_MEMBER = "geo_coordinates.nc"
 OLCI_GEOLOCATION = (GEO_MEMBER, "latitude", "longitude")
+# Band centres in nm, for naming the three composite bands.
+BAND_LABEL = {4: 490, 6: 560, 8: 665}
 SLSTR_GEOLOCATION = ("geodetic_in.nc", "latitude_in", "longitude_in")
 
 # Physical units are what gets stored. A conversion is applied before writing
@@ -321,6 +326,34 @@ S3_PRODUCTS.update({
     },
 })
 
+S3_PRODUCTS.update({
+    "truecolor": {
+        "kind": "rgb",
+        # Red, green, blue. OLCI has no true blue band at 443 that is clean
+        # over land, so 490 nm stands in - the usual choice for an OLCI
+        # composite, and the one the plan proposed.
+        "bands": (8, 6, 4),
+        "geolocation": OLCI_GEOLOCATION,
+        "units": "1",
+        "unit": "native",
+        # Top-of-atmosphere reflectance, measured on a real frame: 0.04-0.25
+        # over open water, median 0.52 over cloud. 0.6 puts cloud near white
+        # and leaves the sea and the land in the lower half of the ramp.
+        "value_range": (0.0, 0.6),
+        # Below one, to lift the dark end: without it the sea is black and the
+        # land is nearly black under white cloud.
+        "gamma": 0.6,
+        "log_scale": False,
+        "colormap": "grey",            # unused for an RGB composite
+        "label": "True colour (top-of-atmosphere reflectance)",
+        "mask_flags": (),
+        "reject_flags": ("invalid", "saturated"),
+        "browse_reject_flags": (),
+        "flag_member": "qualityFlags.nc",
+        "flag_variable": "quality_flags",
+    },
+})
+
 # Which products each Sentinel-3 type yields.
 S3_TYPE_PRODUCTS: dict[str, tuple[str, ...]] = {
     "SY_2_VG1": ("ndvi",),
@@ -331,15 +364,22 @@ S3_TYPE_PRODUCTS: dict[str, tuple[str, ...]] = {
     "OL_2_LRR": ("gifapar", "otci"),
     "SL_2_LST": ("lst",),
     "SL_2_WST": ("sst",),
+    "OL_1_EFR": ("truecolor",),
+    "OL_1_ERR": ("truecolor",),
 }
 
 S3_DEFAULT_PRODUCTS = ("ndvi",)
 
 S3_PRESETS: dict[str, dict[str, Any]] = {
     "full": {},
-    # A 46-megapixel tile is more than a quicklook needs, and decimating on
-    # read costs nothing because GDAL does it while decoding.
-    "quicklook": {"decimate": 8, "overview_factors": [2, 4]},
+    # Two different things have to get coarser, and only one of them is obvious.
+    # ``decimate`` reads fewer source pixels, which is cheap because GDAL does
+    # it while decoding. But on a swath the output grid is set by the product's
+    # ground sampling, so decimating the read alone gives a raster of exactly
+    # the same size, only blurrier - and for a three-band composite that raster
+    # is over the size cap. ``grid_multiplier`` is what actually makes the
+    # output smaller.
+    "quicklook": {"decimate": 8, "grid_multiplier": 8, "overview_factors": [2, 4]},
 }
 
 # The Synergy presets decimate the raster; an OLCI swath is better served by a
@@ -431,7 +471,7 @@ def default_sentinel_s3_products(input_dataset: str) -> tuple[str, ...]:
 # --------------------------------------------------------------------------- #
 _PRODUCT_OPTIONS = {"variable", "mask_flags", "reject_flags", "browse_reject_flags",
                     "value_range", "colormap", "decimate", "unit", "geoloc_step",
-                    "log_scale", "extra_masks"}
+                    "log_scale", "extra_masks", "gamma", "bands"}
 
 
 def normalize_sentinel_s3_product_map(
@@ -556,6 +596,8 @@ def normalize_sentinel_s3_product_map(
             "geoloc_step": geoloc_step,
             "log_scale": log_scale,
             "unit": unit,
+            "gamma": float(requested.get("gamma", defaults.get("gamma", 1.0))),
+            "bands": tuple(requested.get("bands", defaults.get("bands", ()))),
             # Log *packing* is detected from the file's units; this is only the
             # override, and it is a different thing from the log colour scale.
             "log10": defaults.get("log10", "auto"),
@@ -616,6 +658,10 @@ def _resolve_processing_settings(processing_options: dict[str, Any] | None) -> d
     if geoloc_step in (None, ""):
         geoloc_step = "auto"
 
+    grid_multiplier = float(processing.get("grid_multiplier") or 1.0)
+    if grid_multiplier < 1.0:
+        raise ValueError(f"grid_multiplier must be 1 or more, not {grid_multiplier}")
+
     resampling = str(processing.get("resampling") or "near").strip().lower()
     if resampling not in RESAMPLING_METHODS:
         raise ValueError(f"resampling must be one of {', '.join(RESAMPLING_METHODS)}, not {resampling!r}")
@@ -630,6 +676,7 @@ def _resolve_processing_settings(processing_options: dict[str, Any] | None) -> d
         "on_empty": on_empty,
         "decimate": decimate,
         "geoloc_step": geoloc_step,
+        "grid_multiplier": grid_multiplier,
         "resampling": resampling,
         "target_epsg": target_epsg,
         "target_resolution": target_resolution,
@@ -874,6 +921,11 @@ def _process_one_product(
     scratch: Path,
     manifest: dict[str, Any],
 ) -> dict[str, Any]:
+    if options["kind"] == "rgb":
+        return _process_rgb_product(
+            product=product, options=options, input_dataset=input_dataset, root=root,
+            output_path=output_path, settings=settings, scratch=scratch, manifest=manifest,
+        )
     if options["kind"] == "swath":
         return _process_swath_product(
             product=product, options=options, input_dataset=input_dataset, root=root,
@@ -1034,7 +1086,8 @@ def _process_swath_product(
         lat, lon,
         epsg=settings["target_epsg"] or "auto",
         resolution=settings["target_resolution"],
-        ground_sampling_m=options.get("ground_sampling_m") or OLCI_GROUND_SAMPLING_M,
+        ground_sampling_m=(options.get("ground_sampling_m") or OLCI_GROUND_SAMPLING_M)
+        * settings["grid_multiplier"],
     )
     bounds = grid_bounds(lat, lon, epsg, resolution)
     cells = ((bounds[2] - bounds[0]) / resolution) * ((bounds[3] - bounds[1]) / resolution)
@@ -1082,6 +1135,182 @@ def _process_swath_product(
                "unavailable_flags": missing_flags,
                "footprint": footprint_polygon(lat, lon)},
     )
+
+
+def _process_rgb_product(
+    *,
+    product: str,
+    options: dict[str, Any],
+    input_dataset: str,
+    root: str,
+    output_path: str,
+    settings: dict[str, Any],
+    scratch: Path,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """A three-band composite from Level-1 radiance.
+
+    Different from every other product here in two ways. It needs three bands
+    rather than one, so it warps three times onto one grid. And what it mainly
+    produces is a *picture*: the Float32 bands are kept because the numbers are
+    still a measurement, but they are top-of-atmosphere reflectance derived by
+    this module and not a validated product, which the provenance says.
+    """
+    from osgeo import gdal, osr
+
+    from ._olci_l1 import quality_mask, solar_zenith, toa_reflectance
+
+    decimate = options["decimate"] or settings["decimate"] or 1
+    bands = list(options["bands"])
+
+    geo_member, lat_name, lon_name = options["geolocation"]
+    geo_local = extract_member(root, geo_member, scratch)
+    lat_ds = open_sen3_variable(geo_local, lat_name)
+    lon_ds = open_sen3_variable(geo_local, lon_name)
+    lat = read_packed(lat_ds.GetRasterBand(1), decimate=decimate, log10=False)
+    lon = read_packed(lon_ds.GetRasterBand(1), decimate=decimate, log10=False)
+    lat_ds = lon_ds = None
+
+    # One expansion of the solar-zenith tie grid, shared by the three bands:
+    # it is the expensive part and it does not depend on the band.
+    zenith = solar_zenith(root, scratch, lat.shape)
+
+    rejected, missing_flags, bright = quality_mask(
+        root, scratch, lat.shape, list(options["reject_flags"])
+    )
+
+    reflectances: list[np.ndarray] = []
+    for band in bands:
+        values = toa_reflectance(
+            root, band, scratch, decimate=decimate, solar_zenith_degrees=zenith
+        )
+        if values.shape != lat.shape:
+            raise ValueError(
+                f"{product}: band {band} is {values.shape} but the geolocation is {lat.shape}"
+            )
+        reflectances.append(np.where(rejected, np.nan, values).astype(np.float32))
+
+    kept = np.isfinite(reflectances[0])
+    kept_count = int(np.count_nonzero(kept))
+    if kept_count == 0 and settings["on_empty"] == "raise":
+        raise EmptySceneError(
+            f"{product}: no pixel of this frame survives the quality mask "
+            f"({', '.join(options['reject_flags']) or 'nothing rejected'}), so there is nothing to draw"
+        )
+
+    epsg, resolution = choose_grid(
+        lat, lon,
+        epsg=settings["target_epsg"] or "auto",
+        resolution=settings["target_resolution"],
+        ground_sampling_m=(options.get("ground_sampling_m") or OLCI_GROUND_SAMPLING_M)
+        * settings["grid_multiplier"],
+    )
+    bounds = grid_bounds(lat, lon, epsg, resolution)
+    cells = ((bounds[2] - bounds[0]) / resolution) * ((bounds[3] - bounds[1]) / resolution)
+    if cells * len(bands) > settings["max_output_pixels"]:
+        raise ValueError(
+            f"{product}: three bands on a {epsg} grid at {resolution:g} would be "
+            f"{cells * len(bands):,.0f} cells, over the {settings['max_output_pixels']:,} limit for a "
+            f"{settings['context']} request; ask for a coarser resolution or run it as a bulk job"
+        )
+
+    step = _resolve_geoloc_step(
+        options["geoloc_step"] if options["geoloc_step"] is not None else settings["geoloc_step"],
+        reflectances[0].size,
+    )
+    metadata = _product_metadata(
+        product=product, options=options, input_dataset=input_dataset, manifest=manifest,
+        decimate=decimate, resolution=resolution, epsg=epsg,
+        member="Oa{:02d}/Oa{:02d}/Oa{:02d}_radiance.nc".format(*bands),
+        variable="top-of-atmosphere reflectance (derived)", geoloc_step=step,
+    )
+
+    # Each band is warped on its own, onto the same grid, then stacked.
+    warped: list[np.ndarray] = []
+    transform = projection = None
+    for band, values in zip(bands, reflectances):
+        single = scratch / f"{product}_Oa{band:02d}.tif"
+        warp_swath(
+            values=values, lat=lat, lon=lon, output_path=str(single),
+            epsg=epsg, resolution=resolution, bounds=bounds,
+            resampling=settings["resampling"], scratch=scratch,
+            creation_options=["TILED=YES", "COMPRESS=NONE"],
+            num_threads=settings["gdal_num_threads"], geoloc_step=step,
+            minimum_valid=max(1, kept_count // 100),
+        )
+        dataset = gdal.Open(str(single))
+        warped.append(dataset.GetRasterBand(1).ReadAsArray())
+        transform, projection = dataset.GetGeoTransform(), dataset.GetProjection()
+        dataset = None
+        Path(single).unlink(missing_ok=True)
+
+    float_path = Path(output_path)
+    with atomic_output(float_path) as temporary:
+        write_rgb_product(
+            path=str(temporary), bands=warped, transform=transform, projection=projection,
+            settings=settings, metadata=metadata,
+            descriptions=[f"Oa{band:02d}_{BAND_LABEL[band]}nm_toa_reflectance" for band in bands],
+        )
+        finish_float_product(path=str(temporary), settings=settings, metadata=metadata)
+
+    statistics = value_statistics(warped[0])
+    result: dict[str, Any] = {
+        "product": product,
+        "path": str(float_path),
+        "output_file": float_path.name,
+        "epsg": int(epsg),
+        "resolution": float(resolution),
+        "bounds": [float(value) for value in bounds],
+        "width": int(warped[0].shape[1]),
+        "height": int(warped[0].shape[0]),
+        "transform": [float(value) for value in transform],
+        "decimate": int(decimate),
+        "geoloc_step": step,
+        "bands": [f"Oa{band:02d}" for band in bands],
+        "wavelengths_nm": [BAND_LABEL[band] for band in bands],
+        "valid_fraction": valid_fraction(warped[0]),
+        "source_valid_fraction": valid_fraction(reflectances[0]),
+        "value_stats": statistics,
+        "units": options["units"],
+        "mask_flags": list(options["mask_flags"]),
+        "reject_flags": list(options["reject_flags"]),
+        "browse_reject_flags": [],
+        "unavailable_flags": missing_flags,
+        "available_flags": [],
+        "baseline": manifest.get("baseline", ""),
+        "bright_fraction": float(np.mean(bright[kept])) if kept_count else 0.0,
+        "style_hint": {
+            "value_range": list(options["value_range"]),
+            "gamma": options["gamma"],
+            "composite": [f"Oa{band:02d}" for band in bands],
+            "label": options["label"],
+        },
+        "query_source": {
+            "path": str(float_path), "method": "sample_raster", "band": 1,
+            "reject_reason_band": None, "reject_reasons": None,
+        },
+        "browse_hidden_reasons": [],
+        "footprint": footprint_polygon(lat, lon),
+        "time": manifest.get("time", {}),
+        "provenance": metadata,
+    }
+
+    if settings["styled"]:
+        styled_path = float_path.with_name(f"{float_path.stem}_styled.tif")
+        write_rgb_styled(
+            source_path=str(float_path), output_path=styled_path,
+            value_range=options["value_range"], gamma=options["gamma"],
+            settings=settings, metadata=metadata,
+        )
+        result["styled_path"] = str(styled_path)
+    if settings["thumbnail"]:
+        thumbnail_path = float_path.with_name(f"{float_path.stem}_thumb.png")
+        write_rgb_thumbnail(
+            source_path=str(float_path), output_path=thumbnail_path,
+            value_range=options["value_range"], gamma=options["gamma"],
+        )
+        result["thumbnail_path"] = str(thumbnail_path)
+    return result
 
 
 def _process_grid_product(
