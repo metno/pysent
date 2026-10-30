@@ -24,9 +24,11 @@ A ten-day composite is better by construction.
 the CRS is assigned here rather than read; the geotransform in the file is
 correct and is used as it stands.
 
-The masks below are **proposals read off the flag names in the files**, not
-taken from the product notices, and the plan records that someone who knows
-these products should review them before a layer is published.
+The masks below were read off the flag names in the files rather than from the
+product notices. The owner accepted them as the defaults on 2026-10-30, so they
+are what ships - but that is a decision to ship rather than a confirmation that
+a domain expert has checked them, and the Sentinel-3 review study is where they
+can still be revised. Each one is a per-request option.
 """
 from __future__ import annotations
 
