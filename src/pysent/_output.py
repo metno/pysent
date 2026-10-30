@@ -50,16 +50,34 @@ def creation_options(settings: dict[str, Any], *, float_data: bool) -> list[str]
     return options
 
 
-def styled_bytes(values: np.ndarray, value_range: tuple[float, float]) -> np.ndarray:
+def styled_bytes(
+    values: np.ndarray,
+    value_range: tuple[float, float],
+    *,
+    log_scale: bool = False,
+) -> np.ndarray:
     """Scale physical values into 1..255, with 0 reserved for no data.
 
     Values outside the range are clipped rather than dropped: a negative NO2
     column is instrument noise, and the plan's decision is to keep it in the
     data and clip it in the style.
+
+    ``log_scale`` spaces the ramp by powers of ten instead of linearly, for a
+    quantity that spans orders of magnitude. Chlorophyll runs from about 0.01
+    to 100 mg m-3, so a linear ramp renders one bright estuary and an
+    otherwise uniformly dark ocean. Values at or below zero have no logarithm
+    and are clipped to the bottom of the ramp.
     """
     low, high = value_range
-    with np.errstate(invalid="ignore"):
-        scaled = (values.astype(np.float64) - low) / (high - low)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        if log_scale:
+            if low <= 0.0:
+                raise ValueError(f"a log colour scale needs a positive lower bound, not {low}")
+            scaled = (np.log10(np.maximum(values.astype(np.float64), low * 1e-3)) - np.log10(low)) / (
+                np.log10(high) - np.log10(low)
+            )
+        else:
+            scaled = (values.astype(np.float64) - low) / (high - low)
         scaled = np.clip(scaled, 0.0, 1.0)
         out = np.rint(scaled * (STYLED_CEILING - STYLED_FLOOR) + STYLED_FLOOR)
     return np.where(np.isfinite(values), out, 0).astype(np.uint8)
@@ -113,6 +131,7 @@ def write_styled_copy(
     colormap: str,
     settings: dict[str, Any],
     metadata: dict[str, str],
+    log_scale: bool = False,
 ) -> None:
     """The 8-bit copy a map service can serve without applying a colour ramp.
 
@@ -124,7 +143,7 @@ def write_styled_copy(
 
     source = gdal.Open(source_path)
     values = source.GetRasterBand(1).ReadAsArray()
-    styled = styled_bytes(values, value_range)
+    styled = styled_bytes(values, value_range, log_scale=log_scale)
 
     with atomic_output(output_path) as temporary:
         driver = gdal.GetDriverByName("GTiff")
@@ -145,7 +164,11 @@ def write_styled_copy(
         band.SetRasterColorInterpretation(gdal.GCI_PaletteIndex)
         band.SetNoDataValue(0)
         band.WriteArray(styled)
-        dataset.SetMetadata({**metadata, "PYSENT_STYLE_RANGE": f"{value_range[0]},{value_range[1]}"})
+        dataset.SetMetadata({
+            **metadata,
+            "PYSENT_STYLE_RANGE": f"{value_range[0]},{value_range[1]}",
+            "PYSENT_STYLE_SCALE": "log10" if log_scale else "linear",
+        })
         if settings["overview_factors"]:
             dataset.BuildOverviews("NEAREST", settings["overview_factors"])
         dataset.FlushCache()
@@ -153,7 +176,8 @@ def write_styled_copy(
     source = None
 
 
-def write_thumbnail(*, source_path: str, output_path: Path, value_range: tuple[float, float], colormap: str) -> None:
+def write_thumbnail(*, source_path: str, output_path: Path, value_range: tuple[float, float],
+                    colormap: str, log_scale: bool = False) -> None:
     """A small paletted PNG for a catalogue page, decimated on read."""
     from osgeo import gdal
 
@@ -193,7 +217,7 @@ def write_thumbnail(*, source_path: str, output_path: Path, value_range: tuple[f
     gdal.Unlink("/vsimem/s5p_thumbnail.tif")
     source = None
 
-    styled = styled_bytes(values, value_range)
+    styled = styled_bytes(values, value_range, log_scale=log_scale)
     with atomic_output(output_path) as temporary:
         memory = gdal.GetDriverByName("MEM").Create("", styled.shape[1], styled.shape[0], 1, gdal.GDT_Byte)
         band = memory.GetRasterBand(1)

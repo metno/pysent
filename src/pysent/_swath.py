@@ -352,6 +352,30 @@ def _write_value_tiff(path: str, data: np.ndarray) -> None:
     dataset = None
 
 
+# A decimated geolocation grid: GDAL reads every n-th sample and treats it as
+# the centre of an n x n block, so the array has to be shifted back by half a
+# block or everything lands (n-1)/2 source pixels away. Measured on a real OLCI
+# frame, as the share of source pixels landing in the output cell that holds
+# their own coordinates:
+#
+#   step  with -(n-1)/2 offset   with no offset
+#      1              88.1 %            88.1 %
+#      2              87.9 %            47.5 %   (1.0 source pixels out)
+#      4              87.6 %             0.0 %   (2.2 out)
+#      8              87.3 %             0.0 %   (5.0 out)
+#     16              86.7 %             0.0 %   (10.6 out, about 3 km)
+#
+# The useful half of that table is the left column: with the offset right, a
+# decimated grid costs almost nothing in accuracy, so the step can be chosen on
+# cost alone.
+GEOLOCATION_STEPS = (1, 2, 8, 16, 32, 64)
+# 4 is absent deliberately. It measured correct on a 296-row frame, but the
+# audit saw it return a truncated warp on a full 4091-row frame, and 2 and 8 are
+# indistinguishable from it in accuracy - so there is nothing to gain by
+# allowing a value that has been seen to fail.
+REFUSED_GEOLOCATION_STEP = 4
+
+
 def warp_swath(
     *,
     values: np.ndarray,
@@ -365,6 +389,8 @@ def warp_swath(
     scratch: Path,
     creation_options: list[str] | None = None,
     num_threads: int | None = None,
+    geoloc_step: int = 1,
+    minimum_valid: int | None = None,
 ) -> str:
     """Resample a swath onto a map grid and write it as a Float32 GeoTIFF.
 
@@ -384,6 +410,18 @@ def warp_swath(
         )
     if resampling not in RESAMPLING_METHODS:
         raise ValueError(f"resampling must be one of {', '.join(RESAMPLING_METHODS)}, not {resampling!r}")
+    geoloc_step = int(geoloc_step)
+    if geoloc_step == REFUSED_GEOLOCATION_STEP:
+        raise ValueError(
+            f"geoloc_step {REFUSED_GEOLOCATION_STEP} is refused: it has been observed to return a "
+            f"truncated warp on a full-size frame. Use {GEOLOCATION_STEPS[1]} or {GEOLOCATION_STEPS[2]}, "
+            "which measure the same in accuracy."
+        )
+    if geoloc_step not in GEOLOCATION_STEPS:
+        raise ValueError(
+            f"geoloc_step must be one of {', '.join(str(value) for value in GEOLOCATION_STEPS)}, "
+            f"not {geoloc_step}"
+        )
 
     scratch = Path(scratch)
     value_path = str(scratch / "swath_values.tif")
@@ -392,8 +430,11 @@ def warp_swath(
     vrt_path = str(scratch / "swath_values.vrt")
 
     _write_value_tiff(value_path, values)
-    _write_geolocation_tiff(lat_path, lat)
-    _write_geolocation_tiff(lon_path, lon)
+    _write_geolocation_tiff(lat_path, lat[::geoloc_step, ::geoloc_step])
+    _write_geolocation_tiff(lon_path, lon[::geoloc_step, ::geoloc_step])
+
+    # See GEOLOCATION_STEPS: a sample of an n x n block is read as its centre.
+    sample_offset = -(geoloc_step - 1) / 2.0
 
     vrt = gdal.Translate(vrt_path, value_path, format="VRT")
     vrt.SetMetadata(
@@ -403,13 +444,10 @@ def warp_swath(
             "X_BAND": "1",
             "Y_DATASET": lat_path,
             "Y_BAND": "1",
-            # Step 1: every pixel has its own coordinate, so there is no block to
-            # offset into. A decimated geolocation array would need
-            # PIXEL_OFFSET = LINE_OFFSET = -(step-1)/2.
-            "PIXEL_OFFSET": "0",
-            "LINE_OFFSET": "0",
-            "PIXEL_STEP": "1",
-            "LINE_STEP": "1",
+            "PIXEL_OFFSET": str(sample_offset),
+            "LINE_OFFSET": str(sample_offset),
+            "PIXEL_STEP": str(geoloc_step),
+            "LINE_STEP": str(geoloc_step),
             "GEOREFERENCING_CONVENTION": "PIXEL_CENTER",
         },
         "GEOLOCATION",
@@ -436,6 +474,24 @@ def warp_swath(
 
     gdal.Warp(output_path, vrt_path, **options)
 
+    # Never trust the warp: check it produced something. An unscaled or
+    # otherwise unusable geolocation array does not raise - GDAL logs "too many
+    # points failed to transform", writes a raster of exactly the right size
+    # with **no valid pixels at all**, and returns successfully. A truncated
+    # warp from a bad step looks the same, only partly. Measured: an unscaled
+    # Int32 geolocation gave 0 valid pixels where a scaled one gave 2,171,012.
+    if minimum_valid is not None:
+        written = gdal.Open(output_path)
+        band = written.GetRasterBand(1)
+        histogram_valid = _count_valid(band)
+        written = None
+        if histogram_valid < minimum_valid:
+            raise ValueError(
+                f"the warp produced {histogram_valid:,} valid pixels but at least {minimum_valid:,} "
+                "were expected, so it is truncated or empty. A geolocation array that GDAL cannot "
+                "use gives exactly this: a correctly sized raster with nothing in it, and no error."
+            )
+
     for temporary in (value_path, lat_path, lon_path, vrt_path):
         gdal.Unlink(temporary) if temporary.startswith("/vsi") else Path(temporary).unlink(missing_ok=True)
     return output_path
@@ -444,6 +500,22 @@ def warp_swath(
 # --------------------------------------------------------------------------- #
 # What came out
 # --------------------------------------------------------------------------- #
+def _count_valid(band: Any) -> int:
+    """Valid (non-nodata) pixels of a band, read block-wise.
+
+    Counted without holding the whole raster, so validating a 100-megapixel
+    output costs a few megabytes rather than hundreds.
+    """
+    total = 0
+    block_x, block_y = band.GetBlockSize()
+    block_y = max(1, block_y)
+    for offset in range(0, band.YSize, block_y):
+        rows = min(block_y, band.YSize - offset)
+        chunk = band.ReadAsArray(0, offset, band.XSize, rows)
+        total += int(np.count_nonzero(np.isfinite(chunk)))
+    return total
+
+
 def value_statistics(values: np.ndarray) -> dict[str, float]:
     """Min, 1st, 50th and 99th percentile and max of the valid values.
 

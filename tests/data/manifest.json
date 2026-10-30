@@ -120,6 +120,35 @@
       "note": "384x384 window over southern Norway, cut from the EUROPE daily tile; members STORED, flag table and 1/112 deg grid intact",
       "title": "S3B_SY_2_VG1____20250720T000000_20250720T235959_20250723T142353_EUROPE____________ESA_O_NT_002"
     },
+    "S3_OLCI": {
+      "artifacts": {
+        "olci_window": {
+          "members": {
+            "chl_nn.nc:CHL_NN": {
+              "dtype": "Byte"
+            },
+            "geo_coordinates.nc:latitude": {
+              "dtype": "Int32"
+            },
+            "geo_coordinates.nc:longitude": {
+              "dtype": "Int32"
+            },
+            "wqsf.nc:WQSF": {
+              "dtype": "UInt64"
+            }
+          },
+          "path": "s3_olci_window.zip",
+          "sen3_directory": "S3A_OL_2_WFR____20260926T084807_20260926T085107_20260927T125720_0179_144_221_1980_MAR_O_NT_004.SEN3",
+          "size": [
+            320,
+            320
+          ]
+        }
+      },
+      "identifier": "02157b9b-0603-4e51-bfa4-e060b63416c7",
+      "note": "320x320 water window (57844 usable pixels) cut from a baseline-004 OLCI WFR frame; Int32 micro-degree geolocation, log10-packed CHL_NN, 57-flag UInt64 WQSF",
+      "title": "S3A_OL_2_WFR____20260926T084807_20260926T085107_20260927T125720_0179_144_221_1980_MAR_O_NT_004"
+    },
     "S5P": {
       "artifacts": {
         "no2_window": {

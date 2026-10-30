@@ -102,3 +102,17 @@ def s3_synergy_window() -> Path:
     if not path.exists():
         pytest.skip("s3_synergy_window.zip missing - run scripts/make_test_data.py --platform s3")
     return path
+
+
+@pytest.fixture(scope="session")
+def s3_olci_window() -> Path:
+    """A 320x320 water window of a real OLCI WFR frame, as a small STORED zip.
+
+    Keeps the Int32 micro-degree geolocation, the log10-packed science variable
+    and the 64-bit quality word with its full flag table, so the swath warp,
+    the unpacking and the keep/reject mask are all exercised offline.
+    """
+    path = DATA_DIR / "s3_olci_window.zip"
+    if not path.exists():
+        pytest.skip("s3_olci_window.zip missing - run scripts/make_test_data.py --platform s3")
+    return path
