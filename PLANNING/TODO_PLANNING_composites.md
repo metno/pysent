@@ -138,6 +138,23 @@ under 2 % of the dynamic range at the 99th percentile and nothing at all typical
 makes a **plain mean of valid pixels the default** and the weighted mean an option, which is a
 deviation from B.9 and the reason is this measurement.
 
+### A9. At the NO2 default threshold a day covers 40 %, not 80 % ✅
+
+*Measured 2026-10-31 during Phase 1, on the same eight granules, through
+`process_sentinel_composite`.* A5's 80 % was measured at `qa_min` **0.5**, which is what the audit
+script used - not at **0.75**, which is the mission's recommendation and the product default:
+
+| `qa_min` | Coverage of the Nordic box | Observations per filled cell | Max | Single-observation cells |
+|---|---:|---:|---:|---:|
+| 0.5 (A5's figure) | **80.29 %** | 1.68 | 3 | 32.5 % |
+| **0.75 (the default)** | **40.28 %** | 1.57 | **2** | **43.4 %** |
+
+So the product a caller gets by default is **three fifths empty**, and of the two fifths it fills,
+**43 % is a single satellite pass**. Nothing is wrong with the code or the threshold - the threshold
+is the mission's and is frozen - but Q1 was answered against the 80 % figure, and 40 % is the honest
+one for the default product. Raised with the owner rather than quietly absorbed; it does not change
+Phase 1, and the count band and the coverage figure are exactly what makes it visible.
+
 ### A7. The existing job model cannot express this shape 📖
 
 Every entry point — `process_sentinel_s1_safe`, `…_s2_safe`, `…_s5p_netcdf`, `…_s3_safe` — takes a
@@ -349,10 +366,21 @@ scene — was unmeetable because Level-2 is water-leaving reflectance after atmo
     out to be the mean question, not the output-shape question; the output shape is the Sentinel-3
     plan's Q2 and is unchanged — float product, styled copy, thumbnail — so the phase line now just
     says "the three output files".
-  - **Not measured:** the multi-granule cost on real granules, because the eight fetched for the
-    audit are gone and the VM is at 97 % disk. The equivalence test runs on the committed real
-    granule window; A4's 2.4 s / 136 MB for 8 real granules stands from the audit and Phase 4 is
-    where cost is measured properly.
+  - **Reproduced on the audit's eight real granules, through the new entry point** (Nordic box at
+    0.05 deg, 4 GB container): **2.2 s, 155 MB peak**, 4 of 8 contributing, coverage **80.29 %**,
+    observations per filled cell mean **1.68** and max **3**, single-observation cells **32.5 %** -
+    the audit's figures to the decimal (A4, A3, A5). The weighted mean on the same inputs cost
+    **3.6 s against 2.2 s** and moved the median from 3.63e-6 to 3.61e-6, **0.55 %**, which is A6
+    again through the real code path.
+  - **And it turned up a new finding, A9:** A5's 80 % coverage was measured at `qa_min` 0.5, not at
+    the product default of 0.75. At the default the same day covers **40.28 %** of the region, the
+    maximum observation count is **2**, and **43.4 %** of filled cells are a single pass. Q1 was
+    answered against the 80 % figure, so this goes back to the owner; it changes no code and no
+    default.
+  - **I first wrote that these granules were gone**, and committed that in the phase commit. They are
+    at the path the memory file records; my search was three directories deep and they are four. The
+    correction is its own commit because the branch was already pushed and a force-push is blocked
+    here. The lesson is to trust the written path over a quick `find`.
   - **No regression test fails on `main`**, and none should: this is a new module, so the tests
     cannot fail on a `main` that has nothing to import. The drift guard is
     `test_a_one_input_composite_is_the_single_granule_product`, which compares the composite of one
