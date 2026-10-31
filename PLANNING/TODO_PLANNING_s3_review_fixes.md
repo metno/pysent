@@ -192,7 +192,7 @@ the table for honesty, not for weight: at 3 974 cells it is too small to general
   geolocation and flag member together. *Needs Q3.*
 - [x] **Phase 5a — R2, the diagnosis.** A product holding a single GHRSST file now says so, and
   names the file and the layout, instead of "no member matches".
-- [ ] **Phase 5b — R2, reading it.** *Needs Q1 and a sample product.*
+- [x] **Phase 5b — R2, reading it.** A third view, `best`, for the single-file layout.
 - [x] **Phase 6 — R7, the dashed gaps.** Measured, and then fixed the way the owner chose in Q4:
   a second warp, values averaged and the reason band nearest.
 
@@ -367,3 +367,29 @@ the table for honesty, not for weight: at 3 974 cells it is too small to general
   - Three new tests. The value-averaging one fails on `main` with every output cell an exact source
     value, which is the forced nearest showing itself. Full suite **436 passed, 13 skipped**; S5P
     freeze re-checked, **zero differing pixel hashes**.
+
+- **2026-10-31 — Phase 5b (R2, reading the single-file layout).** The owner answered Q1 with "fetch
+  one and then decide", so I fetched
+  `S3A_SL_2_WST____20251122T192138_..._6059_133_070______MAR_O_NT_003.zip` (663 MB, onto the data
+  volume at `/mnt/data/pysent/wst-sample/`). **The layout was confirmed over HTTP before
+  downloading anything** — `/vsizip//vsicurl/` lists the members in a second — and only the
+  attributes needed the file itself.
+  - **It is neither view.** `sst_algorithm_type` carries `flag_meanings` of
+    `no_retrieval N2_retrieval N3R_retrieval N3_retrieval D2_retrieval D3_retrieval`, and on this
+    granule the cells are **33.8 % no retrieval, 16.9 % N2, 14.1 % N3, 20.9 % D2, 14.3 % D3** — so
+    of the retrieved pixels about 47 % are nadir-only and 53 % dual-view, chosen per pixel. The
+    file also carries `dual_nadir_sst_difference` as an experimental field. The right name for it
+    is the GHRSST one: the **best-quality** retrieval.
+  - So `view: "best"` reads the single member, with geolocation, flags and the quality mask from
+    the same file. It is not a synonym for either other view and does not silently stand in for
+    them: where the pair exists, `"best"` matches two members and refuses, and where only the
+    single file exists, asking for `"dual"` now says *"ask for it with view='best'"*.
+  - **Processed end to end**: 7200 × 3518 at 0.05°, p01/p50/p99 **0.97 / 19.93 / 29.52 °C** across
+    a whole orbit, bounds −180…180, −85.9…90.
+  - **A caveat worth passing on: these are orbit-long products.** At the native 1 km the grid would
+    be **784 million cells**, over the bulk cap of 150 M, so a whole one cannot be gridded at full
+    resolution — it needs a coarser `target_resolution` (0.05° gives 25 M) or a region subset,
+    which this entry point does not offer and the composite one does.
+  - Four tests on stub products (the real one is 663 MB and not committable), plus the measured
+    numbers recorded in the test's docstring so they are not lost. Full suite **440 passed, 13
+    skipped** with numba, 436/17 without; S5P freeze unchanged.

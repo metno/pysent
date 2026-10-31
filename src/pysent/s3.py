@@ -327,6 +327,24 @@ S3_PRODUCTS.update({
                     {"member": "*_NADIR_*.nc", "variable": "quality_level", "min_value": 4},
                 ),
             },
+            # Products before about June 2026 are orbit-long dumps holding one
+            # GHRSST file instead of the pair, and that file is neither view:
+            # it is the best-quality retrieval, with the algorithm chosen per
+            # pixel and recorded in `sst_algorithm_type`. Measured on
+            # S3A_SL_2_WST____20251122T192138_..._NT_003, of all cells:
+            # 33.8 % no retrieval, 16.9 % N2, 14.1 % N3, 20.9 % D2, 14.3 % D3 -
+            # so about 47 % of the retrieved pixels are nadir-only and 53 %
+            # dual-view. Asking for this view says "whichever the processor
+            # judged best here", which is what the file holds; it is not a
+            # synonym for either of the others.
+            "best": {
+                "candidates": (("*L2P_GHRSST*.nc", "sea_surface_temperature"),),
+                "geolocation": ("*L2P_GHRSST*.nc", "lat", "lon"),
+                "flag_member": "*L2P_GHRSST*.nc",
+                "extra_masks": (
+                    {"member": "*L2P_GHRSST*.nc", "variable": "quality_level", "min_value": 4},
+                ),
+            },
         },
         "view": "dual",
         # See _resampling_for: nearest on the 1 km grid leaves cells with no
