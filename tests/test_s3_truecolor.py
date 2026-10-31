@@ -186,3 +186,121 @@ def test_true_colour_from_a_real_frame(s5p_archive, tmp_path):
     floats = None
     # The provenance has to say the reflectance was derived here, not measured.
     assert "derived" in result["provenance"]["PYSENT_VARIABLE"]
+
+
+# --------------------------------------------------------------------------- #
+# The solar flux table's orientation (review-study item R1)
+# --------------------------------------------------------------------------- #
+def _instrument_member(path, *, rows=21, detectors=8):
+    """A minimal ``instrument_data.nc`` with its rows in **file order**.
+
+    Row 0 is band 1 at 400 nm and row 20 is band 21 at 1020 nm, exactly as a
+    real product stores them. GDAL's netCDF driver hands such a table back
+    bottom-up, which is the whole point of the test: whatever the driver does
+    to the row order, band 4 must be divided by band 4's flux.
+
+    The flux of band *n* is ``1000 + n``, so a wrong row is obvious in the
+    value rather than only in a ratio.
+    """
+    from pysent._olci_l1 import BAND_WAVELENGTHS
+
+    wavelengths = np.array(
+        [[float(BAND_WAVELENGTHS[band]) for _ in range(detectors)] for band in range(1, rows + 1)],
+        dtype=np.float32,
+    )
+    flux = np.array(
+        [[1000.0 + band for _ in range(detectors)] for band in range(1, rows + 1)], dtype=np.float32
+    )
+    detector = np.tile(np.arange(detectors, dtype=np.int16), (3, 1))
+
+    dataset = gdal.GetDriverByName("netCDF").CreateMultiDimensional(str(path))
+    root = dataset.GetRootGroup()
+    band_dimension = root.CreateDimension("bands", None, None, rows)
+    detector_dimension = root.CreateDimension("detectors", None, None, detectors)
+    row_dimension = root.CreateDimension("rows", None, None, detector.shape[0])
+    float32 = gdal.ExtendedDataType.Create(gdal.GDT_Float32)
+    for name, data in (("lambda0", wavelengths), ("solar_flux", flux)):
+        array = root.CreateMDArray(name, [band_dimension, detector_dimension], float32)
+        array.Write(data.tobytes())
+    index = root.CreateMDArray(
+        "detector_index", [row_dimension, detector_dimension],
+        gdal.ExtendedDataType.Create(gdal.GDT_Int16),
+    )
+    index.Write(detector.tobytes())
+    dataset = None
+    return detector.shape
+
+
+def test_the_flux_row_is_matched_by_wavelength_not_by_band_number(tmp_path):
+    """Regression: the flux table comes back bottom-up, so ``band - 1`` is band ``22 - band``.
+
+    Written as the pictures' own arithmetic rather than as a driver detail: on
+    ``main`` the blue band was divided by the flux of band 18, which made it
+    2.10x too bright and gave every true-colour picture a blue cast.
+    """
+    from pysent._olci_l1 import flux_row_for_band
+
+    member = tmp_path / "instrument_data.nc"
+    _instrument_member(member)
+
+    dataset = gdal.Open(f'NETCDF:"{member}":lambda0')
+    wavelengths = dataset.GetRasterBand(1).ReadAsArray()
+    dataset = None
+    dataset = gdal.Open(f'NETCDF:"{member}":solar_flux')
+    table = dataset.GetRasterBand(1).ReadAsArray()
+    dataset = None
+
+    # Every band finds the flux that belongs to it, whichever way the driver
+    # ordered the rows.
+    for band in (4, 6, 8, 1, 21):
+        row = flux_row_for_band(wavelengths, band)
+        assert table[row][0] == pytest.approx(1000.0 + band), band
+
+    # And the old arithmetic really is wrong on this file, which is what makes
+    # this a regression test and not a tautology.
+    assert flux_row_for_band(wavelengths, 4) != 4 - 1
+    assert table[4 - 1][0] == pytest.approx(1000.0 + 18)
+
+
+def test_a_product_whose_wavelengths_do_not_match_is_refused(tmp_path):
+    """A table that cannot be matched to the bands must say so, not guess a row."""
+    from pysent._olci_l1 import flux_row_for_band
+
+    wavelengths = np.full((21, 4), 300.0, dtype=np.float32)
+    with pytest.raises(ValueError, match="within 12 nm of band 4"):
+        flux_row_for_band(wavelengths, 4)
+
+
+def _instrument_product(path, tmp_path):
+    """A stub SEN3 zip holding only ``instrument_data.nc``.
+
+    Enough for the flux lookup, which reads that member and nothing else.
+    """
+    import zipfile
+
+    member = tmp_path / "instrument_data.nc"
+    shape = _instrument_member(member)
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.write(member, "STUB.SEN3/instrument_data.nc")
+        archive.writestr("STUB.SEN3/xfdumanifest.xml", b"<xfdu:XFDU/>")
+    return shape
+
+
+def test_each_band_is_divided_by_its_own_flux(tmp_path):
+    """Regression, through the function the pipeline actually calls.
+
+    On ``main`` this returns band 18's flux for band 4, because the row was
+    taken as ``band - 1`` from a table the driver hands back bottom-up.
+    """
+    from pysent._olci_l1 import solar_flux_per_pixel
+    from pysent._sen3 import sen3_root
+
+    product = tmp_path / "stub.zip"
+    shape = _instrument_product(product, tmp_path)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    for band in (4, 6, 8):
+        flux = solar_flux_per_pixel(sen3_root(str(product)), scratch, band, shape)
+        assert flux.shape == shape
+        assert np.allclose(flux, 1000.0 + band), f"band {band} got {np.unique(flux)}"

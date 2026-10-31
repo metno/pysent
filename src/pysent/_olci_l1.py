@@ -15,6 +15,13 @@ get it quietly wrong:
 * **The solar flux is per band and per detector**, a 21 x 3700 table, and every
   pixel names its own detector in ``detector_index``. A single band-average
   flux would be wrong by the detector-to-detector variation, about 1 % here.
+  **And the table's rows do not arrive in band order.** GDAL's netCDF driver
+  hands a non-geographic 2-D array back bottom-up, so row 0 holds band 21:
+  ``lambda0`` read straight off the file runs 1016, 939, 899 ... 442, 412,
+  400 nm. Taking row ``band - 1`` divides each band by the flux of band
+  ``22 - band`` - blue by 2.10 times too little, green by 1.56 and red by 1.27,
+  a strong blue cast on every picture. The row is matched by wavelength
+  instead; see :func:`flux_row_for_band`.
 * **The solar zenith angle is on a tie-point grid** of 77 columns against the
   image's 4865, so it has to be interpolated across the track. Using it
   unscaled or unexpanded puts the whole scene on the wrong illumination.
@@ -24,6 +31,14 @@ get it quietly wrong:
   scattering, and bright-edge effects add more, so the ceiling is not enforced -
   a picture clips it, and a caller who wants physical values gets the honest
   number plus the flag that says the pixel is bright.
+
+Measured on a real frame after the flux rows were matched by wavelength: over
+open water at 665 nm the reflectance runs 0.032 / 0.045 / 0.211 (p1 / p50 /
+p99), the whole-frame medians are 0.174 / 0.188 / 0.220 for red / green / blue
+- bluer than red, which is what Rayleigh scattering does to a top-of-atmosphere
+spectrum - and 0.25 % of pixels exceed one, every one of them flagged
+``bright``. With the rows taken as ``band - 1`` the same frame gave 0.275 over
+water in blue and 23.7 % of blue pixels above one.
 
 What this module cannot do is validate itself against another product. The
 Level-2 reflectance of the same scene is **water-leaving** reflectance, after
@@ -95,16 +110,58 @@ def solar_zenith(root: str, scratch: Path, shape: tuple[int, int]) -> np.ndarray
     return expanded
 
 
+def flux_row_for_band(wavelengths: np.ndarray, band: int, *, tolerance_nm: float = 12.0) -> int:
+    """Which row of a band-indexed table belongs to ``band``.
+
+    **Never ``band - 1``.** GDAL's netCDF driver hands a 21 x 3700 table back
+    bottom-up, so row 0 holds band 21: read straight off the file, row 0 of
+    ``lambda0`` is 1016 nm, not the 400 nm of band 1. Indexing by ``band - 1``
+    therefore divides every band by the solar flux of band ``22 - band`` - blue
+    by 2.10 times too little, green by 1.56 and red by 1.27, which is a strong
+    blue cast on every picture.
+
+    The row is found instead by matching the table's own ``lambda0`` to the
+    band's nominal wavelength, which is right whichever way round the driver
+    hands the table over and does not depend on a config option a caller might
+    change. ``lambda0`` varies slightly per detector, so the match is against
+    each row's median.
+
+    The hazard is specific to an array whose row index means *which band*
+    rather than *which position*: the image bands, ``detector_index``, the tie
+    grids and the geolocation are position-indexed and flip together, so they
+    stay mutually consistent and a flip there would show as an upside-down
+    picture.
+    """
+    nominal = BAND_WAVELENGTHS.get(int(band))
+    if nominal is None:
+        raise ValueError(f"band must be 1 to 21, not {band}")
+    centres = np.nanmedian(np.asarray(wavelengths, dtype=np.float64), axis=1)
+    row = int(np.nanargmin(np.abs(centres - nominal)))
+    if not np.isfinite(centres[row]) or abs(centres[row] - nominal) > tolerance_nm:
+        raise ValueError(
+            f"no row of this product's lambda0 is within {tolerance_nm:g} nm of band {band}'s "
+            f"{nominal} nm (nearest is row {row} at {centres[row]:.1f} nm), so the solar flux "
+            "cannot be matched to the band"
+        )
+    return row
+
+
 def solar_flux_per_pixel(root: str, scratch: Path, band: int, shape: tuple[int, int]) -> np.ndarray:
     """Solar irradiance for each pixel of one band, via its detector index.
 
     The flux table is ``[band, detector]`` and every pixel records which
     detector saw it, so the lookup is per pixel. Pixels with no detector get
     NaN rather than a neighbour's flux.
+
+    Which row of the table is this band's is decided by
+    :func:`flux_row_for_band`, not by the band number - see there for why.
     """
     local = extract_member(root, INSTRUMENT_MEMBER, scratch)
     dataset = open_sen3_variable(local, "solar_flux")
     table = dataset.GetRasterBand(1).ReadAsArray()
+    dataset = None
+    dataset = open_sen3_variable(local, "lambda0")
+    wavelengths = dataset.GetRasterBand(1).ReadAsArray()
     dataset = None
     dataset = open_sen3_variable(local, "detector_index")
     # Read at the shape being worked at: the detector index is a full-resolution
@@ -118,8 +175,13 @@ def solar_flux_per_pixel(root: str, scratch: Path, band: int, shape: tuple[int, 
         raise ValueError(f"detector_index is {detector.shape} but the band is {shape}")
     if not 1 <= band <= table.shape[0]:
         raise ValueError(f"the flux table has {table.shape[0]} bands, so band {band} is out of range")
+    if wavelengths.shape != table.shape:
+        raise ValueError(
+            f"lambda0 is {wavelengths.shape} but solar_flux is {table.shape}; they must be the "
+            "same table shape for a row of one to name a row of the other"
+        )
 
-    row = table[band - 1]
+    row = table[flux_row_for_band(wavelengths, band)]
     inside = (detector >= 0) & (detector < row.size)
     return np.where(inside, row[np.clip(detector, 0, row.size - 1)], np.nan).astype(np.float32)
 
