@@ -13,6 +13,10 @@ Submodules:
     an empty scene or a partly failed call from other errors.
 ``pysent.profiles``
     Platform detection (S1 vs S2) and per-platform profile defaults.
+``pysent.composite``
+    Several granules combined into one map on a caller-supplied region and
+    grid: the mean of the same masked, gridded product a single-granule call
+    produces, with the per-cell observation count as a second band.
 ``pysent.archive``
     Catalogue download URL -> local NBS archive path.
 ``pysent.csw``
@@ -81,6 +85,12 @@ __all__ = [
     "build_sentinel_s5p_output_filename",
     "normalize_sentinel_s5p_product_map",
     "process_sentinel_s5p_netcdf",
+    # composites
+    "COMPOSITE_METHODS",
+    "build_composite_output_filename",
+    "composite_input_digest",
+    "normalize_composite_region",
+    "process_sentinel_composite",
     # errors
     "EmptyInputError",
     "EmptySceneError",
@@ -94,7 +104,7 @@ __all__ = [
     "supported_sentinel_product_types",
 ]
 
-_SUBMODULES = {"archive", "csw", "errors", "profiles", "qa", "s1", "s2", "s3", "s5p"}
+_SUBMODULES = {"archive", "composite", "csw", "errors", "profiles", "qa", "s1", "s2", "s3", "s5p"}
 
 _EXPORTS = {
     "S1_SUPPORTED_AMPLITUDE_VARIABLES": "s1",
@@ -120,6 +130,11 @@ _EXPORTS = {
     "build_sentinel_s5p_output_filename": "s5p",
     "normalize_sentinel_s5p_product_map": "s5p",
     "process_sentinel_s5p_netcdf": "s5p",
+    "COMPOSITE_METHODS": "composite",
+    "build_composite_output_filename": "composite",
+    "composite_input_digest": "composite",
+    "normalize_composite_region": "composite",
+    "process_sentinel_composite": "composite",
     "EmptyInputError": "errors",
     "EmptySceneError": "errors",
     "PartialFailure": "errors",

@@ -9,7 +9,7 @@ or more products from it; a composite is the opposite shape.
 |---|---|
 | Branch / worktree | `feature/composites` → `../pysent.worktrees/composites` |
 | Base | `main` @ `3a147c3` (2026-10-30) |
-| Status | **Audit done, Q1–Q7 answered (2026-10-31).** Phase 1, the job shape, is unblocked. |
+| Status | **Phase 1 done (2026-10-31).** `pysent.composite` composites Sentinel-5P; Phase 2 adds the other ten products. |
 | Audit evidence | [`composites_audit/`](composites_audit/): `catalogue_day.py`, `accumulate.py`, `weights.py` |
 | Comes from | `PLANNING_s5p_s3_pipelines.md` B.9 and Q16, which put composites before the vector products |
 
@@ -186,7 +186,7 @@ a user cannot otherwise tell.
 
 ### B.3 Phases (one PR each, against `main`)
 
-- [ ] **Phase 1 — The job shape.** `process_sentinel_composite(...)` taking `input_datasets`, a fixed
+- [x] **Phase 1 — The job shape.** `process_sentinel_composite(...)` taking `input_datasets`, a fixed
   region, products and a method. Accumulate sum and count on the region grid, one input at a time,
   writing nothing per input. Idempotency key over the sorted inputs plus the options. Zero-contribution
   and stub inputs counted, not fatal. The three output files, plus the count band.
@@ -320,3 +320,40 @@ scene — was unmeetable because Level-2 is water-leaving reflectance after atmo
 - **2026-10-31 — Q7 closed in the Sentinel-3 plan.** The OLCI true-colour acceptance gate, left open at
   that plan's close-out, was accepted in the same form: the substituted physical check stands and true
   colour is catalogued. `PLANNING_s5p_s3_pipelines.md` is updated, so nothing is held back there.
+
+- **2026-10-31 — Phase 1 (the job shape).** Branch `feature/composites-phase1`. New
+  `src/pysent/composite.py` with `process_sentinel_composite`, `normalize_composite_region`,
+  `composite_input_digest`, `composite_key` and `build_composite_output_filename`; 34 tests in
+  `tests/test_composite.py`. Sentinel-5P only, as B.1 scoped it: an input of another platform is
+  refused by name with a message pointing at Phase 3, rather than being read by code that has never
+  been measured against it. Full suite in the CI container: **452 passed, 13 skipped** with numba and
+  **448 passed, 17 skipped** without.
+  - **The product is two bands**, the composite and the per-cell observation count, in one file. A
+    GeoTIFF carries **one no-data value for the whole file**, so the count band cannot have its own
+    and inherits band 1's NaN. Harmless — a count is never NaN, and zero observations is written as
+    a zero — but it is a thing a reader has to know, so the test asserts it rather than hiding it.
+    `write_thumbnail(materialise=True)` is required here, not optional: left to itself the warp
+    resamples both bands and a thumbnail of a count band is a picture of nothing.
+  - **The accumulators are float64** though both input and output are float32. A sum of a few
+    hundred numbers around 1e-4 loses digits in float32 that the division then keeps.
+  - **Memory is flat in the input count, measured through the new entry point**: 1, 2, 4, 8 and 16
+    inputs onto the same 684×187 grid cost 103, 106, 108, 109 and 109 MB peak, while time is linear
+    (0.17 s to 2.24 s, about 0.14 s per input). The median is bit-identical at every input count,
+    which also says the accumulation does not drift. That reproduces A4 through the real code path.
+  - **Two of my own assertions were wrong, and both were worth having.** I asserted the count band
+    would have no no-data value (GeoTIFF does not allow that, above), and I wrote a test fixture
+    whose filename carried a date its time attributes did not — the window test then expected a
+    window the data never had. The fixture now derives its coverage attributes from the same index
+    as its name.
+  - **Deviation from the phase description:** the plan said "the three output files of Q2". Q2 turned
+    out to be the mean question, not the output-shape question; the output shape is the Sentinel-3
+    plan's Q2 and is unchanged — float product, styled copy, thumbnail — so the phase line now just
+    says "the three output files".
+  - **Not measured:** the multi-granule cost on real granules, because the eight fetched for the
+    audit are gone and the VM is at 97 % disk. The equivalence test runs on the committed real
+    granule window; A4's 2.4 s / 136 MB for 8 real granules stands from the audit and Phase 4 is
+    where cost is measured properly.
+  - **No regression test fails on `main`**, and none should: this is a new module, so the tests
+    cannot fail on a `main` that has nothing to import. The drift guard is
+    `test_a_one_input_composite_is_the_single_granule_product`, which compares the composite of one
+    real granule against `process_sentinel_s5p_netcdf` on the same grid — risk D4's mitigation.
