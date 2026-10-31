@@ -155,6 +155,38 @@ is the mission's and is frozen - but Q1 was answered against the 80 % figure, an
 one for the default product. Raised with the owner rather than quietly absorbed; it does not change
 Phase 1, and the count band and the coverage figure are exactly what makes it visible.
 
+### A10. The coverage curve, measured on seven consecutive days ✅
+
+*Measured 2026-10-31. Evidence: `composites_audit/coverage_window.py`, which reads the granules from
+the mounted NBS archive (`/lustre/storeA/NBS2/.../nbsArchive/S5P`, 4 079 S5P files, 18–23 NO2
+granules a day for 2026-10-24 to 2026-10-30) and so downloads nothing.* Nordic box at 0.05°.
+
+| Window | Coverage at **qa 0.75** | Single-obs cells | Coverage at **qa 0.5** | Single-obs cells |
+|---|---:|---:|---:|---:|
+| 1 day | **28.4 %** | **58 %** | 70.0 % | 19 % |
+| 2 days | 36.9 % | 44 % | 77.8 % | 12 % |
+| 3 days | 48.8 % | 34 % | 78.5 % | 7 % |
+| 4 days | 57.7 % | 29 % | **80.8 %** | 3 % |
+| 5 days | **65.1 %** | 19 % | 80.8 % | 3 % |
+| 6 days | 67.1 % | 16 % | 80.8 % | 3 % |
+| 7 days | 69.6 % | 15 % | 80.8 % | 3 % |
+
+Three things follow.
+
+**There is a hard ceiling at 80.8 %**, reached at four days and never exceeded however many days are
+added. The remaining **19.2 % of the box is not retrievable at all** in late October — no sunlight at
+those latitudes, so no retrieval exists to composite. A coverage figure means little without it: 65 %
+of the box is **80 % of what the instrument can see**.
+
+**One day at the product's own threshold is not a map.** 28.4 % of the region, and 58 % of that is a
+single pass. Per day the range over the week is 20.0 % to 38.2 %; A9's 40.3 % came from an
+eight-granule sample and was a good day, not a typical one.
+
+**The knee of the curve is five days** (65.1 %, 19 % single, mean 3.3 observations per cell). Days six
+and seven add 2.0 and 2.6 points. At `qa_min` 0.5 the picture is different — one day already gives
+70 % — so "is a daily product viable" is really "at which threshold", which is a domain question and
+not ours to settle.
+
 ### A7. The existing job model cannot express this shape 📖
 
 Every entry point — `process_sentinel_s1_safe`, `…_s2_safe`, `…_s5p_netcdf`, `…_s3_safe` — takes a
