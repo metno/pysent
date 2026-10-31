@@ -104,19 +104,30 @@ position-indexed and all flip together, so they stay mutually consistent; a flip
 an upside-down picture, which no reviewer has seen. Phase 1 asserts the consistency rather than
 assuming it.
 
-### R2. `sst` cannot read the archive's single-file WST layout ❓ not reproduced here
+### R2. `sst` cannot read the archive's single-file WST layout ✅ — and it is neither view
 
 The claim: pre-June-2026 WST products are orbit-long dumps (duration 6059 s, baseline 003) holding
 **one** GHRSST file and no `_DUAL_`/`_NADIR_` pair, so `find_member('*_DUAL_*.nc')` fails; 25 of 40
 sampled frames over a year failed this way.
 
-I cannot reproduce it from here: the mounted NBS archive holds **1 231 WST granules but only from
-2026**, all baseline `004` and all 300-second frames (`_0179_`/`_0180_`), and nothing with a 6059
-duration or an `_003` baseline. The four WST products on the data volume are all 2026 baseline 004
-as well. So this needs either a fetch from the catalogue or the study's own copy. **It is real as
-reported — the member pattern cannot match a product that has no `_DUAL_` member — but which view
-that single file holds is a question about a file I have not seen, and the answer decides whether
-pysent reads it or refuses it (Q1).**
+Not reproducible from the mounted archive: it holds **1 231 WST granules but only from 2026**, all
+baseline `004` and all 300-second frames (`_0179_`/`_0180_`), nothing with a 6059 duration or an
+`_003` baseline, and the four WST products on the data volume are 2026 baseline 004 as well. So
+Q1 asked to fetch one, and the owner agreed.
+
+**Fetched** (663 MB, to `/mnt/data/pysent/wst-sample/`; the member layout was confirmed over
+`/vsizip//vsicurl/` in about a second, so only the attributes needed the download). The report is
+exactly right about the layout — one `*L2P_GHRSST*.nc`, no `_DUAL_`/`_NADIR_` pair.
+
+**And the file is neither view.** Its `sst_algorithm_type` records the retrieval chosen *per pixel*:
+16.9 % N2, 14.1 % N3, 20.9 % D2, 14.3 % D3 — about 47 % nadir-only and 53 % dual-view. It is the
+GHRSST *best-quality* product, so reading it as either named view would mislabel half the pixels.
+Hence a third view, `best` (Phase 5b), rather than an alias for `dual`.
+
+Processed whole: 7200 × 3518 at 0.05°, p01/p50/p99 **0.97 / 19.93 / 29.52 °C**. **At native 1 km an
+orbit-long frame is 784 688 080 cells**, over the 150 M bulk cap, so these need a coarser
+`target_resolution` or the composite entry point's region. That is a property of the products, not a
+defect, but it is the first thing a caller will hit.
 
 ### R3. SST NADIR is not selectable per request 📖 code reading
 
@@ -200,28 +211,41 @@ the table for honesty, not for weight: at 3 974 cells it is too small to general
 
 ## C. Open questions for the owner
 
-*Italics are the recommendation.*
+*Italics are the recommendation. **All five answered 2026-10-31**, each as recommended; decision
+page <https://claude.ai/code/artifact/e4c5ad04-b47b-459c-8566-b37aca85ae7c>.*
 
 - **Q1 (Phase 5). The single-file WST layout: read it or refuse it clearly?** *Read it, if its
   attributes say which view it holds; refuse it with a precise message until then.* 25 of 40 sampled
   frames over a year are affected, so refusing permanently writes off a year of archive. I need one
   sample product to answer "which view is it" — may I fetch one from the catalogue (about half a
   gigabyte, onto the data volume)?
+  **Answered: fetch one, then decide.** Fetched, and the answer was neither view — so `view: "best"`
+  (Phase 5b), not an alias. See R2 above.
 - **Q2 (Phase 3). Restyling truecolor: route it or refuse it?** *Route it* — a three-band product
   goes to `write_rgb_styled`/`write_rgb_thumbnail` with `gamma` taken from `PYSENT_STYLE_GAMMA`, so
   a restyle reproduces what the pipeline produced. Refusing would leave the review study unable to
   re-range a truecolor layer without reprocessing a 905 MB zip.
+  **Answered: route it** (Phase 3).
 - **Q3 (Phase 4). A `view` option, or just fix the comments?** *The option.* `view: "dual" | "nadir"`
   for `sst`, setting the candidates, the geolocation and the flag member together. It is new
   behaviour rather than a changed default, and it removes the in-memory table patching the study
   does today.
+  **Answered: the option** (Phase 4), and `best` joined it in Phase 5b.
 - **Q4 (Phase 6). The dashed gaps.** *Measure first, then choose from pictures.* The candidates are a
   second warp for the values with `average` (one more warp per product, the reason band staying
   `near`), or a coarser output step. Rendering is yours.
+  **Answered: the second warp** (Phase 6). Note what this *also* decided: the second warp alone
+  changes nothing, because `_resolve_processing_settings` defaults Sentinel-3 resampling to `near`,
+  so the pipeline was asking for nearest anyway. Closing the gaps therefore meant giving `lst` and
+  `sst` `"resampling": "average"` — **a per-product default change, and the only changed Sentinel-3
+  default in this branch.** An explicit request still wins; no grid product is touched.
 - **Q5 (after Phase 1). The truecolor style, now that the reflectance changes.** *Leave `0 – 0.6`
   and `gamma 0.6` exactly as they are for now* — they are frozen Sentinel-3 defaults, and the review
   study is where a style gets chosen. But they were chosen on pictures that were 2.1× too blue, so
   they are very likely wrong; Phase 1 will give you the corrected medians to judge from.
+  **Answered: leave the style alone, put it in the review study.** Nothing changed. **This is the
+  one question still live for someone else** — the range and gamma go to the review study to be
+  chosen from corrected pictures, with the Phase 1 medians above as the starting point.
 
 ---
 
@@ -240,12 +264,84 @@ the table for honesty, not for weight: at 3 974 cells it is too small to general
 
 ---
 
+## E. Close
+
+What the review study asked to be recorded here, measured on the final branch head `d71b550`.
+
+**The work.** One PR, [#31](https://github.com/metno/pysent/pull/31), against `main` @ `3a147c3`,
+one commit per phase:
+
+| Commit | Phase | Item |
+|---|---|---|
+| `51262f6` | 1 | Divide each OLCI band by its own solar flux — **the blocker; pinnable alone** |
+| `15e23c4` | — | The evidence scripts for the findings |
+| `0551b6b` | 2 | Apply the browse mask a caller asks for, and let an empty swath be written |
+| `be90620` | 3, 4 | Restyle a picture as a picture, and make the SST view selectable |
+| `027fb04` | 6 (measure) | Measure what the nearest-neighbour warp loses on SLSTR |
+| `1b05cf5` | 5a | Say so when an SST product holds one file, not a pair |
+| `5e51ddd` | 6 (fix) | Warp the values and the reject reasons separately |
+| `d71b550` | 5b | Read the orbit-long layout as its own view |
+
+**Merged commit: _pending the owner's merge of #31_.** This is the line the study's
+`scripts/review/run.sh` (`STUDY=s3-l2`) re-pins to; `51262f6` unblocks the full run on its own if
+the rest is still in review.
+
+**Tests**, in the CI image `pysent-ci:noble`, `python3 -m pytest -q` as CI runs it:
+
+| | `main` | branch |
+|---|---|---|
+| with numba 0.60.0 | 418 passed, 13 skipped | **440 passed, 13 skipped** |
+| without numba | 414 passed, 17 skipped | **436 passed, 17 skipped** |
+
+**22 new tests** (the delta is exactly the 22 added `test_` functions), each written to fail on
+`main` for its own reason — the headline failures being `band 4 got [1018.]` (band 18's flux),
+`assert 1 == 4` (a paletted copy of a three-band picture), and `the warp produced 0 valid pixels`.
+The skip counts are unchanged, so nothing new is conditional on a product that may be absent: the
+13 that numba un-skips are the S1 fast-path tests, and the real Sentinel-3 and Sentinel-5P products
+are used by the evidence scripts, not by the suite.
+
+**The Sentinel-5P freeze holds.** `run.sh freeze` renders the four S5P cases from `origin/main`'s
+source and from the branch's, into eight rasters, hashing pixels separately from tags, and diffs the
+hash lists: **zero differing hashes**, re-run on `d71b550` after the `_swath.py` restructure as well
+as after every phase.
+
+**What a caller sees differently.** Five of the seven fixes are new behaviour or a refusal becoming
+a success, so they cannot change an existing output. Two can:
+
+1. **R1 changes every truecolor pixel** — that is the point of the fix. Any truecolor baseline the
+   study holds is invalid and must be regenerated.
+2. **`lst` and `sst` now default to `resampling: "average"`** (Q4) — the only changed Sentinel-3
+   default in the branch, and the only way to actually close the gaps, since the settings already
+   defaulted the request to `near`. **Any pinned LST/SST pixel hashes will differ**; valid cells go
+   up 14.9 % on LST and 82.8 % on dual-view SST. Masks, value ranges, ramps and gamma are untouched.
+
+**Still open, and not pysent's to close:** Q5, the truecolor `0 – 0.6` range and `gamma 0.6`, for
+the review study to choose from corrected pictures.
+
+**One caveat worth passing on:** orbit-long WST products are 784 688 080 cells at native 1 km, over
+the 150 M bulk cap. A whole one needs a coarser `target_resolution`, or the composite entry point's
+region — which `process_sentinel_s3_product` does not offer.
+
+---
+
 ## Session log
 
 - **2026-10-31 — audit.** Worktree `feature/s3-review-fixes` from `main` @ `3a147c3`. R1 reproduced
   on a real product and is exactly as reported (2.10×, 1.56×, 1.27×); R3, R4, R5 and R6 confirmed by
   reading, each with the line numbers above; R2 could not be reproduced because the mounted archive
   holds only 2026 baseline-004 WST frames, and R7 is not yet measured. No code changed.
+- **2026-10-31 — Phases 1 to 4, and 5a.** R1 fixed by matching the flux row on `lambda0`, with the
+  physical numbers redone on corrected reflectance and Phase 6's gate re-checked (it holds better).
+  R4, R6, R5 and R3 fixed. R2 diagnosed: a single-GHRSST-file product now names its layout instead
+  of saying "no member matches". R7 measured — two findings, not one: ~1 % of cells on LST, 32.9 %
+  on dual-view SST. Freeze verified after each. Q1, Q4 and Q5 put to the owner.
+- **2026-10-31 — Q1, Q4, Q5 answered; Phases 5b and 6.** A WST sample fetched: the single file is
+  **neither view** but the per-pixel best-quality retrieval, so `view: "best"`. The second warp
+  landed and, on its own, changed nothing — the settings already defaulted the request to `near` —
+  so `lst` and `sst` took `"resampling": "average"`, which is what Q4 actually decided. **The
+  lesson: measure the end-to-end effect of a fix, not only the unit behaviour.** Q5 changed nothing.
+  Closed with section E above: 440/13 and 436/17 against main's 418/13 and 414/17, 22 new tests, and
+  the S5P freeze re-verified on `d71b550`. Awaiting the owner's merge for the commit the study pins.
 
 - **2026-10-31 — Phase 1 (R1, the flux flip).** `flux_row_for_band` matches the table's own
   `lambda0` against the band's nominal wavelength, so the lookup is right whichever way round the
