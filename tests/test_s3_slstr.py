@@ -28,6 +28,7 @@ from pysent.s3 import (  # noqa: E402
     S3_TYPE_PRODUCTS,
     SLSTR_GROUND_SAMPLING_M,
     _apply_extra_mask,
+    normalize_sentinel_s3_product_map,
     process_sentinel_s3_safe,
 )
 
@@ -312,3 +313,50 @@ def test_an_all_masked_swath_frame_can_be_written_instead_of_raising(s3_slstr_ls
     # is no-data.
     assert values.size > 0
     assert not np.isfinite(values).any()
+
+
+# --------------------------------------------------------------------------- #
+# The SST view is a request option (review-study item R3)
+# --------------------------------------------------------------------------- #
+def test_the_sst_view_sets_the_member_the_geolocation_and_the_flags():
+    """Regression: NADIR was only reachable by patching the product table.
+
+    A view spans three table entries, so overriding ``variable`` - the only
+    one the request could reach - could never select it, and on the swath path
+    even that was ignored.
+    """
+    dual = normalize_sentinel_s3_product_map({"sst": {}})["sst"]
+    assert dual["view"] == "dual"
+    assert dual["candidates"] == (("*_DUAL_*.nc", "sea_surface_temperature"),)
+    assert dual["geolocation"] == ("*_DUAL_*.nc", "lat", "lon")
+    assert dual["flag_member"] == "*_DUAL_*.nc"
+    assert dual["extra_masks"][0]["member"] == "*_DUAL_*.nc"
+
+    nadir = normalize_sentinel_s3_product_map({"sst": {"view": "nadir"}})["sst"]
+    assert nadir["view"] == "nadir"
+    assert nadir["candidates"] == (("*_NADIR_*.nc", "sea_surface_temperature"),)
+    assert nadir["geolocation"] == ("*_NADIR_*.nc", "lat", "lon")
+    assert nadir["flag_member"] == "*_NADIR_*.nc"
+    assert nadir["extra_masks"][0]["member"] == "*_NADIR_*.nc"
+    # Everything else is the product's own: a view is not a different product.
+    assert nadir["value_range"] == dual["value_range"]
+    assert list(nadir["reject_flags"]) == list(dual["reject_flags"])
+
+
+def test_an_unknown_view_is_refused_and_a_view_on_the_wrong_product_too():
+    with pytest.raises(ValueError, match="view must be one of"):
+        normalize_sentinel_s3_product_map({"sst": {"view": "triple"}})
+    with pytest.raises(ValueError, match="no views to choose between"):
+        normalize_sentinel_s3_product_map({"lst": {"view": "nadir"}})
+
+
+def test_a_requested_variable_reaches_the_swath_resolver():
+    """A swath product resolves its variable from the candidates, so a
+    requested variable has to be put there or it is silently ignored.
+    """
+    asked = normalize_sentinel_s3_product_map(
+        {"sst": {"variable": "sst_theoretical_uncertainty"}}
+    )["sst"]
+    assert asked["candidates"] == (("*_DUAL_*.nc", "sst_theoretical_uncertainty"),)
+    # The member pattern is still the table's: a caller names a variable, not a file.
+    assert asked["geolocation"] == ("*_DUAL_*.nc", "lat", "lon")

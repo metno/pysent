@@ -6,6 +6,8 @@ keeping that split honest: the float keeps what it can explain, the browse image
 shows only what is clean, and changing a colour decision costs a re-render
 rather than a reprocess.
 """
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -258,3 +260,102 @@ def test_the_warp_points_gdal_at_a_writable_temporary_directory(tmp_path):
     assert seen["tmpdir"] == str(tmp_path)
     # And it is restored afterwards, so one call cannot change another's setting.
     assert gdal.GetConfigOption("CPL_TMPDIR") != str(tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# A picture product is restyled as a picture (review-study item R5)
+# --------------------------------------------------------------------------- #
+def _rgb_float_product(path, *, gamma="0.6"):
+    """A three-band true-colour float, as the pipeline writes one."""
+    from osgeo import osr
+
+    rows, columns = 8, 10
+    bands = [
+        np.linspace(0.0, 0.5, rows * columns, dtype=np.float32).reshape(rows, columns),
+        np.linspace(0.1, 0.6, rows * columns, dtype=np.float32).reshape(rows, columns),
+        np.linspace(0.2, 0.7, rows * columns, dtype=np.float32).reshape(rows, columns),
+    ]
+    dataset = gdal.GetDriverByName("GTiff").Create(str(path), columns, rows, 3, gdal.GDT_Float32)
+    reference = osr.SpatialReference()
+    reference.ImportFromEPSG(4326)
+    dataset.SetProjection(reference.ExportToWkt())
+    dataset.SetGeoTransform((10.0, 0.01, 0.0, 60.0, 0.0, -0.01))
+    for index, (band, label) in enumerate(
+        zip(bands, ("Oa08_665nm_toa_reflectance", "Oa06_560nm_toa_reflectance",
+                    "Oa04_490nm_toa_reflectance"))
+    ):
+        raster = dataset.GetRasterBand(index + 1)
+        raster.SetNoDataValue(float("nan"))
+        raster.WriteArray(band)
+        raster.SetDescription(label)
+    dataset.SetMetadata({
+        "PYSENT_PRODUCT": "truecolor",
+        "PYSENT_STYLE_RANGE": "0,0.6",
+        "PYSENT_STYLE_GAMMA": gamma,
+        "PYSENT_STYLE_SCALE": "linear",
+    })
+    dataset.FlushCache()
+    dataset = None
+    return path
+
+
+def test_a_truecolor_float_is_restyled_as_rgb(tmp_path):
+    """Regression: ``band_count >= 2`` read green reflectance as the reason band.
+
+    On ``main`` this wrote a single-band paletted copy of a three-band picture,
+    with pixels hidden wherever the rounded green value matched a reason code.
+    """
+    product = _rgb_float_product(tmp_path / "truecolor.tif")
+    result = restyle_sentinel_s3_product(product_path=str(product), output_dir=tmp_path / "out")
+
+    styled = gdal.Open(result["styled_path"])
+    # Three colour bands plus alpha, and no palette. On main this is one
+    # paletted band, which is the defect.
+    assert styled.RasterCount == 4
+    assert styled.GetRasterBand(1).GetRasterColorTable() is None
+    tags = styled.GetMetadata()
+    styled = None
+
+    assert tags["PYSENT_STYLE_GAMMA"] == "0.6"
+    assert result["rgb"] is True
+    assert result["gamma"] == pytest.approx(0.6)
+    assert result["browse_hidden"] is False
+    assert Path(result["thumbnail_path"]).exists()
+
+
+def test_the_gamma_can_be_changed_without_reprocessing(tmp_path):
+    product = _rgb_float_product(tmp_path / "truecolor.tif")
+    dark = restyle_sentinel_s3_product(
+        product_path=str(product), output_dir=tmp_path / "dark", gamma=1.0
+    )
+    light = restyle_sentinel_s3_product(
+        product_path=str(product), output_dir=tmp_path / "light", gamma=0.4
+    )
+
+    def green(path):
+        dataset = gdal.Open(path)
+        array = dataset.GetRasterBand(2).ReadAsArray()
+        dataset = None
+        return array.mean()
+
+    # A gamma below one lifts the dark end, so the same data renders brighter.
+    assert green(light["styled_path"]) > green(dark["styled_path"])
+
+
+def test_the_ramp_options_are_refused_for_a_picture(tmp_path):
+    product = _rgb_float_product(tmp_path / "truecolor.tif")
+    with pytest.raises(ValueError, match="does not apply"):
+        restyle_sentinel_s3_product(product_path=str(product), colormap="viridis")
+    with pytest.raises(ValueError, match="does not apply"):
+        restyle_sentinel_s3_product(product_path=str(product), log_scale=True)
+
+
+def test_gamma_is_refused_for_a_ramped_product(s3_synergy_window, tmp_path):
+    product = process_sentinel_s3_safe(
+        input_dataset=str(s3_synergy_window),
+        output_dir=tmp_path / "ndvi",
+        products={"ndvi": {}},
+        processing_options={"styled": False, "thumbnail": False, "decimate": 8},
+    )[0]
+    with pytest.raises(ValueError, match="gamma"):
+        restyle_sentinel_s3_product(product_path=product["path"], gamma=0.5)

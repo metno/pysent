@@ -9,7 +9,7 @@ Phase 1 on its own.
 |---|---|
 | Branch / worktree | `feature/s3-review-fixes` → `../pysent.worktrees/s3-review-fixes` |
 | Base | `main` @ `3a147c3` (2026-10-30) |
-| Status | **Phases 1 and 2 done.** Phase 3 next, which needs Q2. |
+| Status | **Phases 1-4 done.** Phases 5 (R2) and 6 (R7) need the owner (Q1, Q4) and data this machine does not hold. |
 | Audit evidence | [`s3_review_audit/`](s3_review_audit/) |
 | Comes from | the FastAPI-mapserver study's report, relayed 2026-10-31; the closed `PLANNING_s5p_s3_pipelines.md` is the code's own plan |
 
@@ -168,9 +168,9 @@ choice, which is the owner's. Phase 6 measures it and shows pictures.
   reflectance and report them. Verify the S5P freeze. *Blocks the study: ship first.*
 - [x] **Phase 2 — R4 and R6, the two unambiguous bugs.** Parse `browse_reject_flags` from the request
   like `reject_flags`; let `on_empty="write"` write an empty swath product.
-- [ ] **Phase 3 — R5, restyling an RGB product.** Route a three-band product to the RGB writers with
+- [x] **Phase 3 — R5, restyling an RGB product.** Route a three-band product to the RGB writers with
   a `gamma` read from the product's own tag, or refuse it with a message that says why. *Needs Q2.*
-- [ ] **Phase 4 — R3, the SST view.** A `view` request option for `sst`, setting variable candidates,
+- [x] **Phase 4 — R3, the SST view.** A `view` request option for `sst`, setting variable candidates,
   geolocation and flag member together. *Needs Q3.*
 - [ ] **Phase 5 — R2, the single-file WST layout.** A clear diagnosis always; reading it if the owner
   wants it. *Needs Q1 and a sample product.*
@@ -272,3 +272,30 @@ choice, which is the owner's. Phase 6 measures it and shows pictures.
     path never had the problem.
   - Full suite **425 passed, 13 skipped**. The S5P freeze is untouched by construction here: the
     changes are in `s3.py`, which no Sentinel-5P path imports.
+
+- **2026-10-31 — Phases 3 and 4 (R5 and R3).** Both items offered a choice; both were taken the way
+  the study's report preferred, because neither changes a default output and both remove something
+  the study works around today. Said here rather than only in a PR, so the owner can object.
+  - **R5**: a three-band picture product now goes to `write_rgb_styled` / `write_rgb_thumbnail`
+    through `_restyle_rgb`, with a `gamma` argument; `colormap` and `log_scale` are **refused** for
+    it rather than ignored, since a caller passing them has misunderstood what they are restyling,
+    and `gamma` is refused for a ramped product for the same reason. The gamma comes from the
+    product's own `PYSENT_STYLE_GAMMA`, falling back to the product table, so a restyle that changes
+    only the range reproduces the pipeline's rendering. **A new tag:** the true-colour float now
+    records `PYSENT_STYLE_GAMMA` — a provenance addition, no pixel changes.
+  - **How the kind is decided, and a mistake on the way.** I first keyed the reason band off band
+    2's description being `reject_reason`, which broke `test_restyling_still_hides_what_the_browse_image_hides`:
+    only the **grid** path names that band, while the swath path leaves the description empty. The
+    discrimination is now "is this a picture?" — the `PYSENT_PRODUCT` tag's `kind`, or three bands
+    that all say `reflectance` — and the reason band stays the old count test, which is safe once
+    pictures are routed away. Four tests, all four fail on `main`; the headline one fails there with
+    `assert 1 == 4` on the styled band count, which is the defect itself.
+  - **R3**: `view` is a request option for `sst` (`"dual"` default, `"nadir"`), and the table now
+    carries a `views` entry so one request sets the variable's member, the geolocation and the flag
+    member **together** — the reason overriding `variable` alone could never select a view. A view
+    on a product that has none, or an unknown view, is refused. Separately, a requested `variable`
+    now reaches the swath resolver: it is substituted into the table's candidate patterns, so the
+    caller names a variable and the member pattern stays the table's. Three tests, all three fail on
+    `main`.
+  - Full suite **432 passed, 13 skipped** with numba, **428 passed, 17 skipped** without. The S5P
+    freeze re-checked after all four phases: **zero differing pixel hashes**.

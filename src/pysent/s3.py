@@ -301,7 +301,31 @@ S3_PRODUCTS.update({
         "kind": "swath",
         # The GHRSST member names are generated, so they are matched by shape.
         # DUAL is the two-view retrieval and the default; NADIR is the wider
-        # swath and is selectable by overriding the candidate.
+        # swath. A view is one choice spanning three table entries - the
+        # variable's member, the geolocation's and the flag member's - so it is
+        # requested as ``view`` and sets all three together. Overriding
+        # ``variable`` alone cannot do it: the swath path resolves the variable
+        # from ``candidates``, so a bare variable request was accepted and
+        # ignored.
+        "views": {
+            "dual": {
+                "candidates": (("*_DUAL_*.nc", "sea_surface_temperature"),),
+                "geolocation": ("*_DUAL_*.nc", "lat", "lon"),
+                "flag_member": "*_DUAL_*.nc",
+                "extra_masks": (
+                    {"member": "*_DUAL_*.nc", "variable": "quality_level", "min_value": 4},
+                ),
+            },
+            "nadir": {
+                "candidates": (("*_NADIR_*.nc", "sea_surface_temperature"),),
+                "geolocation": ("*_NADIR_*.nc", "lat", "lon"),
+                "flag_member": "*_NADIR_*.nc",
+                "extra_masks": (
+                    {"member": "*_NADIR_*.nc", "variable": "quality_level", "min_value": 4},
+                ),
+            },
+        },
+        "view": "dual",
         "candidates": (("*_DUAL_*.nc", "sea_surface_temperature"),),
         "geolocation": ("*_DUAL_*.nc", "lat", "lon"),
         "units": "degC",
@@ -471,7 +495,7 @@ def default_sentinel_s3_products(input_dataset: str) -> tuple[str, ...]:
 # --------------------------------------------------------------------------- #
 _PRODUCT_OPTIONS = {"variable", "mask_flags", "reject_flags", "browse_reject_flags",
                     "value_range", "colormap", "decimate", "unit", "geoloc_step",
-                    "log_scale", "extra_masks", "gamma", "bands"}
+                    "log_scale", "extra_masks", "gamma", "bands", "view"}
 
 
 def normalize_sentinel_s3_product_map(
@@ -503,6 +527,26 @@ def normalize_sentinel_s3_product_map(
             raise ValueError(f"product {key!r} has unknown option(s): {', '.join(sorted(unknown))}")
 
         defaults = S3_PRODUCTS[key]
+
+        # A view is one request that sets three table entries. Resolve it
+        # first, then treat its entries as this product's defaults.
+        views = defaults.get("views") or {}
+        view = requested.get("view")
+        if view in (None, ""):
+            view = defaults.get("view")
+        else:
+            view = str(view).strip().lower()
+            if not views:
+                raise ValueError(
+                    f"product {key!r} has no views to choose between, so 'view' does not apply to it"
+                )
+            if view not in views:
+                raise ValueError(
+                    f"product {key!r}: view must be one of {', '.join(sorted(views))}, not {view!r}"
+                )
+        if view and views:
+            defaults = {**defaults, **views[view], "view": view}
+
         mask_flags = requested.get("mask_flags", "default")
         if isinstance(mask_flags, str):
             if mask_flags.strip().lower() == "default":
@@ -611,7 +655,19 @@ def normalize_sentinel_s3_product_map(
             "flags_are_default": not asked_for_flags,
             "kind": defaults.get("kind", "grid"),
             "variable": str(requested.get("variable") or defaults.get("variable") or ""),
-            "candidates": defaults.get("candidates", ()),
+            # A requested variable has to reach the swath path too, which
+            # resolves from the candidates: taking the candidates from the
+            # table alone meant a requested variable was accepted and silently
+            # ignored for every swath product. The member pattern stays the
+            # table's - what a caller names is the variable inside it.
+            "candidates": (
+                tuple(
+                    (member, str(requested["variable"]).strip())
+                    for member, _variable in defaults.get("candidates", ())
+                )
+                if requested.get("variable")
+                else defaults.get("candidates", ())
+            ),
             "geolocation": defaults.get("geolocation", OLCI_GEOLOCATION),
             "extra_masks": tuple(requested.get("extra_masks", defaults.get("extra_masks", ()))),
             "mask_flags": mask_flags,
@@ -1533,6 +1589,10 @@ def _product_metadata(
         style_range=f"{options['value_range'][0]:g},{options['value_range'][1]:g}",
         style_scale="log10" if options["log_scale"] else "linear",
         colormap=options["colormap"],
+        # Only a picture product has a gamma, and only it needs one recorded:
+        # without it a restyle of a true-colour float cannot reproduce the
+        # rendering the pipeline produced.
+        style_gamma=f"{options['gamma']:g}" if options.get("kind") == "rgb" else None,
     )
 
 
@@ -1624,6 +1684,59 @@ def process_sentinel_s3_safe(
             )
 
 
+def _restyle_rgb(
+    *,
+    float_path: Path,
+    value_range: tuple[float, float],
+    gamma: float,
+    tags: dict[str, str],
+    output_dir: Path | None,
+    styled: bool,
+    thumbnail: bool,
+    processing_options: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Re-render a three-band picture product as a picture.
+
+    The same two writers the pipeline used, so a restyle differs from the
+    original only in the range and the gamma it was given. No colour table and
+    no reason band: a true-colour float has three bands of reflectance and
+    nothing to hide behind a mask code.
+    """
+    settings = _resolve_processing_settings(processing_options)
+    destination = Path(output_dir) if output_dir else float_path.parent
+    destination.mkdir(parents=True, exist_ok=True)
+
+    metadata = {
+        **{key: value for key, value in tags.items() if key.startswith("PYSENT_")},
+        "PYSENT_STYLE_RANGE": f"{value_range[0]:g},{value_range[1]:g}",
+        "PYSENT_STYLE_GAMMA": f"{gamma:g}",
+        "PYSENT_STYLE_SCALE": "linear",
+    }
+    written: dict[str, Any] = {
+        "source": str(float_path),
+        "value_range": [value_range[0], value_range[1]],
+        "gamma": gamma,
+        "scale": "linear",
+        "rgb": True,
+        "browse_hidden": False,
+    }
+    if styled:
+        styled_path = destination / f"{float_path.stem}_styled.tif"
+        write_rgb_styled(
+            source_path=str(float_path), output_path=styled_path,
+            value_range=value_range, gamma=gamma, settings=settings, metadata=metadata,
+        )
+        written["styled_path"] = str(styled_path)
+    if thumbnail:
+        thumbnail_path = destination / f"{float_path.stem}_thumb.png"
+        write_rgb_thumbnail(
+            source_path=str(float_path), output_path=thumbnail_path,
+            value_range=value_range, gamma=gamma,
+        )
+        written["thumbnail_path"] = str(thumbnail_path)
+    return written
+
+
 def restyle_sentinel_s3_product(
     *,
     product_path: str | Path,
@@ -1631,6 +1744,7 @@ def restyle_sentinel_s3_product(
     value_range: tuple[float, float] | None = None,
     colormap: str | None = None,
     log_scale: bool | None = None,
+    gamma: float | None = None,
     styled: bool = True,
     thumbnail: bool = True,
     processing_options: dict[str, Any] | None = None,
@@ -1648,6 +1762,14 @@ def restyle_sentinel_s3_product(
     so a caller can change one thing and keep the rest. The float product is
     opened read-only and never rewritten.
 
+    **A three-band picture product is restyled as a picture**: true colour goes
+    to the RGB writers with ``gamma``, not through the colour ramp. ``colormap``
+    and ``log_scale`` have no meaning for it and are refused rather than
+    ignored, since a caller who passes them has misunderstood what they are
+    restyling. Which kind a product is comes from what its bands say they are -
+    three bands of reflectance, or a value band and a ``reject_reason``
+    companion - because counting bands cannot tell the two apart.
+
     Returns the paths written and the style that was applied.
     """
     from osgeo import gdal
@@ -1661,7 +1783,18 @@ def restyle_sentinel_s3_product(
         raise ValueError(f"{float_path} could not be opened")
     tags = dataset.GetMetadata()
     band_count = dataset.RasterCount
+    band_descriptions = [
+        dataset.GetRasterBand(index + 1).GetDescription() for index in range(band_count)
+    ]
     dataset = None
+    # Which kind of product this is, by what it says it is rather than by how
+    # many bands it has: the tag first, then the band descriptions, because a
+    # picture product and a value-plus-reason product can both have more than
+    # one band. Only the grid path names its reason band, so the reason band
+    # stays a count test - it is the picture that has to be recognised.
+    is_rgb = S3_PRODUCTS.get(tags.get("PYSENT_PRODUCT", ""), {}).get("kind") == "rgb" or (
+        band_count == 3 and all("reflectance" in name for name in band_descriptions)
+    )
 
     stored_range = tags.get("PYSENT_STYLE_RANGE", "")
     if value_range is None:
@@ -1676,6 +1809,40 @@ def restyle_sentinel_s3_product(
     low, high = (float(value) for value in value_range)
     if not low < high:
         raise ValueError(f"value_range must be (low, high) with low < high, not {(low, high)}")
+
+    if is_rgb:
+        for name, value in (("colormap", colormap), ("log_scale", log_scale)):
+            if value is not None:
+                raise ValueError(
+                    f"{float_path.name} is a three-band picture product, so {name!r} does not "
+                    "apply to it; pass gamma and value_range instead"
+                )
+        # The pipeline's own gamma, so a restyle that changes only the range
+        # reproduces the rendering rather than inventing a new one.
+        if gamma is None:
+            stored_gamma = tags.get("PYSENT_STYLE_GAMMA")
+            if stored_gamma:
+                gamma = float(stored_gamma)
+            else:
+                product = tags.get("PYSENT_PRODUCT", "")
+                gamma = float(S3_PRODUCTS.get(product, {}).get("gamma", 1.0))
+        if gamma <= 0:
+            raise ValueError(f"gamma must be positive, not {gamma}")
+        return _restyle_rgb(
+            float_path=float_path,
+            value_range=(low, high),
+            gamma=float(gamma),
+            tags=tags,
+            output_dir=output_dir,
+            styled=styled,
+            thumbnail=thumbnail,
+            processing_options=processing_options,
+        )
+    if gamma is not None:
+        raise ValueError(
+            f"{float_path.name} is a single-value product styled through a colour ramp, so gamma "
+            "does not apply to it"
+        )
 
     colormap = colormap or tags.get("PYSENT_COLORMAP") or "viridis"
     if colormap not in COLOUR_ANCHORS:
@@ -1697,9 +1864,11 @@ def restyle_sentinel_s3_product(
         "PYSENT_STYLE_SCALE": "log10" if log_scale else "linear",
         "PYSENT_COLORMAP": colormap,
     }
-    # The reason band is what lets the browse image hide what the float keeps.
-    hide = BROWSE_HIDDEN_REASONS if band_count >= 2 else ()
+    # A value product's second band is its reject reasons, which is what lets
+    # the browse image hide what the float keeps. A picture product never
+    # reaches here - it was routed above - so this count test is safe again.
     reason_band = 2 if band_count >= 2 else None
+    hide = BROWSE_HIDDEN_REASONS if reason_band else ()
 
     written: dict[str, Any] = {
         "source": str(float_path),
