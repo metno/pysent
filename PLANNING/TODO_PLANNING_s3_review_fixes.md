@@ -151,12 +151,30 @@ later is given `minimum_valid=max(1, kept_count // 100)` (`s3.py:1125`, `1239`),
 an empty swath product; it swaps one exception for another. The guard exists to catch a *truncated*
 warp, which is a different condition from "there was nothing to warp".
 
-### R7. SLSTR outputs show dashed gaps across the swath ❓ not measured yet
+### R7. SLSTR outputs show dashed gaps across the swath ✅ — and SST is far worse than LST
 
-`warp_swath` forces `resampling="near"` whenever a categorical companion band rides along, and on
-the 1 km SLSTR grid some output cells then get no source pixel. Plausible from the code —
-`_swath.py:449` does exactly that — but the gap share is not measured and the remedy is a rendering
-choice, which is the owner's. Phase 6 measures it and shows pictures.
+`warp_swath` forces `resampling="near"` whenever a categorical companion band rides along
+(`_swath.py:449`), and on the 1 km SLSTR grid some output cells then get no source pixel.
+
+Measured with `s3_review_audit/slstr_gaps.py`, which warps the same frame twice — once with the
+companion, so `near`, and once with the values alone and `average` — and counts the cells the
+averaged warp fills that the nearest one does not:
+
+| Frame | Product | Cells (average) | Gaps | Share | Longest run |
+|---|---|---:|---:|---:|---:|
+| `S3A_…LST…20261023T134501…_NT_005` | LST | 1,103,956 | 10,000 | **0.91 %** | 12 |
+| `S3B_…LST…20260628T084307…_NT_005` | LST | 2,599,958 | 15,819 | **0.61 %** | 12 |
+| `S3B_…LST…20190221T063656…_LR1_R_NT_004` | LST | 3,974 | 544 | 13.69 % | 4 |
+| **`S3A_…WST…20261023T102002…_NT_004`** | **SST (dual)** | 106,399 | 34,982 | **32.88 %** | 9 |
+
+**So this is two findings, not one.** For LST it is about one per cent of the cells, and the
+complaint is cosmetic: the gaps are single cells and short runs, but they line up along the scan and
+so read as dashes. **For dual-view SST a third of the map is missing** — the dual view is a narrower,
+sparser swath, so at 1 km many output cells contain no source pixel centre at all. Pictures of a
+400-cell crop, `near` against `average`, are in `/mnt/data/pysent/s3-review/`.
+
+The remedy is a rendering choice and so the owner's (Q4). The 2019 reduced-resolution frame is in
+the table for honesty, not for weight: at 3 974 cells it is too small to generalise from.
 
 ---
 
@@ -174,8 +192,8 @@ choice, which is the owner's. Phase 6 measures it and shows pictures.
   geolocation and flag member together. *Needs Q3.*
 - [ ] **Phase 5 — R2, the single-file WST layout.** A clear diagnosis always; reading it if the owner
   wants it. *Needs Q1 and a sample product.*
-- [ ] **Phase 6 — R7, the dashed gaps.** Measure the share on real frames, propose options with
-  pictures, let the owner choose. *Needs Q4.*
+- [x] **Phase 6 — R7, the dashed gaps — measured.** The share is in R7 above and the pictures are
+  rendered; the remedy itself is Q4 and waits for the owner. *No code change.*
 
 ---
 
@@ -299,3 +317,13 @@ choice, which is the owner's. Phase 6 measures it and shows pictures.
     `main`.
   - Full suite **432 passed, 13 skipped** with numba, **428 passed, 17 skipped** without. The S5P
     freeze re-checked after all four phases: **zero differing pixel hashes**.
+
+- **2026-10-31 — R7 measured (no code change).** `slstr_gaps.py` warps a frame both ways and counts
+  what the nearest-neighbour warp loses. **LST loses 0.6-0.9 %, dual-view SST loses 32.9 %.** The
+  LST case is cosmetic - single cells and runs of up to 12, lined up along the scan, which is why
+  they read as dashes. The SST case is not cosmetic: a third of the map is absent, because the dual
+  view is a narrower and sparser swath and at 1 km many cells hold no source pixel centre. Pictures
+  of a 400-cell crop are in `/mnt/data/pysent/s3-review/` (`sst_crop_near.png` against
+  `sst_crop_average.png`), and the dashes are plain in the first and gone in the second. The remedy
+  is a rendering decision, so it stays with the owner as Q4 - but the SST number raises the question
+  from cosmetic to substantive, and the plan says so.
