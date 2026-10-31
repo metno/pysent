@@ -541,3 +541,45 @@ def test_a_re_run_reproduces_the_pixels_and_the_tags(s3_synergy_window, tmp_path
     one = two = None
     assert np.array_equal(left, right, equal_nan=True)
     assert tags_one == tags_two
+
+
+# --------------------------------------------------------------------------- #
+# Options that were accepted and then ignored (review-study items R4, R6)
+# --------------------------------------------------------------------------- #
+def test_a_requested_browse_mask_reaches_the_product():
+    """Regression: ``browse_reject_flags`` was accepted and silently dropped.
+
+    It is in ``_PRODUCT_OPTIONS``, so a request carrying it validated, but the
+    normalized product took its value only from the defaults. On ``main`` all
+    three of these come back as the default cloud margin.
+    """
+    default = normalize_sentinel_s3_product_map({"chl": {}})["chl"]["browse_reject_flags"]
+    assert default, "this test needs a product whose browse mask is not already empty"
+
+    off = normalize_sentinel_s3_product_map({"chl": {"browse_reject_flags": []}})["chl"]
+    assert list(off["browse_reject_flags"]) == []
+
+    none = normalize_sentinel_s3_product_map({"chl": {"browse_reject_flags": "none"}})["chl"]
+    assert list(none["browse_reject_flags"]) == []
+
+    picked = normalize_sentinel_s3_product_map(
+        {"chl": {"browse_reject_flags": ["CLOUD_AMBIGUOUS"]}}
+    )["chl"]
+    assert list(picked["browse_reject_flags"]) == ["CLOUD_AMBIGUOUS"]
+
+    # And "default" still means the table's own choice.
+    kept = normalize_sentinel_s3_product_map({"chl": {"browse_reject_flags": "default"}})["chl"]
+    assert list(kept["browse_reject_flags"]) == list(default)
+
+
+def test_a_bad_browse_mask_request_is_refused():
+    with pytest.raises(ValueError, match="browse_reject_flags must be"):
+        normalize_sentinel_s3_product_map({"chl": {"browse_reject_flags": 7}})
+
+
+def test_asking_for_a_browse_mask_makes_the_flag_names_strict():
+    """A name the caller typed is strict; a default one may be absent in an
+    older baseline and is then skipped and reported.
+    """
+    asked = normalize_sentinel_s3_product_map({"chl": {"browse_reject_flags": ["CLOUD"]}})["chl"]
+    assert asked["flags_are_default"] is False

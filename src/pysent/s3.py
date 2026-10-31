@@ -536,6 +536,30 @@ def normalize_sentinel_s3_product_map(
                 f"not {type(reject_flags).__name__}"
             )
 
+        # The browse mask is a separate audience's decision from the float
+        # product's mask, so it is a separate option - and it has to be read
+        # from the request. Taken only from ``**defaults`` below, a request for
+        # ``browse_reject_flags: []`` passed validation and then silently kept
+        # the default cloud margin.
+        browse_reject_flags = requested.get("browse_reject_flags", "default")
+        if isinstance(browse_reject_flags, str):
+            lowered = browse_reject_flags.strip().lower()
+            if lowered == "default":
+                browse_reject_flags = list(defaults.get("browse_reject_flags", ()))
+            elif lowered == "none":
+                browse_reject_flags = []
+            else:
+                browse_reject_flags = [browse_reject_flags.strip()]
+        elif isinstance(browse_reject_flags, (list, tuple)):
+            browse_reject_flags = [
+                str(item).strip() for item in browse_reject_flags if str(item).strip()
+            ]
+        else:
+            raise ValueError(
+                f"product {key!r}: browse_reject_flags must be 'default', 'none' or a list of "
+                f"flag names, not {type(browse_reject_flags).__name__}"
+            )
+
         decimate = requested.get("decimate")
         decimate = _coerce_decimate(decimate, key) if decimate not in (None, "") else None
 
@@ -577,7 +601,9 @@ def normalize_sentinel_s3_product_map(
                 f"product {key!r}: a log colour scale needs a positive lower bound, not {low}"
             )
 
-        asked_for_flags = ("mask_flags" in requested) or ("reject_flags" in requested)
+        asked_for_flags = any(
+            name in requested for name in ("mask_flags", "reject_flags", "browse_reject_flags")
+        )
         normalized[key] = {
             **defaults,
             # A requested flag name is strict; a default one may be absent in an
@@ -590,6 +616,7 @@ def normalize_sentinel_s3_product_map(
             "extra_masks": tuple(requested.get("extra_masks", defaults.get("extra_masks", ()))),
             "mask_flags": mask_flags,
             "reject_flags": reject_flags,
+            "browse_reject_flags": browse_reject_flags,
             "value_range": (low, high),
             "colormap": colormap,
             "decimate": decimate,
@@ -1122,7 +1149,11 @@ def _process_swath_product(
             # correctly sized raster with nothing in it. One per cent of the
             # kept source pixels is far below any real result and far above
             # zero, so it catches that without rejecting a coarse grid.
-            minimum_valid=max(1, kept_count // 100),
+            # With nothing kept there is nothing to check: this guard asks
+            # "did the warp lose the data?", and a frame whose mask kept no
+            # pixel has none to lose. Left at 1 it turned on_empty="write"
+            # into a different exception instead of an empty product.
+            minimum_valid=(kept_count // 100 or 1) if kept_count else None,
             categorical=reason_codes,
         )
         finish_float_product(path=str(temporary), settings=settings, metadata=metadata)
@@ -1236,7 +1267,11 @@ def _process_rgb_product(
             resampling=settings["resampling"], scratch=scratch,
             creation_options=["TILED=YES", "COMPRESS=NONE"],
             num_threads=settings["gdal_num_threads"], geoloc_step=step,
-            minimum_valid=max(1, kept_count // 100),
+            # With nothing kept there is nothing to check: this guard asks
+            # "did the warp lose the data?", and a frame whose mask kept no
+            # pixel has none to lose. Left at 1 it turned on_empty="write"
+            # into a different exception instead of an empty product.
+            minimum_valid=(kept_count // 100 or 1) if kept_count else None,
         )
         dataset = gdal.Open(str(single))
         warped.append(dataset.GetRasterBand(1).ReadAsArray())
