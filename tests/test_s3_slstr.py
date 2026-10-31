@@ -387,7 +387,7 @@ def test_a_single_file_sst_product_says_what_layout_it_has(tmp_path):
     message = str(caught.value)
     assert "single GHRSST file" in message
     assert single in message
-    assert "R2" in message
+    assert "view='best'" in message
 
 
 def test_a_product_with_the_pair_is_unaffected(tmp_path):
@@ -427,3 +427,67 @@ def test_the_slstr_products_ask_for_average_and_a_caller_still_wins():
     assert _resampling_for(lst, asked) == "near"
     bilinear = _resolve_processing_settings({"resampling": "bilinear"})
     assert _resampling_for(lst, bilinear) == "bilinear"
+
+
+def _single_file_wst(tmp_path):
+    """A stub of the orbit-long layout: one GHRSST file, no view in its name."""
+    import zipfile
+
+    name = "S3A_SL_2_WST____20251122T192138_20251122T210237_20251124T013104_6059_133_070______MAR_O_NT_003"
+    product = tmp_path / f"{name}.zip"
+    member = "20251122192138-MAR-L2P_GHRSST-SSTskin-SLSTRA-20251124013104-v02.0-fv01.0.nc"
+    with zipfile.ZipFile(product, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr(f"{name}.SEN3/{member}", b"stub")
+        archive.writestr(f"{name}.SEN3/xfdumanifest.xml", b"<xfdu:XFDU/>")
+    return product, member
+
+
+def test_the_best_view_reads_the_single_file_layout(tmp_path):
+    """The orbit-long products hold the best-quality retrieval, not a view.
+
+    Verified against the real product
+    ``S3A_SL_2_WST____20251122T192138_..._NT_003`` (663 MB, not committed):
+    ``sst_algorithm_type`` there is 16.9 % N2, 14.1 % N3, 20.9 % D2 and 14.3 %
+    D3 of all cells, so the file mixes nadir-only and dual-view retrievals
+    per pixel. Processed at 0.05 deg it gives 0.97 / 19.93 / 29.52 degC
+    (p01/p50/p99) over a whole orbit.
+    """
+    from pysent._sen3 import find_member, sen3_root
+
+    product, member = _single_file_wst(tmp_path)
+    options = normalize_sentinel_s3_product_map({"sst": {"view": "best"}})["sst"]
+    assert options["view"] == "best"
+
+    pattern, variable = options["candidates"][0]
+    assert variable == "sea_surface_temperature"
+    assert find_member(sen3_root(str(product)), pattern) == member
+    # Geolocation, flags and the quality mask all come from that same file.
+    assert options["geolocation"][0] == pattern
+    assert options["flag_member"] == pattern
+    assert options["extra_masks"][0]["member"] == pattern
+
+
+def test_asking_for_a_view_a_single_file_product_does_not_have_says_so(tmp_path):
+    from pysent._sen3 import find_member, sen3_root
+
+    product, _member = _single_file_wst(tmp_path)
+    options = normalize_sentinel_s3_product_map({"sst": {"view": "dual"}})["sst"]
+    with pytest.raises(ValueError, match="view='best'"):
+        find_member(sen3_root(str(product)), options["candidates"][0][0])
+
+
+def test_the_best_view_refuses_to_guess_on_a_product_that_has_the_pair(tmp_path):
+    """Where both views exist, "best" is ambiguous and must not pick one."""
+    import zipfile
+
+    from pysent._sen3 import find_member, sen3_root
+
+    product = tmp_path / "pair.zip"
+    with zipfile.ZipFile(product, "w", compression=zipfile.ZIP_STORED) as archive:
+        for view in ("DUAL", "NADIR"):
+            archive.writestr(f"P.SEN3/2026-MAR-L2P_GHRSST-SSTskin-SLSTRA-NTC_{view}_x.nc", b"stub")
+        archive.writestr("P.SEN3/xfdumanifest.xml", b"<xfdu:XFDU/>")
+
+    options = normalize_sentinel_s3_product_map({"sst": {"view": "best"}})["sst"]
+    with pytest.raises(ValueError, match="members match"):
+        find_member(sen3_root(str(product)), options["candidates"][0][0])

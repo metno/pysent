@@ -181,8 +181,8 @@ def _layout_hint(pattern: str, members: list[str]) -> str:
     return (
         f". This product holds a single GHRSST file ({ghrsst[0]}) rather than the "
         "_DUAL_/_NADIR_ pair this reader expects - the layout of the orbit-long "
-        "sea-surface-temperature dumps, which pysent does not read yet "
-        "(PLANNING_s3_review_fixes.md, R2)"
+        "sea-surface-temperature dumps, where neither view is stored separately and "
+        "the one retrieval is the best-quality one. Ask for it with view='best'"
     )
 
 
