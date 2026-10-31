@@ -160,6 +160,32 @@ def _baseline_of(facts: dict[str, Any], root: str) -> str:
     return match.group(1) if match else ""
 
 
+# A GHRSST file names its view in the middle of a generated name. Older
+# sea-surface-temperature products - orbit-long dumps rather than 300-second
+# frames - hold a single one with no view in the name at all, so a pattern
+# written for the pair matches nothing and the complaint above is true but
+# unhelpful. Saying which layout was found turns a dead end into a decision.
+_GHRSST_MARK = "L2P_GHRSST"
+_VIEW_MARKS = ("_DUAL_", "_NADIR_")
+
+
+def _layout_hint(pattern: str, members: list[str]) -> str:
+    """An explanation when a pattern missed because the product has another layout."""
+    if not any(mark in pattern for mark in _VIEW_MARKS):
+        return ""
+    ghrsst = [member for member in members if _GHRSST_MARK in member]
+    if not ghrsst:
+        return ""
+    if any(mark in member for member in ghrsst for mark in _VIEW_MARKS):
+        return ""
+    return (
+        f". This product holds a single GHRSST file ({ghrsst[0]}) rather than the "
+        "_DUAL_/_NADIR_ pair this reader expects - the layout of the orbit-long "
+        "sea-surface-temperature dumps, which pysent does not read yet "
+        "(PLANNING_s3_review_fixes.md, R2)"
+    )
+
+
 def find_member(root: str, pattern: str) -> str:
     """The one member matching a shell pattern, or a clear complaint.
 
@@ -178,6 +204,7 @@ def find_member(root: str, pattern: str) -> str:
     if not matches:
         raise ValueError(
             f"no member of this product matches {pattern!r}; it has: {', '.join(members)}"
+            + _layout_hint(pattern, members)
         )
     if len(matches) > 1:
         raise ValueError(

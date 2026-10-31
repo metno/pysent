@@ -360,3 +360,46 @@ def test_a_requested_variable_reaches_the_swath_resolver():
     assert asked["candidates"] == (("*_DUAL_*.nc", "sst_theoretical_uncertainty"),)
     # The member pattern is still the table's: a caller names a variable, not a file.
     assert asked["geolocation"] == ("*_DUAL_*.nc", "lat", "lon")
+
+
+def test_a_single_file_sst_product_says_what_layout_it_has(tmp_path):
+    """Regression: the orbit-long WST dumps hold one GHRSST file, not a pair.
+
+    ``find_member('*_DUAL_*.nc')`` could only say "no member matches", which is
+    true and useless. The stub here reproduces the layout the review study
+    found - a single file with no view in its name - because no product of
+    that vintage is on this machine; what is asserted is the diagnosis, not
+    that pysent can read it, which it cannot yet (R2).
+    """
+    import zipfile
+
+    from pysent._sen3 import find_member, sen3_root
+
+    name = "S3A_SL_2_WST____20251118T192522_20251118T210621_20251120T004133_6059_133_013______MAR_O_NT_003"
+    product = tmp_path / f"{name}.zip"
+    single = "20251118192522-MAR-L2P_GHRSST-SSTskin-SLSTRA-20251120004133-v02.0-fv01.0.nc"
+    with zipfile.ZipFile(product, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr(f"{name}.SEN3/{single}", b"stub")
+        archive.writestr(f"{name}.SEN3/xfdumanifest.xml", b"<xfdu:XFDU/>")
+
+    with pytest.raises(ValueError) as caught:
+        find_member(sen3_root(str(product)), "*_DUAL_*.nc")
+    message = str(caught.value)
+    assert "single GHRSST file" in message
+    assert single in message
+    assert "R2" in message
+
+
+def test_a_product_with_the_pair_is_unaffected(tmp_path):
+    """The hint must not fire where the pair is present - only the match matters."""
+    import zipfile
+
+    from pysent._sen3 import find_member, sen3_root
+
+    product = tmp_path / "pair.zip"
+    with zipfile.ZipFile(product, "w", compression=zipfile.ZIP_STORED) as archive:
+        for view in ("DUAL", "NADIR"):
+            archive.writestr(f"P.SEN3/2026-MAR-L2P_GHRSST-SSTskin-SLSTRA-NTC_{view}_x.nc", b"stub")
+        archive.writestr("P.SEN3/xfdumanifest.xml", b"<xfdu:XFDU/>")
+
+    assert "_DUAL_" in find_member(sen3_root(str(product)), "*_DUAL_*.nc")
