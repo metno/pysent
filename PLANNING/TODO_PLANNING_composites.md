@@ -272,6 +272,14 @@ the page, so they survive the session).
   default, which fills more and averages more but blurs a day's weather.
   **Answered 2026-10-31: a caller-supplied window, defaulting to one day.** So the window is an input,
   not a product definition, and the honesty about coverage has to be in the file.
+  **Revisited 2026-10-31, after A10 measured the coverage curve: the default window becomes five
+  days, not one** (65.1 % coverage and 19 % single-observation cells, against 28.4 % and 58 % for one
+  day; days six and seven add 2.0 and 2.6 points for 40 % more work). Accepted by the owner together
+  with: **no default changes elsewhere**, a **`min_observations` option in Phase 2** (default off),
+  and **two questions to the expert review** - whether a mean of one or two retrievals is publishable
+  as a map, and whether the mean is the right reduction for plume products (SO2, aerosol index) or a
+  maximum is. The five-day default is a Phase 1 follow-up, since Phase 1 shipped with no window
+  parameter at all - the caller passes the input list.
 - **Q2 (before Phase 1). Plain mean or quality-weighted?** *Plain mean as the default, weighted as an
   option.* A6 is the evidence: at the default threshold 96 % of weights are exactly 1.0 and the two
   methods differ by under 2 % of the dynamic range, for double the warp work. This is a deviation from
