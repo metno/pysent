@@ -380,6 +380,42 @@ GEOLOCATION_STEPS = (1, 2, 8, 16, 32, 64)
 REFUSED_GEOLOCATION_STEP = 4
 
 
+def _combine_bands(
+    *, values_path: str, reason_path: str, output_path: str, creation_options: list[str]
+) -> None:
+    """The two warps as one two-band product: values, then reject reasons.
+
+    They are warped separately so the values can be averaged while the reason
+    codes stay nearest, but they are given the same bounds, resolution and CRS,
+    so the grids must agree. If they ever did not, the bands would describe
+    different ground and the reason band would explain the wrong pixels - so
+    that is checked rather than trusted.
+    """
+    values = gdal.Open(values_path)
+    reasons = gdal.Open(reason_path)
+    if (values.RasterXSize, values.RasterYSize) != (reasons.RasterXSize, reasons.RasterYSize):
+        shapes = (
+            f"{values.RasterXSize}x{values.RasterYSize} and "
+            f"{reasons.RasterXSize}x{reasons.RasterYSize}"
+        )
+        values = reasons = None
+        raise ValueError(f"the value and reason warps landed on different grids ({shapes})")
+
+    dataset = gdal.GetDriverByName("GTiff").Create(
+        output_path, values.RasterXSize, values.RasterYSize, 2, gdal.GDT_Float32,
+        options=creation_options,
+    )
+    dataset.SetGeoTransform(values.GetGeoTransform())
+    dataset.SetProjection(values.GetProjection())
+    first = dataset.GetRasterBand(1)
+    first.SetNoDataValue(float("nan"))
+    first.WriteArray(values.GetRasterBand(1).ReadAsArray())
+    dataset.GetRasterBand(2).WriteArray(reasons.GetRasterBand(1).ReadAsArray())
+    dataset.FlushCache()
+    dataset = None
+    values = reasons = None
+
+
 def warp_swath(
     *,
     values: np.ndarray,
@@ -437,48 +473,14 @@ def warp_swath(
     lat_path = str(scratch / "swath_latitude.tif")
     lon_path = str(scratch / "swath_longitude.tif")
     vrt_path = str(scratch / "swath_values.vrt")
+    warped_values_path = str(scratch / "swath_warped_values.tif")
+    warped_reason_path = str(scratch / "swath_warped_reason.tif")
 
-    if categorical is None:
-        _write_value_tiff(value_path, values)
-    else:
-        # Both bands go through one warp, so the companion lands on exactly the
-        # grid the values did. Nearest resampling throughout, because a code is
-        # not a quantity and averaging two reasons gives a third one that means
-        # nothing.
-        _write_value_tiff(value_path, values, companion=categorical)
-        resampling = "near"
     _write_geolocation_tiff(lat_path, lat[::geoloc_step, ::geoloc_step])
     _write_geolocation_tiff(lon_path, lon[::geoloc_step, ::geoloc_step])
 
     # See GEOLOCATION_STEPS: a sample of an n x n block is read as its centre.
     sample_offset = -(geoloc_step - 1) / 2.0
-
-    vrt = gdal.Translate(vrt_path, value_path, format="VRT")
-    vrt.SetMetadata(
-        {
-            "SRS": _GEOLOCATION_SRS,
-            "X_DATASET": lon_path,
-            "X_BAND": "1",
-            "Y_DATASET": lat_path,
-            "Y_BAND": "1",
-            "PIXEL_OFFSET": str(sample_offset),
-            "LINE_OFFSET": str(sample_offset),
-            "PIXEL_STEP": str(geoloc_step),
-            "LINE_STEP": str(geoloc_step),
-            "GEOREFERENCING_CONVENTION": "PIXEL_CENTER",
-        },
-        "GEOLOCATION",
-    )
-    vrt.FlushCache()
-    vrt = None
-
-    # GDAL's geolocation warp writes hole-filling work files to CPL_TMPDIR, or
-    # to the current directory when that is unset. In a read-only container
-    # neither is writable and **the hole fill fails silently** - one ERROR 4 in
-    # the log and a result with holes in it. Pointing it at the scratch
-    # directory, which the caller already had to provide, removes the question.
-    previous_tmpdir = gdal.GetConfigOption("CPL_TMPDIR")
-    gdal.SetConfigOption("CPL_TMPDIR", str(scratch))
 
     options: dict[str, Any] = {
         "format": "GTiff",
@@ -486,7 +488,6 @@ def warp_swath(
         "geoloc": True,
         "xRes": float(resolution),
         "yRes": float(resolution),
-        "resampleAlg": resampling,
         "dstNodata": float("nan"),
         "outputType": gdal.GDT_Float32,
         "creationOptions": list(creation_options or ["TILED=YES", "COMPRESS=DEFLATE", "PREDICTOR=3"]),
@@ -497,8 +498,64 @@ def warp_swath(
         # Either a count or GDAL's own "ALL_CPUS"; both are valid here.
         options["warpOptions"] = [f"NUM_THREADS={num_threads}"]
 
+    def warp_one(array: np.ndarray, destination: str, how: str) -> None:
+        """One array onto the target grid, through its own geolocation VRT."""
+        _write_value_tiff(value_path, array)
+        vrt = gdal.Translate(vrt_path, value_path, format="VRT")
+        vrt.SetMetadata(
+            {
+                "SRS": _GEOLOCATION_SRS,
+                "X_DATASET": lon_path,
+                "X_BAND": "1",
+                "Y_DATASET": lat_path,
+                "Y_BAND": "1",
+                "PIXEL_OFFSET": str(sample_offset),
+                "LINE_OFFSET": str(sample_offset),
+                "PIXEL_STEP": str(geoloc_step),
+                "LINE_STEP": str(geoloc_step),
+                "GEOREFERENCING_CONVENTION": "PIXEL_CENTER",
+            },
+            "GEOLOCATION",
+        )
+        vrt.FlushCache()
+        vrt = None
+        gdal.Warp(destination, vrt_path, resampleAlg=how, **options)
+
+    # GDAL's geolocation warp writes hole-filling work files to CPL_TMPDIR, or
+    # to the current directory when that is unset. In a read-only container
+    # neither is writable and **the hole fill fails silently** - one ERROR 4 in
+    # the log and a result with holes in it. Pointing it at the scratch
+    # directory, which the caller already had to provide, removes the question.
+    previous_tmpdir = gdal.GetConfigOption("CPL_TMPDIR")
+    gdal.SetConfigOption("CPL_TMPDIR", str(scratch))
+
     try:
-        gdal.Warp(output_path, vrt_path, **options)
+        if categorical is None:
+            warp_one(values, output_path, resampling)
+        else:
+            # Two warps, not one. The values get the resampling that was asked
+            # for and the companion gets nearest, because a reject code is not a
+            # quantity and the average of two reasons is a third reason that
+            # means nothing.
+            #
+            # They used to share a single nearest warp, which kept the two bands
+            # on the same grid for free but imposed nearest on the values. On the
+            # 1 km SLSTR grid that leaves output cells with no source pixel at
+            # all: measured, 0.6-0.9 % of an LST frame and **32.9 % of a
+            # dual-view SST frame**, in runs that line up along the scan and read
+            # as dashes. The second warp costs another pass and gives those cells
+            # back. Both warps are given the same bounds, resolution and CRS, so
+            # the grids still agree - asserted below rather than assumed.
+            warp_one(values, warped_values_path, resampling)
+            warp_one(categorical, warped_reason_path, "near")
+            _combine_bands(
+                values_path=warped_values_path,
+                reason_path=warped_reason_path,
+                output_path=output_path,
+                creation_options=list(
+                    creation_options or ["TILED=YES", "COMPRESS=DEFLATE", "PREDICTOR=3"]
+                ),
+            )
     finally:
         gdal.SetConfigOption("CPL_TMPDIR", previous_tmpdir)
 
@@ -520,7 +577,8 @@ def warp_swath(
                 "use gives exactly this: a correctly sized raster with nothing in it, and no error."
             )
 
-    for temporary in (value_path, lat_path, lon_path, vrt_path):
+    for temporary in (value_path, lat_path, lon_path, vrt_path,
+                      warped_values_path, warped_reason_path):
         gdal.Unlink(temporary) if temporary.startswith("/vsi") else Path(temporary).unlink(missing_ok=True)
     return output_path
 

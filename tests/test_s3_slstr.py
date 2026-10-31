@@ -403,3 +403,27 @@ def test_a_product_with_the_pair_is_unaffected(tmp_path):
         archive.writestr("P.SEN3/xfdumanifest.xml", b"<xfdu:XFDU/>")
 
     assert "_DUAL_" in find_member(sen3_root(str(product)), "*_DUAL_*.nc")
+
+
+def test_the_slstr_products_ask_for_average_and_a_caller_still_wins():
+    """Q4: the SLSTR values are averaged; everything else keeps nearest.
+
+    A product default only fills in where the caller named nothing, so a
+    request for nearest is still honoured.
+    """
+    from pysent.s3 import _resampling_for, _resolve_processing_settings
+
+    default = _resolve_processing_settings({})
+    assert default["resampling"] == "near"
+    for product in ("lst", "sst"):
+        options = normalize_sentinel_s3_product_map({product: {}})[product]
+        assert _resampling_for(options, default) == "average", product
+    # A grid product is untouched by this.
+    ndvi = normalize_sentinel_s3_product_map({"ndvi": {}})["ndvi"]
+    assert _resampling_for(ndvi, default) == "near"
+
+    asked = _resolve_processing_settings({"resampling": "near"})
+    lst = normalize_sentinel_s3_product_map({"lst": {}})["lst"]
+    assert _resampling_for(lst, asked) == "near"
+    bilinear = _resolve_processing_settings({"resampling": "bilinear"})
+    assert _resampling_for(lst, bilinear) == "bilinear"
