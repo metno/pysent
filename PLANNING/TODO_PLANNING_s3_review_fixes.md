@@ -9,7 +9,7 @@ Phase 1 on its own.
 |---|---|
 | Branch / worktree | `feature/s3-review-fixes` → `../pysent.worktrees/s3-review-fixes` |
 | Base | `main` @ `3a147c3` (2026-10-30) |
-| Status | **Audit done; Phase 1 next.** |
+| Status | **Phase 1 done** (R1, the blocker). Phase 2 next. |
 | Audit evidence | [`s3_review_audit/`](s3_review_audit/) |
 | Comes from | the FastAPI-mapserver study's report, relayed 2026-10-31; the closed `PLANNING_s5p_s3_pipelines.md` is the code's own plan |
 
@@ -162,7 +162,7 @@ choice, which is the owner's. Phase 6 measures it and shows pictures.
 
 ## B. Phases (one PR each, against `main`)
 
-- [ ] **Phase 1 — R1, the flux flip.** Pick the flux row by matching `lambda0` to the band's nominal
+- [x] **Phase 1 — R1, the flux flip.** Pick the flux row by matching `lambda0` to the band's nominal
   wavelength, so the result is right whichever way the driver hands the table over. Assert the
   position-indexed arrays stay mutually consistent. Redo Phase 6's physical numbers on corrected
   reflectance and report them. Verify the S5P freeze. *Blocks the study: ship first.*
@@ -227,3 +227,35 @@ choice, which is the owner's. Phase 6 measures it and shows pictures.
   on a real product and is exactly as reported (2.10×, 1.56×, 1.27×); R3, R4, R5 and R6 confirmed by
   reading, each with the line numbers above; R2 could not be reproduced because the mounted archive
   holds only 2026 baseline-004 WST frames, and R7 is not yet measured. No code changed.
+
+- **2026-10-31 — Phase 1 (R1, the flux flip).** `flux_row_for_band` matches the table's own
+  `lambda0` against the band's nominal wavelength, so the lookup is right whichever way round the
+  driver hands the table over, and a table that cannot be matched within 12 nm raises rather than
+  guessing. Evidence: `s3_review_audit/run.sh flux` and `… numbers`.
+  - **Three new tests, three fail on `main`** — two on the missing helper, and one through
+    `solar_flux_per_pixel` itself, which on `main` returns band 18's flux (1018 in the stub's
+    scheme) where band 4's was asked for. That last one is the real regression test: it goes
+    through the function the pipeline calls, on a stub SEN3 zip whose rows are in file order.
+  - **The physical numbers, redone** on the benchmark frame at decimate 8, open water (not land, not
+    bright):
+
+    | | water p01/p50/p99 | share above 1.0 |
+    |---|---|---:|
+    | before, red (665 nm) | 0.040 / 0.057 / 0.269 | 2.75 % |
+    | before, green (560 nm) | 0.087 / 0.123 / 0.353 | 7.80 % |
+    | before, blue (490 nm) | 0.180 / 0.275 / 0.609 | **23.69 %** |
+    | **after, red** | **0.032 / 0.045 / 0.211** | **0.33 %** |
+    | **after, green** | **0.056 / 0.079 / 0.226** | **0.14 %** |
+    | **after, blue** | **0.086 / 0.131 / 0.289** | **0.25 %** |
+
+    Whole-frame medians move from 0.221 / 0.294 / 0.463 to 0.174 / 0.188 / 0.220 (R/G/B). Still
+    bluer than red, which is what Rayleigh scattering does to a top-of-atmosphere spectrum, but no
+    longer twice as blue. **Every over-unity pixel is still flagged `bright`**, so the substituted
+    Phase 6 check the owner accepted on 2026-10-31 holds on the corrected numbers — and holds more
+    convincingly, since the over-unity share fell from 23.7 % to 0.25 % in blue.
+  - **The S5P freeze holds**: four cases (committed NO2 window, archive NO2, archive CO, archive
+    O3), eight rasters, **zero differing pixel hashes** against `main`, hashing pixels separately
+    from tags because the provenance tags carry a version string. `run.sh freeze` reproduces it.
+  - Full suite in the CI container: **421 passed, 13 skipped**.
+  - **No default changed.** The `0 – 0.6` range and `gamma 0.6` stay exactly as they are, and go to
+    the owner as Q5 with the numbers above — they were chosen on pictures 2.1× too blue.
