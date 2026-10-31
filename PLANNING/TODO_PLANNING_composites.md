@@ -9,7 +9,7 @@ or more products from it; a composite is the opposite shape.
 |---|---|
 | Branch / worktree | `feature/composites` → `../pysent.worktrees/composites` |
 | Base | `main` @ `3a147c3` (2026-10-30) |
-| Status | **Audit done, no code.** Phase 1 is the job shape. |
+| Status | **Audit done, Q1–Q7 answered (2026-10-31).** Phase 1, the job shape, is unblocked. |
 | Audit evidence | [`composites_audit/`](composites_audit/): `catalogue_day.py`, `accumulate.py`, `weights.py` |
 | Comes from | `PLANNING_s5p_s3_pipelines.md` B.9 and Q16, which put composites before the vector products |
 
@@ -189,7 +189,9 @@ a user cannot otherwise tell.
 - [ ] **Phase 1 — The job shape.** `process_sentinel_composite(...)` taking `input_datasets`, a fixed
   region, products and a method. Accumulate sum and count on the region grid, one input at a time,
   writing nothing per input. Idempotency key over the sorted inputs plus the options. Zero-contribution
-  and stub inputs counted, not fatal. The three output files of Q2, plus the count band. *Needs Q1–Q4.*
+  and stub inputs counted, not fatal. The three output files, plus the count band.
+  *Q1–Q4 answered 2026-10-31, so: a caller-supplied window defaulting to one day, a plain mean by
+  default, a required caller-supplied region, and flat one-fact-per-tag provenance.*
 - [ ] **Phase 2 — Sentinel-5P products.** All eleven, reusing their single-granule tables so a
   composite cannot drift from the product it composites.
 - [ ] **Phase 3 — Sentinel-3 products.** The same, with the flag masks in place of a quality
@@ -210,27 +212,56 @@ rather than space. Gap-filling the 20 % a day does not cover.
 ## C. Open questions for the owner
 
 Asked just-in-time, before the phase that needs the answer. *Italics are the recommendation.*
+**All seven were answered on 2026-10-31, each as recommended**, through the decision form at
+`https://claude.ai/code/artifact/dcd2b639-c82b-4599-86cc-960e97fc3bc6` (the answers are stored with
+the page, so they survive the session).
 
 - **Q1 (before Phase 1). Is a daily composite the right product?** A5 measured that one day fills 80 %
   of a Nordic box and that 32 % of the filled cells are a single observation. *A composite over a
   caller-supplied window, defaulting to one day, with the coverage and the per-cell count reported and
   a count band in the file, so a thin composite is visibly thin.* The alternative is a multi-day
   default, which fills more and averages more but blurs a day's weather.
+  **Answered 2026-10-31: a caller-supplied window, defaulting to one day.** So the window is an input,
+  not a product definition, and the honesty about coverage has to be in the file.
 - **Q2 (before Phase 1). Plain mean or quality-weighted?** *Plain mean as the default, weighted as an
   option.* A6 is the evidence: at the default threshold 96 % of weights are exactly 1.0 and the two
   methods differ by under 2 % of the dynamic range, for double the warp work. This is a deviation from
   B.9 and wants a yes.
+  **Answered 2026-10-31: plain mean as the default, `weighted_mean` as an option.** The deviation from
+  B.9 is accepted; A6 is the reason and stays in the file so a reviewer who expects weighting finds it.
 - **Q3 (before Phase 1). Who chooses the grid?** *The caller must pass a region and resolution.* A
   composite has no single input to derive them from, and two composites of the same region on different
   grids cannot be compared. Should there be named standard regions, as the Synergy products have?
+  **Answered 2026-10-31: the caller must pass a bounding box, an EPSG code and a resolution.** No named
+  regions, and nothing derived from the inputs: an absent or partial `region` is an error, not a
+  default. Comparability is the service's to maintain by sending the same region each time.
 - **Q4 (before Phase 1). What goes in the provenance?** 23 input names is a long GDAL tag. *A count,
   the time window, the sorted-input digest used as the idempotency key, and the list in the result dict
   rather than in the file tags* — with the digest making the file traceable to an exact input set.
+  **Answered 2026-10-31: count, time window and digest in the tags; the full list in the result.** With
+  the owner's note: *"for the provenance we will design a specific JSON-LD string which will be
+  connected to an ad-hoc PROV-O ontology and our own vocabulary — for now we keep the info we want,
+  later on we will study the right format."* Phase 1 therefore records the **facts**, each as its own
+  flat `PYSENT_COMPOSITE_*` tag with one meaning per tag, and does not invent a serialisation: a tag
+  that holds one fact maps onto a PROV-O term later, whereas a composed string would have to be
+  re-parsed. Nothing in Phase 1 may make that mapping harder — no packing two facts into one tag, no
+  abbreviations, times in ISO 8601 UTC.
 - **Q5 (Phase 4). Interactive or bulk?** A4 measured 2.4 s and 136 MB for 8 granules at 0.05°.
   *Interactive for a region at 0.05° or coarser, bulk otherwise.*
+  **Answered 2026-10-31: interactive at 0.05° or coarser, bulk otherwise.** Phase 4 sets the
+  `inputs × cells` cap that makes this safe.
 - **Q6 (Phase 2). Which products get composites?** *All eleven Sentinel-5P, then Sentinel-3.* Some are
   more meaningful composited than others — a cloud fraction composite is a climatology, an aerosol
   index composite is defensible.
+  **Answered 2026-10-31: all eleven Sentinel-5P, then Sentinel-3.** Breadth comes from reusing the
+  single-granule product tables, so Phase 2 adds no per-product science.
+
+**Q7, carried over from the Sentinel-3 plan** and not a composites question: the OLCI true-colour
+acceptance gate. **Answered 2026-10-31: the substituted physical check is accepted and true colour is
+catalogued like the rest.** The original gate — agreement with the Level-2 reflectance of the same
+scene — was unmeetable because Level-2 is water-leaving reflectance after atmospheric correction
+(r = −0.06, medians 127× apart). The substitute measured: 0.040–0.254 over open water at 665 nm, and
+100 % of over-unity pixels carrying the `bright` flag. Recorded in `PLANNING_s5p_s3_pipelines.md`.
 
 ---
 
@@ -272,3 +303,20 @@ Asked just-in-time, before the phase that needs the answer. *Italics are the rec
     negative *longitude* is fine, and what actually fails is the **combination** with a title filter and
     any value outside ±90 in the second argument. The lesson is in the method, not the finding — the
     first measurement was taken from one query shape and generalised.
+
+- **2026-10-31 — Q1-Q7 answered, all as recommended.** Asked through a decision form published as an
+  artifact (<https://claude.ai/code/artifact/dcd2b639-c82b-4599-86cc-960e97fc3bc6>) rather than in
+  prose, one card per question carrying the measurement, the options and what each option commits the
+  library to; the answers are stored with the page. Recorded in section C in place, with the date.
+  Three consequences for the code:
+  - **Q2 settles the deviation from B.9**: plain mean is the default, `weighted_mean` an option. The
+    A6 measurement is the justification and stays in the plan for a reviewer who expects weighting.
+  - **Q3 makes `region` a required argument** with no fallback: not derived from the inputs, no named
+    presets. A missing or partial region is an error.
+  - **Q4 shapes the provenance**, through the owner's note: a JSON-LD serialisation bound to an ad-hoc
+    PROV-O ontology and MET's own vocabulary is planned, but not now. So Phase 1 records the facts as
+    flat `PYSENT_COMPOSITE_*` tags, **one fact per tag**, ISO 8601 UTC times, no abbreviations and no
+    composed strings — anything packed would have to be re-parsed when the mapping is designed.
+- **2026-10-31 — Q7 closed in the Sentinel-3 plan.** The OLCI true-colour acceptance gate, left open at
+  that plan's close-out, was accepted in the same form: the substituted physical check stands and true
+  colour is catalogued. `PLANNING_s5p_s3_pipelines.md` is updated, so nothing is held back there.
