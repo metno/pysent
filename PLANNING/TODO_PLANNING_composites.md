@@ -9,7 +9,7 @@ or more products from it; a composite is the opposite shape.
 |---|---|
 | Branch / worktree | `feature/composites` → `../pysent.worktrees/composites` |
 | Base | `main` @ `3a147c3` (2026-10-30) |
-| Status | **Audit done, Q1–Q7 answered (2026-10-31).** Phase 1, the job shape, is unblocked. |
+| Status | **Phase 1 done (2026-10-31).** `pysent.composite` composites Sentinel-5P; Phase 2 adds the other ten products. |
 | Audit evidence | [`composites_audit/`](composites_audit/): `catalogue_day.py`, `accumulate.py`, `weights.py` |
 | Comes from | `PLANNING_s5p_s3_pipelines.md` B.9 and Q16, which put composites before the vector products |
 
@@ -138,6 +138,55 @@ under 2 % of the dynamic range at the 99th percentile and nothing at all typical
 makes a **plain mean of valid pixels the default** and the weighted mean an option, which is a
 deviation from B.9 and the reason is this measurement.
 
+### A9. At the NO2 default threshold a day covers 40 %, not 80 % ✅
+
+*Measured 2026-10-31 during Phase 1, on the same eight granules, through
+`process_sentinel_composite`.* A5's 80 % was measured at `qa_min` **0.5**, which is what the audit
+script used - not at **0.75**, which is the mission's recommendation and the product default:
+
+| `qa_min` | Coverage of the Nordic box | Observations per filled cell | Max | Single-observation cells |
+|---|---:|---:|---:|---:|
+| 0.5 (A5's figure) | **80.29 %** | 1.68 | 3 | 32.5 % |
+| **0.75 (the default)** | **40.28 %** | 1.57 | **2** | **43.4 %** |
+
+So the product a caller gets by default is **three fifths empty**, and of the two fifths it fills,
+**43 % is a single satellite pass**. Nothing is wrong with the code or the threshold - the threshold
+is the mission's and is frozen - but Q1 was answered against the 80 % figure, and 40 % is the honest
+one for the default product. Raised with the owner rather than quietly absorbed; it does not change
+Phase 1, and the count band and the coverage figure are exactly what makes it visible.
+
+### A10. The coverage curve, measured on seven consecutive days ✅
+
+*Measured 2026-10-31. Evidence: `composites_audit/coverage_window.py`, which reads the granules from
+the mounted NBS archive (`/lustre/storeA/NBS2/.../nbsArchive/S5P`, 4 079 S5P files, 18–23 NO2
+granules a day for 2026-10-24 to 2026-10-30) and so downloads nothing.* Nordic box at 0.05°.
+
+| Window | Coverage at **qa 0.75** | Single-obs cells | Coverage at **qa 0.5** | Single-obs cells |
+|---|---:|---:|---:|---:|
+| 1 day | **28.4 %** | **58 %** | 70.0 % | 19 % |
+| 2 days | 36.9 % | 44 % | 77.8 % | 12 % |
+| 3 days | 48.8 % | 34 % | 78.5 % | 7 % |
+| 4 days | 57.7 % | 29 % | **80.8 %** | 3 % |
+| 5 days | **65.1 %** | 19 % | 80.8 % | 3 % |
+| 6 days | 67.1 % | 16 % | 80.8 % | 3 % |
+| 7 days | 69.6 % | 15 % | 80.8 % | 3 % |
+
+Three things follow.
+
+**There is a hard ceiling at 80.8 %**, reached at four days and never exceeded however many days are
+added. The remaining **19.2 % of the box is not retrievable at all** in late October — no sunlight at
+those latitudes, so no retrieval exists to composite. A coverage figure means little without it: 65 %
+of the box is **80 % of what the instrument can see**.
+
+**One day at the product's own threshold is not a map.** 28.4 % of the region, and 58 % of that is a
+single pass. Per day the range over the week is 20.0 % to 38.2 %; A9's 40.3 % came from an
+eight-granule sample and was a good day, not a typical one.
+
+**The knee of the curve is five days** (65.1 %, 19 % single, mean 3.3 observations per cell). Days six
+and seven add 2.0 and 2.6 points. At `qa_min` 0.5 the picture is different — one day already gives
+70 % — so "is a daily product viable" is really "at which threshold", which is a domain question and
+not ours to settle.
+
 ### A7. The existing job model cannot express this shape 📖
 
 Every entry point — `process_sentinel_s1_safe`, `…_s2_safe`, `…_s5p_netcdf`, `…_s3_safe` — takes a
@@ -186,7 +235,7 @@ a user cannot otherwise tell.
 
 ### B.3 Phases (one PR each, against `main`)
 
-- [ ] **Phase 1 — The job shape.** `process_sentinel_composite(...)` taking `input_datasets`, a fixed
+- [x] **Phase 1 — The job shape.** `process_sentinel_composite(...)` taking `input_datasets`, a fixed
   region, products and a method. Accumulate sum and count on the region grid, one input at a time,
   writing nothing per input. Idempotency key over the sorted inputs plus the options. Zero-contribution
   and stub inputs counted, not fatal. The three output files, plus the count band.
@@ -223,6 +272,14 @@ the page, so they survive the session).
   default, which fills more and averages more but blurs a day's weather.
   **Answered 2026-10-31: a caller-supplied window, defaulting to one day.** So the window is an input,
   not a product definition, and the honesty about coverage has to be in the file.
+  **Revisited 2026-10-31, after A10 measured the coverage curve: the default window becomes five
+  days, not one** (65.1 % coverage and 19 % single-observation cells, against 28.4 % and 58 % for one
+  day; days six and seven add 2.0 and 2.6 points for 40 % more work). Accepted by the owner together
+  with: **no default changes elsewhere**, a **`min_observations` option in Phase 2** (default off),
+  and **two questions to the expert review** - whether a mean of one or two retrievals is publishable
+  as a map, and whether the mean is the right reduction for plume products (SO2, aerosol index) or a
+  maximum is. The five-day default is a Phase 1 follow-up, since Phase 1 shipped with no window
+  parameter at all - the caller passes the input list.
 - **Q2 (before Phase 1). Plain mean or quality-weighted?** *Plain mean as the default, weighted as an
   option.* A6 is the evidence: at the default threshold 96 % of weights are exactly 1.0 and the two
   methods differ by under 2 % of the dynamic range, for double the warp work. This is a deviation from
@@ -320,3 +377,51 @@ scene — was unmeetable because Level-2 is water-leaving reflectance after atmo
 - **2026-10-31 — Q7 closed in the Sentinel-3 plan.** The OLCI true-colour acceptance gate, left open at
   that plan's close-out, was accepted in the same form: the substituted physical check stands and true
   colour is catalogued. `PLANNING_s5p_s3_pipelines.md` is updated, so nothing is held back there.
+
+- **2026-10-31 — Phase 1 (the job shape).** Branch `feature/composites-phase1`. New
+  `src/pysent/composite.py` with `process_sentinel_composite`, `normalize_composite_region`,
+  `composite_input_digest`, `composite_key` and `build_composite_output_filename`; 34 tests in
+  `tests/test_composite.py`. Sentinel-5P only, as B.1 scoped it: an input of another platform is
+  refused by name with a message pointing at Phase 3, rather than being read by code that has never
+  been measured against it. Full suite in the CI container: **452 passed, 13 skipped** with numba and
+  **448 passed, 17 skipped** without.
+  - **The product is two bands**, the composite and the per-cell observation count, in one file. A
+    GeoTIFF carries **one no-data value for the whole file**, so the count band cannot have its own
+    and inherits band 1's NaN. Harmless — a count is never NaN, and zero observations is written as
+    a zero — but it is a thing a reader has to know, so the test asserts it rather than hiding it.
+    `write_thumbnail(materialise=True)` is required here, not optional: left to itself the warp
+    resamples both bands and a thumbnail of a count band is a picture of nothing.
+  - **The accumulators are float64** though both input and output are float32. A sum of a few
+    hundred numbers around 1e-4 loses digits in float32 that the division then keeps.
+  - **Memory is flat in the input count, measured through the new entry point**: 1, 2, 4, 8 and 16
+    inputs onto the same 684×187 grid cost 103, 106, 108, 109 and 109 MB peak, while time is linear
+    (0.17 s to 2.24 s, about 0.14 s per input). The median is bit-identical at every input count,
+    which also says the accumulation does not drift. That reproduces A4 through the real code path.
+  - **Two of my own assertions were wrong, and both were worth having.** I asserted the count band
+    would have no no-data value (GeoTIFF does not allow that, above), and I wrote a test fixture
+    whose filename carried a date its time attributes did not — the window test then expected a
+    window the data never had. The fixture now derives its coverage attributes from the same index
+    as its name.
+  - **Deviation from the phase description:** the plan said "the three output files of Q2". Q2 turned
+    out to be the mean question, not the output-shape question; the output shape is the Sentinel-3
+    plan's Q2 and is unchanged — float product, styled copy, thumbnail — so the phase line now just
+    says "the three output files".
+  - **Reproduced on the audit's eight real granules, through the new entry point** (Nordic box at
+    0.05 deg, 4 GB container): **2.2 s, 155 MB peak**, 4 of 8 contributing, coverage **80.29 %**,
+    observations per filled cell mean **1.68** and max **3**, single-observation cells **32.5 %** -
+    the audit's figures to the decimal (A4, A3, A5). The weighted mean on the same inputs cost
+    **3.6 s against 2.2 s** and moved the median from 3.63e-6 to 3.61e-6, **0.55 %**, which is A6
+    again through the real code path.
+  - **And it turned up a new finding, A9:** A5's 80 % coverage was measured at `qa_min` 0.5, not at
+    the product default of 0.75. At the default the same day covers **40.28 %** of the region, the
+    maximum observation count is **2**, and **43.4 %** of filled cells are a single pass. Q1 was
+    answered against the 80 % figure, so this goes back to the owner; it changes no code and no
+    default.
+  - **I first wrote that these granules were gone**, and committed that in the phase commit. They are
+    at the path the memory file records; my search was three directories deep and they are four. The
+    correction is its own commit because the branch was already pushed and a force-push is blocked
+    here. The lesson is to trust the written path over a quick `find`.
+  - **No regression test fails on `main`**, and none should: this is a new module, so the tests
+    cannot fail on a `main` that has nothing to import. The drift guard is
+    `test_a_one_input_composite_is_the_single_granule_product`, which compares the composite of one
+    real granule against `process_sentinel_s5p_netcdf` on the same grid — risk D4's mitigation.
