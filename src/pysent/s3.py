@@ -270,6 +270,9 @@ S3_PRODUCTS.update({
     "lst": {
         "kind": "swath",
         "candidates": (("LST_in.nc", "LST"),),
+        # See _resampling_for: nearest on the 1 km grid leaves cells with no
+        # source pixel, which is what the dashed gaps are.
+        "resampling": "average",
         "geolocation": SLSTR_GEOLOCATION,
         "units": "degC",
         "unit": "celsius",
@@ -326,6 +329,9 @@ S3_PRODUCTS.update({
             },
         },
         "view": "dual",
+        # See _resampling_for: nearest on the 1 km grid leaves cells with no
+        # source pixel, which is what the dashed gaps are.
+        "resampling": "average",
         "candidates": (("*_DUAL_*.nc", "sea_surface_temperature"),),
         "geolocation": ("*_DUAL_*.nc", "lat", "lon"),
         "units": "degC",
@@ -748,6 +754,9 @@ def _resolve_processing_settings(processing_options: dict[str, Any] | None) -> d
     resampling = str(processing.get("resampling") or "near").strip().lower()
     if resampling not in RESAMPLING_METHODS:
         raise ValueError(f"resampling must be one of {', '.join(RESAMPLING_METHODS)}, not {resampling!r}")
+    # A product may carry its own resampling, but only an unasked-for setting
+    # gives way to it: a caller who names one means it.
+    resampling_explicit = processing.get("resampling") not in (None, "")
 
     target_epsg = processing.get("target_epsg")
     target_epsg = str(target_epsg).strip() if target_epsg not in (None, "") else None
@@ -761,6 +770,7 @@ def _resolve_processing_settings(processing_options: dict[str, Any] | None) -> d
         "geoloc_step": geoloc_step,
         "grid_multiplier": grid_multiplier,
         "resampling": resampling,
+        "resampling_explicit": resampling_explicit,
         "target_epsg": target_epsg,
         "target_resolution": target_resolution,
         "overview_factors": overview_factors,
@@ -818,6 +828,25 @@ def _apply_extra_mask(
         selected, _ = flag_selection(raw, table, names, allow_missing=True)
         return selected, f"{spec['variable']} not {','.join(names)}"
     return np.zeros(shape, dtype=bool), spec["variable"]
+
+
+def _resampling_for(options: dict[str, Any], settings: dict[str, Any]) -> str:
+    """How this product's values are resampled onto the grid.
+
+    The library-wide default is nearest, which is the safe choice for a value
+    that might be a code. The SLSTR products say ``average`` instead, because
+    nearest on their 1 km grid leaves output cells with no source pixel at all
+    - measured, 0.6-0.9 % of an LST frame and 32.9 % of a dual-view SST frame,
+    in runs that line up along the scan and read as dashes. Their reject-reason
+    band is warped separately and stays nearest, so no reason code is ever the
+    average of two.
+
+    A caller who names a resampling gets it; a product default only fills in
+    where nothing was asked for.
+    """
+    if settings.get("resampling_explicit"):
+        return settings["resampling"]
+    return str(options.get("resampling") or settings["resampling"])
 
 
 def _swath_reject_codes(
@@ -1197,7 +1226,7 @@ def _process_swath_product(
         warp_swath(
             values=masked, lat=lat, lon=lon, output_path=str(temporary),
             epsg=epsg, resolution=resolution, bounds=bounds,
-            resampling=settings["resampling"], scratch=scratch,
+            resampling=_resampling_for(options, settings), scratch=scratch,
             creation_options=creation_options(settings, float_data=True),
             num_threads=settings["gdal_num_threads"],
             geoloc_step=step,
@@ -1320,7 +1349,7 @@ def _process_rgb_product(
         warp_swath(
             values=values, lat=lat, lon=lon, output_path=str(single),
             epsg=epsg, resolution=resolution, bounds=bounds,
-            resampling=settings["resampling"], scratch=scratch,
+            resampling=_resampling_for(options, settings), scratch=scratch,
             creation_options=["TILED=YES", "COMPRESS=NONE"],
             num_threads=settings["gdal_num_threads"], geoloc_step=step,
             # With nothing kept there is nothing to check: this guard asks

@@ -9,7 +9,7 @@ Phase 1 on its own.
 |---|---|
 | Branch / worktree | `feature/s3-review-fixes` → `../pysent.worktrees/s3-review-fixes` |
 | Base | `main` @ `3a147c3` (2026-10-30) |
-| Status | **All seven items addressed**: R1, R3, R4, R5, R6 fixed; R2 diagnosed (reading it needs Q1 and a sample); R7 measured (the remedy is Q4). |
+| Status | **All seven items addressed and Q1/Q4/Q5 answered.** R1, R3-R7 fixed; R2 diagnosed, and the sample is now in hand. |
 | Audit evidence | [`s3_review_audit/`](s3_review_audit/) |
 | Comes from | the FastAPI-mapserver study's report, relayed 2026-10-31; the closed `PLANNING_s5p_s3_pipelines.md` is the code's own plan |
 
@@ -193,8 +193,8 @@ the table for honesty, not for weight: at 3 974 cells it is too small to general
 - [x] **Phase 5a — R2, the diagnosis.** A product holding a single GHRSST file now says so, and
   names the file and the layout, instead of "no member matches".
 - [ ] **Phase 5b — R2, reading it.** *Needs Q1 and a sample product.*
-- [x] **Phase 6 — R7, the dashed gaps — measured.** The share is in R7 above and the pictures are
-  rendered; the remedy itself is Q4 and waits for the owner. *No code change.*
+- [x] **Phase 6 — R7, the dashed gaps.** Measured, and then fixed the way the owner chose in Q4:
+  a second warp, values averaged and the reason band nearest.
 
 ---
 
@@ -337,3 +337,33 @@ the table for honesty, not for weight: at 3 974 cells it is too small to general
   including the real 6059-second orbit-long filename; **no product of that vintage is on this
   machine**, so the test asserts the diagnosis and not that pysent can read it. Whether it should
   is Q1, and answering "which view is that single file" needs one real product.
+
+- **2026-10-31 — Q5, Q4 and Q1 answered by the owner**, all as recommended. Q5: leave the truecolor
+  style alone and put it in the review study, so nothing here touches `0 – 0.6` or `gamma 0.6`.
+  Q4: the second warp. Q1: fetch a WST sample and then decide.
+- **2026-10-31 — Phase 6 (R7, the fix).** `warp_swath` now runs **two warps** when a categorical
+  companion is given: the values with the resampling that was asked for, the companion with
+  `near`. They share bounds, resolution and CRS, and `_combine_bands` checks the two grids agree
+  rather than trusting it. The single-warp path - which is the only one Sentinel-5P uses - makes
+  exactly the same GDAL calls as before.
+  - **A second finding on the way: the second warp alone changed nothing**, because
+    `_resolve_processing_settings` defaults Sentinel-3 resampling to `near`, so the pipeline was
+    asking for nearest regardless. The forced `near` inside `warp_swath` was belt-and-braces over a
+    request that already said `near`. Closing the gaps therefore needed the SLSTR products to ask
+    for `average`, which is a **per-product default change** and is exactly what Q4 decided. `lst`
+    and `sst` now carry `"resampling": "average"`; `_resampling_for` gives a product default way to
+    an explicit request, so a caller who asks for nearest still gets it, and no grid product and no
+    other swath product is touched.
+  - **End to end on real frames**, through `process_sentinel_s3_safe` with the default mask:
+
+    | | valid cells on `main` | on this branch | gain | time |
+    |---|---:|---:|---:|---|
+    | LST, `S3A_…20261023T134501…` | 316,019 | **363,144** | **+14.9 %** | 6.5 s → 8.7 s |
+    | SST dual, `S3A_…20261023T102002…` | 953 | **1,742** | **+82.8 %** | 3.1 s → 5.7 s |
+
+    The relative gains are larger than R7's raw 0.9 % and 32.9 % because those were measured before
+    masking: once the mask has thinned the data, the cells nearest was dropping are a larger share
+    of what is left.
+  - Three new tests. The value-averaging one fails on `main` with every output cell an exact source
+    value, which is the forced nearest showing itself. Full suite **436 passed, 13 skipped**; S5P
+    freeze re-checked, **zero differing pixel hashes**.

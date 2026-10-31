@@ -22,6 +22,7 @@ from pysent._sen3 import (  # noqa: E402
     sen3_root,
 )
 from pysent._swath import (  # noqa: E402
+    EPSG_LATLON,
     GEOLOCATION_STEPS,
     REFUSED_GEOLOCATION_STEP,
     warp_swath,
@@ -507,3 +508,76 @@ def test_every_olci_type_names_products_that_exist():
         if entry["kind"] == "swath":
             assert entry["candidates"], name
             assert entry["flag_member"] and entry["flag_variable"], name
+
+
+# --------------------------------------------------------------------------- #
+# The values are averaged even when a reason band rides along (item R7)
+# --------------------------------------------------------------------------- #
+def _gradient_swath(rows=60, columns=60):
+    """A swath whose value is its row number, so averaging is visible."""
+    lat = np.repeat(np.linspace(60.0, 60.6, rows)[:, None], columns, axis=1)
+    lon = np.repeat(np.linspace(10.0, 10.6, columns)[None, :], rows, axis=0)
+    values = np.repeat(np.arange(rows, dtype=np.float32)[:, None], columns, axis=1)
+    reasons = np.where(lon > 10.3, 3.0, 0.0).astype(np.float32)
+    return lat, lon, values, reasons
+
+
+def test_the_values_are_averaged_while_the_reason_codes_stay_nearest(tmp_path):
+    """Regression: a reason band used to force nearest on the values too.
+
+    One warp carried both bands, which kept them on the same grid for free but
+    imposed nearest resampling on the measurement. On the 1 km SLSTR grid that
+    drops cells with no source pixel - 0.6-0.9 % of an LST frame and 32.9 % of
+    a dual-view SST frame, in runs that line up along the scan.
+
+    The discriminator here is arithmetic rather than coverage: with the value
+    equal to its row number, an averaged cell lands between two integers and a
+    nearest one never does.
+    """
+    lat, lon, values, reasons = _gradient_swath()
+    output = tmp_path / "averaged.tif"
+    warp_swath(
+        values=values, lat=lat, lon=lon, output_path=str(output),
+        epsg=EPSG_LATLON, resolution=0.02, resampling="average",
+        scratch=tmp_path, categorical=reasons,
+    )
+
+    dataset = gdal.Open(str(output))
+    assert dataset.RasterCount == 2
+    grid = dataset.GetRasterBand(1).ReadAsArray()
+    codes = dataset.GetRasterBand(2).ReadAsArray()
+    dataset = None
+
+    finite = np.isfinite(grid)
+    assert finite.any()
+    # Averaged: at least some cells sit between two source values. On main every
+    # cell is exactly a source value, because the warp was forced to nearest.
+    assert np.any(np.abs(grid[finite] - np.rint(grid[finite])) > 1e-3)
+
+    # The reason band is still categorical: every code is one the source held,
+    # never the average of two.
+    present = codes[np.isfinite(codes)]
+    assert set(np.unique(present).tolist()) <= {0.0, 3.0}
+
+
+def test_a_reason_band_still_lands_on_the_values_grid(tmp_path):
+    """Two warps, one grid: the bands must describe the same ground."""
+    lat, lon, values, reasons = _gradient_swath()
+    output = tmp_path / "pair.tif"
+    warp_swath(
+        values=values, lat=lat, lon=lon, output_path=str(output),
+        epsg=EPSG_LATLON, resolution=0.02, resampling="average",
+        scratch=tmp_path, categorical=reasons,
+    )
+    dataset = gdal.Open(str(output))
+    transform = dataset.GetGeoTransform()
+    width, height = dataset.RasterXSize, dataset.RasterYSize
+    first = dataset.GetRasterBand(1).ReadAsArray()
+    second = dataset.GetRasterBand(2).ReadAsArray()
+    dataset = None
+
+    assert first.shape == second.shape == (height, width)
+    assert transform[1] == pytest.approx(0.02)
+    # Where the values are present the reasons are too: the two warps cover the
+    # same cells, which is what makes the reason band able to explain a pixel.
+    assert np.isfinite(second[np.isfinite(first)]).all()
