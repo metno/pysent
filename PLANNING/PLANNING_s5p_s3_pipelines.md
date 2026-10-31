@@ -568,8 +568,10 @@ Every phase of this plan is done and on `main`. The file is renamed to `PLANNING
 
 **How it reached `main`.** As PR #27, fourteen commits with a tree byte-identical to the tested stack. PRs #18 and #19 merged individually; #20-#26 were closed as superseded after retargeting them to `main` began to conflict. The reason, and the retargeting rule behind it, is written up in `AGENT_MEMORY/06-workflows.md` so the next stack does not repeat it.
 
+**Closed after the fact:**
+- **Phase 6's acceptance gate was not met as written, and the substitute was accepted on 2026-10-31.** The gate required the Level-1 reflectance to be validated against the Level-2 reflectance of the same scene; those are different physical quantities (median ratio 127x, correlation -0.06 over 3.28 M matched pixels), so the gate was unmeetable rather than failed. The substituted physical check — 0.040-0.254 over open water at 665 nm, and 100 % of over-unity pixels carrying the `bright` flag — is what the owner accepted. **True colour is catalogued like the other products; nothing has to be held back.**
+
 **Open, and deliberately so:**
-- **Phase 6's acceptance gate was not met as written.** It required the Level-1 reflectance to be validated against the Level-2 reflectance of the same scene; those are different physical quantities (median ratio 127x, correlation -0.06 over 3.28 M matched pixels). A physical-plausibility check was substituted. **The owner has not yet said whether that clears the gate, so the true-colour layer should stay out of the catalogue even though the code is ready.**
 - **The Sentinel-3 mask defaults are the owner's decision, not a domain validation** (Q12, accepted 2026-10-30). The Sentinel-3 review study can still revise any of them; each is a per-request option.
 - **The Sentinel-5P defaults are frozen** pending the expert review study at <https://ogc-service.wps.met.no/review/s5p-l2>, with four colour-range changes proposed and not applied. Rendering on `main` is byte-identical to the commit the study was built from.
 - **`SL_2_AOD` and `SY_2_AOD` remain `planned`**, as B.1 allowed ("process, low priority").
