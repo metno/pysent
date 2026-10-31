@@ -269,22 +269,26 @@ page <https://claude.ai/code/artifact/e4c5ad04-b47b-459c-8566-b37aca85ae7c>.*
 What the review study asked to be recorded here, measured on the final branch head `d71b550`.
 
 **The work.** One PR, [#31](https://github.com/metno/pysent/pull/31), against `main` @ `3a147c3`,
-one commit per phase:
+**merged 2026-10-31**, one commit per phase. Rebase-merged, as this repository's history is linear,
+so these are the hashes on `main` and not the ones the branch carried:
 
-| Commit | Phase | Item |
+| Commit on `main` | Phase | Item |
 |---|---|---|
-| `51262f6` | 1 | Divide each OLCI band by its own solar flux — **the blocker; pinnable alone** |
-| `15e23c4` | — | The evidence scripts for the findings |
-| `0551b6b` | 2 | Apply the browse mask a caller asks for, and let an empty swath be written |
-| `be90620` | 3, 4 | Restyle a picture as a picture, and make the SST view selectable |
-| `027fb04` | 6 (measure) | Measure what the nearest-neighbour warp loses on SLSTR |
-| `1b05cf5` | 5a | Say so when an SST product holds one file, not a pair |
-| `5e51ddd` | 6 (fix) | Warp the values and the reject reasons separately |
-| `d71b550` | 5b | Read the orbit-long layout as its own view |
+| `62324fa` | 1 | Divide each OLCI band by its own solar flux — **the blocker; pinnable alone** |
+| `606edce` | — | The evidence scripts for the findings |
+| `d78a586` | 2 | Apply the browse mask a caller asks for, and let an empty swath be written |
+| `df13a55` | 3, 4 | Restyle a picture as a picture, and make the SST view selectable |
+| `6752f09` | 6 (measure) | Measure what the nearest-neighbour warp loses on SLSTR |
+| `27e5323` | 5a | Say so when an SST product holds one file, not a pair |
+| `e5865a8` | 6 (fix) | Warp the values and the reject reasons separately |
+| `e9f01e7` | 5b | Read the orbit-long layout as its own view |
+| `e427445` | — | This close-out |
 
-**Merged commit: _pending the owner's merge of #31_.** This is the line the study's
-`scripts/review/run.sh` (`STUDY=s3-l2`) re-pins to; `51262f6` unblocks the full run on its own if
-the rest is still in review.
+**The commit the study pins: `e427445`** — `main` with all seven fixes in it. That is what
+`scripts/review/run.sh` (`STUDY=s3-l2`) re-pins to. `62324fa` unblocks the full run on its own.
+
+The rebase rewrote every hash, so the numbers measured below were taken on the branch head
+`d71b550`, which is `e427445`'s tree exactly — `git diff feature/s3-review-fixes main` is empty.
 
 **Tests**, in the CI image `pysent-ci:noble`, `python3 -m pytest -q` as CI runs it:
 
@@ -341,7 +345,9 @@ region — which `process_sentinel_s3_product` does not offer.
   so `lst` and `sst` took `"resampling": "average"`, which is what Q4 actually decided. **The
   lesson: measure the end-to-end effect of a fix, not only the unit behaviour.** Q5 changed nothing.
   Closed with section E above: 440/13 and 436/17 against main's 418/13 and 414/17, 22 new tests, and
-  the S5P freeze re-verified on `d71b550`. Awaiting the owner's merge for the commit the study pins.
+  the S5P freeze re-verified on `d71b550`.
+- **2026-10-31 — merged.** PR #31 rebase-merged onto `main` as `e427445`, which is the commit the
+  study pins. Tree verified identical to the tested branch head. Plan complete; `TODO_` dropped.
 
 - **2026-10-31 — Phase 1 (R1, the flux flip).** `flux_row_for_band` matches the table's own
   `lambda0` against the band's nominal wavelength, so the lookup is right whichever way round the
@@ -489,3 +495,9 @@ region — which `process_sentinel_s3_product` does not offer.
   - Four tests on stub products (the real one is 663 MB and not committable), plus the measured
     numbers recorded in the test's docstring so they are not lost. Full suite **440 passed, 13
     skipped** with numba, 436/17 without; S5P freeze unchanged.
+
+---
+
+Every phase of this plan is done and on `main` as `e427445`, the commit the review study pins. The
+file is renamed to `PLANNING_s3_review_fixes.md` per the repository's planning rules. One question
+is deliberately left open and belongs to someone else: **Q5**, the truecolor value range and gamma.
