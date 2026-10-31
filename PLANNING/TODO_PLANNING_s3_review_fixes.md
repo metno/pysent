@@ -9,7 +9,7 @@ Phase 1 on its own.
 |---|---|
 | Branch / worktree | `feature/s3-review-fixes` → `../pysent.worktrees/s3-review-fixes` |
 | Base | `main` @ `3a147c3` (2026-10-30) |
-| Status | **Phases 1-4 done.** Phases 5 (R2) and 6 (R7) need the owner (Q1, Q4) and data this machine does not hold. |
+| Status | **All seven items addressed**: R1, R3, R4, R5, R6 fixed; R2 diagnosed (reading it needs Q1 and a sample); R7 measured (the remedy is Q4). |
 | Audit evidence | [`s3_review_audit/`](s3_review_audit/) |
 | Comes from | the FastAPI-mapserver study's report, relayed 2026-10-31; the closed `PLANNING_s5p_s3_pipelines.md` is the code's own plan |
 
@@ -190,8 +190,9 @@ the table for honesty, not for weight: at 3 974 cells it is too small to general
   a `gamma` read from the product's own tag, or refuse it with a message that says why. *Needs Q2.*
 - [x] **Phase 4 — R3, the SST view.** A `view` request option for `sst`, setting variable candidates,
   geolocation and flag member together. *Needs Q3.*
-- [ ] **Phase 5 — R2, the single-file WST layout.** A clear diagnosis always; reading it if the owner
-  wants it. *Needs Q1 and a sample product.*
+- [x] **Phase 5a — R2, the diagnosis.** A product holding a single GHRSST file now says so, and
+  names the file and the layout, instead of "no member matches".
+- [ ] **Phase 5b — R2, reading it.** *Needs Q1 and a sample product.*
 - [x] **Phase 6 — R7, the dashed gaps — measured.** The share is in R7 above and the pictures are
   rendered; the remedy itself is Q4 and waits for the owner. *No code change.*
 
@@ -327,3 +328,12 @@ the table for honesty, not for weight: at 3 974 cells it is too small to general
   `sst_crop_average.png`), and the dashes are plain in the first and gone in the second. The remedy
   is a rendering decision, so it stays with the owner as Q4 - but the SST number raises the question
   from cosmetic to substantive, and the plan says so.
+
+- **2026-10-31 — Phase 5a (R2, the diagnosis).** A product whose GHRSST member carries no view in
+  its name now gets a message that says so, names the file, and points at this plan, instead of
+  "no member of this product matches '*_DUAL_*.nc'". The hint fires only where the pattern asked
+  for a view, the product has GHRSST members, and none of them names one — so a product with the
+  pair is untouched, which a second test asserts. The stub reproduces the study's reported layout,
+  including the real 6059-second orbit-long filename; **no product of that vintage is on this
+  machine**, so the test asserts the diagnosis and not that pysent can read it. Whether it should
+  is Q1, and answering "which view is that single file" needs one real product.
