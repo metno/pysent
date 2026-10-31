@@ -273,3 +273,42 @@ def test_the_slstr_types_are_routable_and_name_real_products():
     ready = supported_sentinel_product_types()
     assert "S3 SL_2_LST" in ready
     assert "S3 SL_2_WST" in ready
+
+
+def test_an_all_masked_swath_frame_can_be_written_instead_of_raising(s3_slstr_lst_window, tmp_path):
+    """Regression: ``on_empty="write"`` swapped one exception for another.
+
+    The empty-scene guard is skipped for ``write``, but the warp was still
+    given ``minimum_valid=1``, and ``warp_swath`` refuses a warp that produced
+    no valid pixel. So a frame whose mask keeps nothing - a winter frame with
+    ``HISOLZEN`` rejected, say - could not be written at all.
+
+    A ``min_value`` above anything the file holds is the deterministic way to
+    keep nothing; the real trigger was a flag option.
+    """
+    products = {"lst": {"extra_masks": ({"member": "LST_in.nc", "variable": "exception",
+                                         "min_value": 10_000},)}}
+
+    with pytest.raises(EmptySceneError):
+        process_sentinel_s3_safe(
+            input_dataset=str(s3_slstr_lst_window),
+            output_dir=tmp_path / "raise",
+            products=products,
+            processing_options={"styled": False, "thumbnail": False},
+        )
+
+    result = process_sentinel_s3_safe(
+        input_dataset=str(s3_slstr_lst_window),
+        output_dir=tmp_path / "write",
+        products=products,
+        processing_options={"styled": False, "thumbnail": False, "on_empty": "write"},
+    )[0]
+
+    assert result["valid_fraction"] == 0.0
+    dataset = gdal.Open(result["path"])
+    values = dataset.GetRasterBand(1).ReadAsArray()
+    dataset = None
+    # An empty product, not a truncated one: the grid is there and every cell
+    # is no-data.
+    assert values.size > 0
+    assert not np.isfinite(values).any()

@@ -9,7 +9,7 @@ Phase 1 on its own.
 |---|---|
 | Branch / worktree | `feature/s3-review-fixes` → `../pysent.worktrees/s3-review-fixes` |
 | Base | `main` @ `3a147c3` (2026-10-30) |
-| Status | **Phase 1 done** (R1, the blocker). Phase 2 next. |
+| Status | **Phases 1 and 2 done.** Phase 3 next, which needs Q2. |
 | Audit evidence | [`s3_review_audit/`](s3_review_audit/) |
 | Comes from | the FastAPI-mapserver study's report, relayed 2026-10-31; the closed `PLANNING_s5p_s3_pipelines.md` is the code's own plan |
 
@@ -166,7 +166,7 @@ choice, which is the owner's. Phase 6 measures it and shows pictures.
   wavelength, so the result is right whichever way the driver hands the table over. Assert the
   position-indexed arrays stay mutually consistent. Redo Phase 6's physical numbers on corrected
   reflectance and report them. Verify the S5P freeze. *Blocks the study: ship first.*
-- [ ] **Phase 2 — R4 and R6, the two unambiguous bugs.** Parse `browse_reject_flags` from the request
+- [x] **Phase 2 — R4 and R6, the two unambiguous bugs.** Parse `browse_reject_flags` from the request
   like `reject_flags`; let `on_empty="write"` write an empty swath product.
 - [ ] **Phase 3 — R5, restyling an RGB product.** Route a three-band product to the RGB writers with
   a `gamma` read from the product's own tag, or refuse it with a message that says why. *Needs Q2.*
@@ -259,3 +259,16 @@ choice, which is the owner's. Phase 6 measures it and shows pictures.
   - Full suite in the CI container: **421 passed, 13 skipped**.
   - **No default changed.** The `0 – 0.6` range and `gamma 0.6` stay exactly as they are, and go to
     the owner as Q5 with the numbers above — they were chosen on pictures 2.1× too blue.
+
+- **2026-10-31 — Phase 2 (R4 and R6).**
+  - **R4**: `browse_reject_flags` is now parsed from the request exactly like `reject_flags`
+    (`"default"` / `"none"` / a list), and asking for it makes the flag names strict, so a typo is
+    an error rather than a silently empty mask. Three tests, all three fail on `main`, where
+    `browse_reject_flags: []` comes back as the default cloud margin.
+  - **R6**: the empty-warp guard is now skipped when nothing was kept. The guard asks "did the warp
+    lose the data?" and a frame whose mask kept no pixel has none to lose; left at 1 it turned
+    `on_empty="write"` into `ValueError: the warp produced 0 valid pixels` — which is the exact
+    message the regression test sees on `main`. Both swath call sites changed; the grid product's
+    path never had the problem.
+  - Full suite **425 passed, 13 skipped**. The S5P freeze is untouched by construction here: the
+    changes are in `s3.py`, which no Sentinel-5P path imports.
