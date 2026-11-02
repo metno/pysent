@@ -197,6 +197,16 @@ The sequence is chosen so that **each phase is validated against an independent 
 next one adds error on top**, and so that the least determined piece comes last, by which time its
 error budget is measurable. It is not ordered by difficulty.
 
+- [x] **Phase 0 - the table generator** (added after Q1 was answered). `tools/rt6s/` builds 6SV 1.1
+  in a container, pinned by checksum, with `Py6S` driving it; `tools/rt6s/check.py` pins the
+  reference case so a rebuild that changes the physics fails loudly. **Verified**: at 490 nm, solar
+  zenith 70, view zenith 20, relative azimuth 90, no aerosols, black ground, 6SV gives path
+  reflectance **0.09609**, `tau_R` **0.15676**, transmittance **0.81451** down and **0.92285** up,
+  spherical albedo **0.12390**. Two numbers to carry into Phase 2: `tau_R` agrees with the audit's
+  analytic formula to four decimals (0.15676 against 0.1561), while the **multiple-scattering path
+  reflectance is about 9 % *below* the single-scattering value** the audit used - the right sign to
+  explain part of A3's 560 nm over-correction - and `T_down * T_up` is **0.75**, so the division A8
+  describes is a 33 % lift, much larger than the 10-15 % estimated there.
 - [ ] **Phase 1 - the radiative-transfer frame, and the gas term.** Generalise tie-point reading to
   any `tie_geometries`/`tie_meteo` field (`solar_zenith` becomes one caller of it). Implement the
   inversion of A8 as the shape of the whole correction, with the Rayleigh and aerosol terms still
@@ -251,11 +261,19 @@ the phase that needs them.*
   deliberately apt-only. The alternative is to add `Py6S` or a generated lookup table as a
   dependency, which buys accepted physics at the cost of the deployment story. A committed table is
   auditable and diffable; a dependency is neither.
+  **Answered 2026-11-02: generate the tables offline with an accepted radiative-transfer code,
+  commit the tables and the script that generated them, and keep no runtime dependency.** This is
+  *not* what the recommendation above said, and the reason for the change is risk 2: a hand-rolled
+  scalar treatment carries a several-per-cent error at blue, which is the band the correction exists
+  for. Generating offline buys accepted physics *and* keeps the apt-only runtime, at the cost of one
+  reproducible offline step. The generation script and the container recipe are committed with the
+  tables, so the numbers remain auditable - the point the original recommendation was defending.
 - **Q2 (Phase 1). Where does the correction live?** *Both, with the option defaulting off:* a new
   `surface_reflectance` product for the physical quantity, and an `atmospheric_correction:
   "none" | "gas" | "rayleigh" | "full"` option on `truecolor` for the picture. The product is what a
   researcher wants; the option is what makes the picture right. Defaulting off keeps the frozen
   Sentinel-3 defaults frozen.
+  **Answered 2026-11-02: both, option defaulting off**, as recommended.
 - **Q3 (Phase 2). The high-air-mass ceiling.** *Produce, with a per-pixel quality band, and refuse
   above a documented solar zenith.* The whole archive is at 63 to 79 degrees (A5), so refusing the
   regime would refuse everything; but a correction that can return negative reflectance has to say
@@ -314,3 +332,15 @@ the phase that needs them.*
   the water-leaving signal (A4). The whole holding is at solar zenith 63-79 degrees, where single
   scattering over-corrects by 0.17 (A5), so the high-air-mass case is the design case. No code
   changed.
+- **2026-11-02 - Q1 and Q2 answered, Phase 0 built.** Q1 came back **against** the plan's own
+  recommendation - generate tables offline with a real radiative-transfer code rather than
+  hand-rolling numpy - because a scalar treatment is several per cent wrong at blue. Built
+  `tools/rt6s`. Three traps cost most of the time, each returning a plausible-looking wrong answer
+  instead of failing: 6SV's own floating-point-exception summary breaks Py6S's output parser
+  (`-ffpe-summary=none`); a `Geometry.User()` without `day`/`month` zeroes the solar term so every
+  reflectance is 0.000; and the sensor defaults to **ground** level, which gives a path reflectance
+  of 0 and an upward transmittance of exactly 1 while the optical depth still reports correctly.
+  `check.py` now fails on each. Also: Py6S 1.9.2 imports `dateutil` without declaring it, and pip
+  cannot upgrade an apt-installed numpy, so the image takes numpy from pip and not from apt.
+  **Deviation from the plan:** Phase 0 did not exist when the phases were written; it was added
+  because Q1's answer made the generator a prerequisite rather than an implementation detail.
