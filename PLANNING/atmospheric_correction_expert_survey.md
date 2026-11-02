@@ -18,6 +18,30 @@ in progress. Nothing is wired into a product and **no existing default output ha
 
 ---
 
+## 0a. What this is for, and the gap that follows from it
+
+The group commissioning this works on **sea ice**, and wants accuracy over sea and ocean ahead of
+land. Two things follow that a reviewer should know before reading anything else.
+
+**Over water the aerosol loading now comes from `OL_2_WFR`'s own per-pixel `w_aer` retrieval**, not
+from the coarse `SY_2_AOD` product. Over the whole holding that choice roughly **doubles** the gain
+from the aerosol tier — the 665 nm residual falls to 0.0121 against 0.0239 from the coarse source,
+66 % off the uncorrected figure instead of 32 % — and improves every band on every one of 21
+frames. A larger gain than any physics in this document, from picking the right reference. See E1b
+for why the choice had to be made at all.
+
+**Nothing here demonstrates accuracy over sea ice, and the reason is not subtle.** The validation
+archive's OLCI frames stop at **68.7 degrees north**, where there is no sea ice in late October.
+OLCI Level-1 has **no ice flag** — ice, snow and cloud all fall under `bright` — and every residual
+in this document **excludes `bright` pixels**. So the bright surfaces the group cares about are
+precisely the ones no number here covers. Two consequences are in the correction's favour: the
+exact inversion (C3) is worth most on a bright surface, where the coupling term reaches 1.106 at a
+reflectance of 0.8 against 1.004 over dark water; and the near-infrared retrieval is required to
+refuse over `bright`, because ice reflects 0.3 to 0.9 where that method assumes zero. But a
+reviewer should read every water number here as *open water*, and treat ice as undemonstrated.
+
+---
+
 ## 0. What the correction is, and what it is not
 
 | | |
@@ -195,14 +219,18 @@ unreadable), using the loading each frame's own `SY_2_AOD` product reports.** Me
 residual against ESA's Level-2, over the frames carrying enough clear pixels of that type and
 covered by an aerosol product, with the number in which the tier improved agreement:
 
-| scene | band | gas+Rayleigh | +aerosol | frames better |
-|---|---|---|---|---|
-| water | 665 | 0.0371 | **0.0239** | **19 / 19** |
-| water | 560 | 0.0512 | **0.0369** | **19 / 19** |
-| water | 490 | 0.0697 | **0.0517** | **19 / 19** |
-| land | 665 | 0.0035 | **0.0034** | 10 / 19 |
-| land | 560 | 0.0117 | **0.0175** | **0 / 20** |
-| land | 490 | 0.0107 | **0.0031** | **19 / 20** |
+| scene | band | gas+Rayleigh | +aerosol | frames better | aerosol source |
+|---|---|---|---|---|---|
+| water | 665 | 0.0353 | **0.0121** | **21 / 21** | `w_aer`, per pixel |
+| water | 560 | 0.0512 | **0.0235** | **21 / 21** | `w_aer`, per pixel |
+| water | 490 | 0.0697 | **0.0386** | **21 / 21** | `w_aer`, per pixel |
+| land | 665 | 0.0035 | 0.0035 | 10 / 19 | `SY_2_AOD`, per frame |
+| land | 560 | 0.0117 | **0.0176** | **0 / 20** | `SY_2_AOD`, per frame |
+| land | 490 | 0.0107 | **0.0031** | **19 / 20** | `SY_2_AOD`, per frame |
+
+The two scenes use different aerosol sources because only water has a per-pixel one. With the
+coarse source used over water as well, for comparison, the water figures were 0.0239, 0.0369 and
+0.0517 — so **the source matters about as much as the tier itself** over water.
 
 Over water every band improves on every frame. Over land 490 nm comes down by a factor of 3.5 and
 665 nm is a wash, but **560 nm gets worse on all twenty frames** - which is the single most
@@ -217,9 +245,10 @@ What makes that reading harder to dismiss is the **spectral shape**: 560 nm is t
 degrades, and both its immediate neighbours improve. An error in our aerosol magnitude or spectral
 slope would not single out one band between two that get better.
 
-Over water the improvement is real and still not sufficient: 0.0697 to 0.0517 at 490 nm leaves a
-residual **fourteen times** the water-leaving signal it is being compared against. See **E2**; the
-two quantities are not the same thing.
+Over water the improvement is large and still not sufficient: 0.0697 to 0.0386 at 490 nm leaves a
+residual **ten times** the water-leaving signal it is being compared against, down from nineteen
+times uncorrected. See **E2**; the two quantities are not the same thing, so part of what is left
+is definitional and no correction will remove it.
 
 ### C10. The caller names the aerosol source; nothing is fetched silently
 
@@ -381,14 +410,29 @@ scatter across that range; a reference-side offset of fixed size would behave ex
 We think the evidence now points at Synergy's 560 nm, and we would rather be told we are wrong
 than ship on our own reading of it.
 
+**E1b. ESA's own two aerosol retrievals disagree by a factor of 2.2 over the same water.**
+On one frame, over the same clear water: `OL_2_WFR`'s `w_aer` member reports `T865` 0.0630 with an
+Ångström exponent of 0.541, which implies an optical depth at 550 nm of **0.0921**. `SY_2_AOD`
+reports **0.0424**. Two processors, one radiance, two answers.
+
+This matters twice over. First, the correction above used the lower figure, so if the water
+product's is the better one, every water pixel was corrected at less than half the loading it
+should have been - a candidate explanation for why the water residual improves by a quarter rather
+than closing. Second, and worse for this whole document: **"validated against ESA" is not a single
+well-defined target over water.** *Which of the two should a correction use, and is there a known
+reason they part company?*
+
 **E2. Can a Rayleigh-and-aerosol correction over water be called anything useful?**
 Over water the atmosphere is up to **195 times** the water-leaving signal (residual 0.063 against a
 signal of 0.0037 at 490 nm). After the full inversion the residual is *larger* than after a crude
 subtraction, because the inversion correctly attributes the leftover aerosol path to the surface and
-then divides by a transmittance of 0.75. The aerosol tier improves this on every band of every
-frame - 0.0668 to 0.0511 at 490 nm - but "improved by a quarter" still leaves a residual **fourteen
-times the signal**, and the two quantities are not the same thing in any case: our surface
-reflectance includes the air-water interface, while water-leaving reflectance is defined below it.
+then divides by a transmittance of 0.75. The aerosol tier, with the per-pixel loading, improves
+this on every band of every frame and by a lot - **0.0697 to 0.0386 at 490 nm, and 0.0353 to 0.0121
+at 665** - but that still leaves a residual **ten times the signal** at 490 nm, and the two
+quantities are not the same thing in any case: our surface reflectance includes the air-water
+interface, while water-leaving reflectance is defined below it. A13 measures that interface term
+directly: **+0.0048** of reflectance at 865 nm remains after ESA's own aerosol is accounted for,
+fifty times ESA's water-leaving reflectance there.
 *Should we ship a water product at all, with its uncertainty stated, or restrict surface
 reflectance to land and point water users at the Level-2 products?*
 

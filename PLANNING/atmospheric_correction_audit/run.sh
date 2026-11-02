@@ -13,6 +13,8 @@
 #   run.sh sweep [n]        A9: residual against solar zenith over n triples
 #   run.sh spectral         A10: the implied aerosol path across Synergy's bands
 #   run.sh aerosol          A6: what the aerosol product holds over the land frame
+#   run.sh retrieval        A11: can the loading be retrieved from Level-1 alone?
+#                               (and the per-pixel T865/A865 reference in WFR)
 #
 # The frames are named here rather than passed in, so a finding is reproduced
 # on the same acquisition it was measured on. They are on the mounted archive
@@ -87,6 +89,19 @@ aerosol)
   set -- $(frame 2026/10/26 "$LAND")
   aod=$(ls "$A/2026/10/26/SY-L2-AOD/"*AOD____20261026T072730_*.zip | head -1)
   python3 -I "$here/aerosol.py" --l1 "$1" --aod "$aod" --syn "$3" --decimate 8 2>&1 |
+    grep -vi "runtimewarning\|nanfunctions\|return np\|invalid value\|divide\|mean of empty\|warning 1"
+  ;;
+retrieval)
+  # Read the decimation before "set --" replaces the positional arguments with
+  # the three product paths. This has bitten twice already.
+  decimate=${2:-8}
+  # The water frame, because the black-pixel assumption and the WFR aerosol
+  # member are both about water.
+  retrieval_day=2026/10/31
+  set -- $(frame "$retrieval_day" "$WATER")
+  aod=$(ls "$A/$retrieval_day/SY-L2-AOD/"*AOD*.zip 2>/dev/null || true)
+  python3 -I "$here/retrieval.py" --l1 "$1" --wfr "$2" --syn "$3" \
+    --decimate "$decimate" ${aod:+--aod $aod} 2>&1 |
     grep -vi "runtimewarning\|nanfunctions\|return np\|invalid value\|divide\|mean of empty\|warning 1"
   ;;
 sweep)
