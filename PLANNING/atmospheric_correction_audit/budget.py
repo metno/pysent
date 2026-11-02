@@ -134,6 +134,48 @@ def aod_field(root, variable, scratch):
     return values
 
 
+def waer_aerosol(wfr_root, shape, scratch):
+    """Per-pixel aerosol loading from the water product's own retrieval.
+
+    ``OL_2_WFR`` carries a ``w_aer`` member holding ``T865``, the aerosol
+    optical thickness at 865 nm, and ``A865``, the Angstrom exponent, **on the
+    same instrument grid as the radiance** and 75 to 79 % populated over clear
+    water. That is a per-pixel loading where :func:`frame_aerosol` gives one
+    number for a whole frame off a coarse unaligned grid that was 9 % populated
+    over the frame this was measured on.
+
+    Returned at 550 nm, because that is the axis the table is built on:
+    ``tau550 = T865 * (550/865) ** -A865``.
+
+    **The two ESA products disagree.** On the water frame, this route gives a
+    550 nm depth of 0.092 and the coarse product gives 0.042 - a factor of 2.2
+    over the same water, from two processors sharing one radiance. The owner's
+    decision is to believe this one over water, on the grounds that it is
+    per-pixel, on the right grid, eight times better covered, and produced by
+    the processor specialised for water.
+    """
+    fields = {}
+    for variable in ("T865", "A865"):
+        local = extract_member(wfr_root, find_member(wfr_root, "w_aer.nc"), scratch)
+        dataset = open_sen3_variable(local, variable)
+        band = dataset.GetRasterBand(1)
+        decimate = max(1, band.YSize // max(1, shape[0]))
+        values = read_packed(band, decimate=decimate, log10=False)
+        dataset = None
+        if values.shape != shape:
+            values = values[: shape[0], : shape[1]]
+        fields[variable] = values
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        depth = fields["T865"] * (550.0 / 865.0) ** (-fields["A865"])
+    usable = np.isfinite(depth) & np.isfinite(fields["A865"]) & (fields["T865"] > 0)
+    return {
+        "optical_depth_550": np.where(usable, depth, np.nan),
+        "angstrom": np.where(usable, fields["A865"], np.nan),
+        "usable": usable,
+    }
+
+
 def frame_aerosol(aod_path, latitude, longitude, scratch):
     """The loading the aerosol product reports over this frame, as two numbers.
 
@@ -340,12 +382,39 @@ def main() -> int:
             continue
         kind = reference[0]
         root = sen3_root(reference[1])
+
+        # Over water, take the loading from the water product's own per-pixel
+        # retrieval rather than the coarse product's one-number-per-frame; over
+        # land there is no such field, so the coarse product stands. The two
+        # disagree by a factor of 2.2 and this is the owner's decision between
+        # them - see waer_aerosol.
+        scene_aerosol, source = aerosol, "the coarse aerosol product, per frame"
+        if kind == "wfr":
+            try:
+                per_pixel = waer_aerosol(root, shape, scratch)
+            except (ValueError, RuntimeError) as error:
+                print(f"    (no per-pixel aerosol in this WFR: {error})")
+            else:
+                covered = per_pixel["usable"] & mask
+                if covered.sum() >= 100:
+                    scene_aerosol = per_pixel
+                    source = (
+                        f"WFR w_aer, per pixel, on "
+                        f"{100.0 * covered.sum() / max(1, int(mask.sum())):.0f} % of this scene; "
+                        f"median AOD(550) "
+                        f"{np.nanmedian(np.where(covered, per_pixel['optical_depth_550'], np.nan)):.4f}"
+                        f", Angstrom "
+                        f"{np.nanmedian(np.where(covered, per_pixel['angstrom'], np.nan)):.3f}"
+                    )
+
         print(f"=== {scene}: Level-1 against {kind.upper()} "
               f"({'water-leaving' if kind == 'wfr' else 'surface directional'} reflectance)")
+        if scene_aerosol is not None:
+            print(f"    aerosol from {source}")
         print(f"{'band':6s} {'nm':>5s} {'TOA':>8s} {'T_gas':>7s} {'rho_R(ss)':>10s} "
               f"{'rho_R(6S)':>10s} {'T_dn*T_up':>10s} {'surface':>9s} {'L2':>8s} "
               f"{'residual':>9s} {'r(TOA,L2)':>10s} {'r(corr,L2)':>11s}"
-              + ("" if aerosol is None else
+              + ("" if scene_aerosol is None else
                  f" {'+aerosol':>9s} {'residual':>9s} {'r':>7s}"))
         for b in BANDS:
             nm = BAND_WAVELENGTHS[b]
@@ -383,15 +452,15 @@ def main() -> int:
             )
             stats = [np.nanmedian(np.where(keep, x, np.nan)) for x in columns]
             extra = ""
-            if aerosol is not None:
+            if scene_aerosol is not None:
                 # The same inversion with the aerosol increment added on top,
                 # at the loading the aerosol product reports for this frame.
                 hazy = atmosphere_terms(
                     platform, b, pressure_hpa=pressure, solar_zenith_deg=sza,
                     view_zenith_deg=oza, relative_azimuth_deg=azimuth,
                     ozone_kg_m2=ozone, water_kg_m2=vapour,
-                    optical_depth_550=aerosol["optical_depth_550"],
-                    angstrom=aerosol["angstrom"],
+                    optical_depth_550=scene_aerosol["optical_depth_550"],
+                    angstrom=scene_aerosol["angstrom"],
                 )
                 with_aerosol = surface_from_toa(toa, **hazy)
                 median = np.nanmedian(np.where(keep, with_aerosol, np.nan))

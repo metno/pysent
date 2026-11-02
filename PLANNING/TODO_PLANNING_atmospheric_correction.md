@@ -269,6 +269,133 @@ physical, rather than chased as a defect.
 
 ---
 
+### A11. The per-pixel aerosol reference was in the water product all along ✅ verified
+
+**This corrects A6 by addition, not by contradiction.** A6 went looking for aerosol in the aerosol
+product and found the optical depth sparse and most of the rest empty. It did not look in
+`OL_2_WFR`, which carries a **`w_aer` member holding `T865`** - aerosol optical thickness at
+865 nm - and **`A865`**, the Ångström exponent, **per pixel on the same 4865-column instrument grid
+as the radiance**, 79 % and 75 % populated over clear water on the water frame. Their `_unc`
+companions are empty, like every uncertainty field in `SY_2_AOD`.
+
+That is a far better reference for a water retrieval than the coarse product: same grid, no
+resampling, eight times the coverage. Phase 4's water acceptance should be measured against it.
+
+Reproduce with `run.sh retrieval`.
+
+### A12. ESA's own two aerosol retrievals disagree by a factor of 2.2 ⚠️ verified, unresolved
+
+On the water frame `20261031T120105`, over the same clear water:
+
+| source | optical depth at 550 nm |
+|---|---|
+| `OL_2_WFR` `w_aer`, from `T865` 0.0630 and `A865` 0.541 | **0.0921** |
+| `SY_2_AOD` `AOD_550`, median over the frame's cells | **0.0424** |
+
+**Phase 3 used the lower one**, because A6 had only found that one. If the water product's figure
+is the better one, every water correction in Phase 3 was applied at less than half the loading it
+should have been - which is a candidate explanation for why the water residual improves by only a
+quarter instead of closing.
+
+This is the second ESA-internal disagreement this plan has turned up, after the 560 nm one in A10,
+and it has the same shape: two processors, one radiance, two answers, and no way to arbitrate from
+our side. It becomes a question for the expert review. It also means **"validate against ESA" is
+not a single well-defined target over water**, which weakens every water number in this plan rather
+than just this one.
+
+### A13. The black-pixel assumption is sound about the water and wrong about the surface ✅ verified
+
+The near-infrared retrieval assumes the water leaves nothing at 865 nm. Checked against ESA's own
+water-leaving reflectance over clear water, that is very nearly true - median **0.0001**, p95
+0.0009, and 665 nm is nearly as black at 0.0003. So the assumption is not the problem.
+
+What *is* left over is not water. Taking ESA's own `T865` and `A865` as truth and subtracting the
+path reflectance they imply, the leftover at 865 nm has median **+0.0048** and p95 +0.041 - fifty
+times ESA's water-leaving reflectance there. That is surface reflection at the air-water interface,
+sun glint, whitecaps and model mismatch, and a black-pixel retrieval hands all of it to the
+aerosol. Measured: our single-band retrieval comes out **+0.010 to +0.031 high in `tau865`**
+depending on the exponent assumed, against a correlation with ESA's `T865` of **0.82 to 0.84**.
+
+So the retrieval gets the *pattern* right and the *level* wrong, by an amount that is now measured
+rather than inferred. A level error is the easier of the two to carry honestly.
+
+**Two bands fix the level and do not recover the slope.** A single black pixel is one measurement
+against two unknowns, which is why the retrieved depth above slides with the exponent it is told to
+assume. 665 nm is nearly as black as 865 over this water (0.0003), and `ln(865/665)` is 0.262
+against 0.165 for `ln(1020/865)`, so **the pair already in the table has more spectral leverage
+than adding the 1020 nm band would** - no regeneration, no new 6SV runs. Solving for both from the
+two together:
+
+| quantity | ours | ESA | correlation |
+|---|---|---|---|
+| `tau865` | **0.0691** | 0.0630 | **+0.838** |
+| Ångström exponent | 1.200 | 0.553 | **+0.369** |
+
+The depth bias falls from +0.021 to **+0.006** - from 33 % to 10 % - at the same correlation. The
+exponent does **not** come back: the median is wrong by more than a factor of two and the
+correlation is 0.37. The reason is in the same place as the level bias. The residual at 665 nm
+after the fit is 0.0026, the same size as A13's leftover, so the spectral slope is being inferred
+from the difference between two small numbers that are both contaminated by surface reflection and
+glint. The slope is what that contamination destroys first.
+
+**So Phase 4's water arm should retrieve the depth from both bands and decline to claim the
+exponent**, taking that from ESA's `A865` where it exists and a stated climatological value
+otherwise. Solved on 67 % of clear water.
+
+### A15. There is no sea ice in the archive this plan validates against ⚠️ scope limit
+
+Raised because the owner's group works on **sea ice** and wants accuracy over sea before land. The
+honest position has to be stated before any sea-ice claim is made:
+
+- **The OLCI holding tops out at 68.7 degrees north** (checked across 2026/10/29 to 11/01; median
+  frame latitude 64.8). In late October the Nordic and Barents ice edge is far north of that, so
+  **none of these frames contains sea ice.**
+- OLCI Level-1 defines **no ice flag**. Its thirteen flags are land, coastline,
+  fresh_inland_water, tidal_region, bright, straylight_risk, invalid, cosmetic, duplicated,
+  sun-glint_risk, dubious, saturated, partially_saturated. Ice, snow and cloud all land in
+  **`bright`**, and nothing in the Level-1 product separates them.
+- **Every number in this plan excludes `bright` pixels.** That was right for validating against
+  Synergy and WFR, and it means the validation says nothing at all about bright surfaces. The
+  bright-but-not-land pixels in these frames - 1 % to 73 % of a frame - are cloud, not ice.
+
+Three consequences, two of which are good news:
+
+1. **The black-pixel aerosol retrieval must refuse over `bright` pixels.** Ice reflects 0.3 to 0.9
+   in the near infrared where the method assumes zero, so it would return a wildly inflated
+   optical depth with no indication of trouble. This is a hard requirement on Phase 4, not a
+   preference.
+2. **The exact inversion matters more over ice than anywhere else.** The coupling term
+   `1/(1 - S*rho_s)` is what a subtraction-based correction drops. Over dark water at
+   `rho_s = 0.03` it is 1.004 and ignorable; over ice at `rho_s = 0.8` with `S = 0.12` it is
+   **1.106**, a 10 % effect. A8's decision to invert exactly rather than subtract was taken for
+   the blue band over land and happens to be most valuable for exactly the surface the owner
+   cares about.
+3. **Validating over sea ice needs frames this archive does not hold.** Nothing was found at
+   higher latitude on the mounted volumes; the `ESAcolhub` global store is content-hashed rather
+   than organised by date or place, so it cannot be searched by latitude cheaply. **This is a
+   question for the owner**: is there an Arctic OLCI source, and is there a sea-ice surface
+   reflectance product to validate against? Without one, the correction can be applied over ice
+   and its physics defended, but its accuracy there cannot be claimed.
+
+### A14. A land retrieval has no dark target to anchor on 🚧 constraint, not a finding
+
+OLCI has **no shortwave-infrared band** - its 21 bands stop at 1020 nm - so the standard
+dark-dense-vegetation method, which anchors red surface reflectance to the 2100 nm band, cannot be
+used. What the darkest clear land actually is, per Synergy on the water frame's land:
+
+| band | p01 | p05 | median |
+|---|---|---|---|
+| 665 nm | **0.0180** | 0.0363 | 0.1082 |
+| 560 nm | 0.0436 | 0.0715 | 0.1388 |
+| 490 nm | 0.0248 | 0.0563 | 0.1207 |
+
+The darkest percentile at 665 nm is 0.018, not zero, and it is *brighter* at 560 than at either
+neighbour. Any land dark-target has to assume a surface reflectance of about 0.02 at 665 rather
+than zero, and the assumption is then the dominant error. This is the reason Phase 4's land arm is
+the weakest of the three and why the climatological fallback matters more than first thought.
+
+---
+
 ## B. Phases (one PR each, against `main`)
 
 The sequence is chosen so that **each phase is validated against an independent reference before the
@@ -420,6 +547,44 @@ error budget is measurable. It is not ordered by difficulty.
   sample of A1's 58 triples, both platforms, and report the residual distribution by band, by
   land/water and by solar zenith. *Acceptance: a table the next reviewer can argue with, and a
   stated regime where we refuse.*
+
+---
+
+## B2. What the correction is for
+
+Stated by the owner on 2026-11-02, and it reorders the rest of the plan: **accuracy over sea and
+ocean matters more than over land, because the group works on sea ice.**
+
+Consequences already acted on:
+
+- **Over water the loading comes from `OL_2_WFR`'s own `w_aer`, per pixel**, not from the coarse
+  `SY_2_AOD` frame median - the owner's decision between the two products of A12. Measured over the
+  whole holding, 55 triples, median absolute residual against the water-leaving reflectance:
+
+  | band | gas+Rayleigh | +aerosol, coarse per frame | +aerosol, **`w_aer` per pixel** | frames better |
+  |---|---|---|---|---|
+  | 665 | 0.0353 | 0.0239 | **0.0121** | **21 / 21** |
+  | 560 | 0.0512 | 0.0369 | **0.0235** | **21 / 21** |
+  | 490 | 0.0697 | 0.0517 | **0.0386** | **21 / 21** |
+
+  The per-pixel source **roughly doubles the improvement at every band** - 66 % off the residual at
+  665 nm against 32 % from the coarse product - and it brings two more frames into the comparison,
+  because `w_aer` covers 74 to 79 % of clear water where the coarse product covered 9 %. On the
+  water frame the correlation against ESA also rises from 0.489 to 0.608 at 665 nm. **This is the
+  single largest gain in the water arm, and it came from choosing the right reference rather than
+  from better physics** - which is worth remembering before reaching for more radiative transfer.
+  Land is unchanged, because there is no equivalent per-pixel field there.
+- **Phase 4's retrieval must refuse over `bright` pixels** (A15), because that is where ice is and
+  the near-infrared black-pixel assumption inverts to nonsense there.
+- **Phase 6's validation must report water and land separately and lead with water**, rather than
+  averaging them into one residual distribution.
+- The land arm's weakness (A14, no shortwave infrared, no dark target) is **no longer the critical
+  path**. A climatological fallback over land is acceptable where it would not have been if land
+  were the priority.
+
+Still open and needing the owner: **an Arctic OLCI source**. A15 establishes that the mounted
+archive stops at 68.7 degrees north and holds no sea ice at all, so nothing in this plan
+demonstrates accuracy over the owner's own surface. The owner has said they will point at one.
 
 ---
 

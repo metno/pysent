@@ -41,6 +41,7 @@ from budget import (  # noqa: E402
     scratch_dir,
     sensing_window,
     tie_field,
+    waer_aerosol,
 )
 from pairs import collect  # noqa: E402
 
@@ -71,7 +72,7 @@ from pysent._sen3 import (  # noqa: E402
 MINIMUM_PIXELS = 20_000
 
 
-def corrected_frame(l1_path, decimate, aod_paths=()):
+def corrected_frame(l1_path, decimate, aod_paths=(), wfr_path=None):
     """Surface reflectance for the three bands, plus the masks and geometry.
 
     With ``aod_paths``, the one whose orbit-long sensing window covers this
@@ -125,7 +126,34 @@ def corrected_frame(l1_path, decimate, aod_paths=()):
                 aerosol = None
             break
 
-    surfaces, aerosol_surfaces = {}, {} if aerosol else None
+    # A per-pixel loading, built the way a pipeline would have to: the water
+    # product's own retrieval where it has one, the coarse product's single
+    # frame value elsewhere. The two disagree by a factor of 2.2 and the
+    # owner's decision is to prefer the water product over water, because it is
+    # per-pixel, on this grid, and far better covered. Which also makes the
+    # fill policy of question E5 concrete rather than hypothetical.
+    depth_field = angstrom_field = None
+    if aerosol is not None and np.isfinite(aerosol["optical_depth_550"]):
+        depth_field = np.full(shape, aerosol["optical_depth_550"], dtype=np.float64)
+        angstrom_field = np.full(shape, aerosol["angstrom"], dtype=np.float64)
+    if wfr_path is not None:
+        try:
+            per_pixel = waer_aerosol(sen3_root(str(wfr_path)), shape, scratch)
+        except (ValueError, RuntimeError):
+            per_pixel = None
+        if per_pixel is not None and per_pixel["usable"].any():
+            if depth_field is None:
+                depth_field = np.full(shape, np.nan)
+                angstrom_field = np.full(shape, np.nan)
+            take = per_pixel["usable"]
+            depth_field = np.where(take, per_pixel["optical_depth_550"], depth_field)
+            angstrom_field = np.where(take, per_pixel["angstrom"], angstrom_field)
+            aerosol = dict(aerosol or {})
+            aerosol["per_pixel_fraction"] = float(take.mean())
+            aerosol.setdefault("optical_depth_550", float(np.nanmedian(depth_field)))
+            aerosol.setdefault("angstrom", float(np.nanmedian(angstrom_field)))
+
+    surfaces, aerosol_surfaces = {}, {} if depth_field is not None else None
     for band in BANDS:
         toa = _toa(root, band, shape, sza, scratch, decimate)
         t_gas = gas_transmittance(
@@ -144,17 +172,14 @@ def corrected_frame(l1_path, decimate, aod_paths=()):
             transmittance_up=terms["transmittance_up"],
             spherical_albedo=terms["spherical_albedo"],
         )
-        if aerosol is not None and np.isfinite(aerosol["optical_depth_550"]):
+        if depth_field is not None:
             hazy = atmosphere_terms(
                 platform, band, pressure_hpa=pressure, solar_zenith_deg=sza,
                 view_zenith_deg=oza, relative_azimuth_deg=azimuth,
                 ozone_kg_m2=ozone, water_kg_m2=vapour,
-                optical_depth_550=aerosol["optical_depth_550"],
-                angstrom=aerosol["angstrom"],
+                optical_depth_550=depth_field, angstrom=angstrom_field,
             )
             aerosol_surfaces[band] = surface_from_toa(toa, **hazy)
-        elif aerosol_surfaces is not None:
-            aerosol_surfaces = None
     return {
         "shape": shape,
         "scratch": scratch,
@@ -242,7 +267,9 @@ def main() -> int:
     for key in sample:
         paths = found[key]
         try:
-            frame = corrected_frame(paths["l1"], args.decimate, aod_paths)
+            frame = corrected_frame(
+                paths["l1"], args.decimate, aod_paths, paths.get("wfr")
+            )
         except Exception as error:
             print(f"{key[0]:18s} unreadable: {type(error).__name__}: {error}")
             continue
