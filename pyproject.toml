@@ -48,5 +48,11 @@ Source = "https://github.com/metno/pysent"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The atmospheric correction's coefficient tables are data, not code: generated
+# offline by 6SV (see tools/rt6s/) and read at processing time, so they have to
+# be installed beside the modules or the correction cannot run from a wheel.
+[tool.setuptools.package-data]
+pysent = ["data/*.csv"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

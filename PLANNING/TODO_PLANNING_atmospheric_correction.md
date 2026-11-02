@@ -207,7 +207,7 @@ error budget is measurable. It is not ordered by difficulty.
   reflectance is about 9 % *below* the single-scattering value** the audit used - the right sign to
   explain part of A3's 560 nm over-correction - and `T_down * T_up` is **0.75**, so the division A8
   describes is a 33 % lift, much larger than the 10-15 % estimated there.
-- [ ] **Phase 1 - the radiative-transfer frame, and the gas term.** Generalise tie-point reading to
+- [x] **Phase 1 - the radiative-transfer frame, and the gas term.** Generalise tie-point reading to
   any `tie_geometries`/`tie_meteo` field (`solar_zenith` becomes one caller of it). Implement the
   inversion of A8 as the shape of the whole correction, with the Rayleigh and aerosol terms still
   zero, so the algebra is in place and testable before any physics is tuned. Then the gas term:
@@ -218,6 +218,36 @@ error budget is measurable. It is not ordered by difficulty.
   per row (Q1). *Acceptance: the gas-only correction moves 560 and 665 nm in the documented
   direction by the documented amount, and a round trip with zero optical depths reproduces TOA
   exactly.*
+  **Done, and it beat its acceptance.** `_atmosphere.py` holds the inversion, the two gas tables and
+  the unit conversions; `_olci_l1.tie_point_field` is the generalised reader and `solar_zenith` is
+  now one caller of it, as is the audit script - a measurement taken with a private copy of the
+  reader proves nothing about the reader that ships. Measured on the A3 land frame
+  (`run.sh budget land`), the gas correction alone:
+
+  | band | T_gas | residual before | residual after |
+  |---|---:|---:|---:|
+  | Oa08 665 nm | 0.9439 | -0.0066 | **-0.0013** |
+  | Oa06 560 nm | 0.8893 | -0.0280 | **-0.0150** |
+  | Oa04 490 nm | 0.9780 | -0.0031 | **+0.0001** |
+
+  All three move towards ESA's answer; 490 nm is now exact to a tenth of a per cent of reflectance
+  and 665 nm is five times closer. **The 560 nm gap halves but does not close** - the remaining
+  -0.015 is the single-scattering Rayleigh over-estimate, which is Phase 2's to fix and which 6SV
+  already says is about 9 % too large before the 33 % transmittance division is applied.
+
+  Two decisions taken here, both recorded because they shape every later phase:
+  - **A negative surface reflectance is kept, not masked.** Where the atmosphere is brighter than
+    the measurement the result goes below zero, and that is a retrieval outcome rather than a
+    failure: ESA's own water-leaving reflectance is negative on 28 % of its valid pixels in the
+    matched scene. Masking them would hide the error distribution and bias every statistic towards
+    agreement. NaN is reserved for a genuinely undefined inversion.
+  - **The air mass is decided by the angle, not its cosine.** `cos(90)` is 6e-17 rather than 0 in
+    floating point, so a cosine test lets a horizon pixel through as an air mass of 1.6e16.
+
+  21 new tests, all failing on `main` (the module does not exist there); the five that carry
+  measured claims check the tables against 6SV at geometries and columns deliberately **off** the
+  generated grid, so they test the interpolation and the unit conversions rather than the table
+  they came from. Suite **461 passed, 13 skipped**. S5P freeze re-checked: zero differing hashes.
 - [ ] **Phase 2 - Rayleigh, properly.** Multiple scattering, the transmittance division, the
   spherical-albedo coupling, pressure from `sea_level_pressure` scaled by per-pixel `altitude`.
   *Acceptance: on the A3 land frame, the residual against `SY_2_SYN` is under 0.01 at all three
@@ -344,3 +374,18 @@ the phase that needs them.*
   cannot upgrade an apt-installed numpy, so the image takes numpy from pip and not from apt.
   **Deviation from the plan:** Phase 0 did not exist when the phases were written; it was added
   because Q1's answer made the generator a prerequisite rather than an implementation detail.
+- **2026-11-02 - Phase 1.** The gas tables came out shaped by measurement rather than by guess:
+  ozone needs **one coefficient per band** because it is Beer-Lambert to one part in ten thousand
+  over 100-400 DU, and water vapour needs **one curve per band** because its transmittance depends
+  only on the column times the air mass. The second of those is 6S's own parameterisation, so the
+  table is lossless with respect to 6S but the collapse is inherited, not tested - said so in the
+  table header rather than presenting a zero disagreement as validation. Band 1 and 2 come out with
+  exactly zero ozone absorption and band 7 with the maximum, which is the Chappuis band in the right
+  place. Two traps in the generator: a Py6S predefined wavelength is `(id, start, end, response)`,
+  so taking the first two elements labelled band 20 as 42961 nm; and the gas tables' units are
+  neither the product's - the OLCI product reports `kg m-2`, 6S takes Dobson units for ozone and
+  `g cm-2` for water, so the conversion lives in exactly one place.
+  **Deviation:** the plan said Phase 1 would show the gas term moving 560 and 665 nm "in the
+  documented direction by the documented amount". It moved all three bands and closed 490 nm
+  entirely (+0.0001), which the plan had not predicted - so the acceptance was met on a band it
+  did not name.

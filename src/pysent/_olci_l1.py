@@ -58,6 +58,8 @@ from ._sen3 import extract_member, open_sen3_variable, read_flag_table, read_pac
 # Members a reflectance conversion needs beyond the radiance band itself.
 INSTRUMENT_MEMBER = "instrument_data.nc"
 GEOMETRY_MEMBER = "tie_geometries.nc"
+#: Pressure, ozone and water vapour, on the same tie grid as the geometry.
+METEO_MEMBER = "tie_meteo.nc"
 QUALITY_MEMBER = "qualityFlags.nc"
 QUALITY_VARIABLE = "quality_flags"
 
@@ -76,15 +78,23 @@ def radiance_member(band: int) -> tuple[str, str]:
     return f"Oa{band:02d}_radiance.nc", f"Oa{band:02d}_radiance"
 
 
-def solar_zenith(root: str, scratch: Path, shape: tuple[int, int]) -> np.ndarray:
-    """Solar zenith angle in degrees, expanded from its tie-point grid.
+def tie_point_field(
+    root: str, member: str, variable: str, scratch: Path, shape: tuple[int, int]
+) -> np.ndarray:
+    """A tie-point field in its own units, expanded to the image shape.
 
-    The grid is a few dozen columns wide against the image's thousands, so each
-    row is interpolated across the track. Rows are not interpolated: the tie
-    grid has one row per image row.
+    OLCI keeps the viewing and solar angles in ``tie_geometries.nc`` and the
+    meteorology - pressure, ozone, water vapour - in ``tie_meteo.nc``, all on
+    the same coarse grid: a few dozen columns against the image's thousands,
+    with one row per image row. So each row is interpolated across the track
+    and rows are not interpolated at all.
+
+    The atmospheric correction needs five of these fields beside the solar
+    angle, which is why this is a function rather than a line inside
+    :func:`solar_zenith`.
     """
     rows, columns = shape
-    dataset = open_sen3_variable(extract_member(root, GEOMETRY_MEMBER, scratch), "SZA")
+    dataset = open_sen3_variable(extract_member(root, member, scratch), variable)
     band = dataset.GetRasterBand(1)
     # The tie grid has one row per image row, so a decimated image needs a
     # decimated grid: read it at the row count being worked at rather than
@@ -108,6 +118,11 @@ def solar_zenith(root: str, scratch: Path, shape: tuple[int, int]) -> np.ndarray
     for row in range(rows):
         expanded[row] = np.interp(target, tie_columns, tie[row])
     return expanded
+
+
+def solar_zenith(root: str, scratch: Path, shape: tuple[int, int]) -> np.ndarray:
+    """Solar zenith angle in degrees, expanded from its tie-point grid."""
+    return tie_point_field(root, GEOMETRY_MEMBER, "SZA", scratch, shape)
 
 
 def flux_row_for_band(wavelengths: np.ndarray, band: int, *, tolerance_nm: float = 12.0) -> int:
