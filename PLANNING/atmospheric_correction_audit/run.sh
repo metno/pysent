@@ -7,6 +7,7 @@
 #   run.sh budget land      A4: the reflectance budget on the clear-land frame
 #   run.sh budget lowsun    A5: the same at a 79.6 degree solar zenith
 #   run.sh tooling          A7: what radiative-transfer tooling the host has
+#   run.sh sweep [n]        A9: residual against solar zenith over n triples
 #
 # The frames are named here rather than passed in, so a finding is reproduced
 # on the same acquisition it was measured on. They are on the mounted archive
@@ -46,6 +47,10 @@ budget)
   esac
   python3 -I "$here/budget.py" --l1 "$1" --wfr "$2" --syn "$3" --decimate "$decimate" 2>&1 |
     grep -vi "runtimewarning\|nanfunctions\|return np"
+  ;;
+sweep)
+  python3 -I "$here/sweep.py" --count "${2:-28}" --decimate "${3:-8}" 2>&1 |
+    grep -vi "runtimewarning\|nanfunctions\|return np\|invalid value\|divide\|mean of empty"
   ;;
 tooling)
   python3 - <<'PY'

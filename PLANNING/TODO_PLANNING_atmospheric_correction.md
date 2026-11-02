@@ -189,6 +189,35 @@ right order, not the whole 0.028. **So the remainder at 560 nm is a real finding
 2, not something the algebra will absorb**, and the honest statement today is that the gap is
 partly explained. Marked literature because no line of this has been implemented or measured here.
 
+### A9. Accuracy does not degrade with solar zenith, which the two-frame reading got wrong ✅ verified
+
+`run.sh sweep` - the correction of Phase 2 run over **28 matched triples**, median absolute land
+residual against `SY_2_SYN`, grouped by the frame's median solar zenith:
+
+| zenith | frames | 665 nm | 560 nm | 490 nm | worst band |
+|---|---:|---:|---:|---:|---:|
+| 68-72 | 12 | 0.0039 | 0.0122 | **0.0176** | 0.0176 |
+| 76-80 | 16 | 0.0089 | 0.0109 | 0.0071 | **0.0109** |
+
+**The high-zenith group is as accurate as the low one, and at 490 nm it is better.** That directly
+contradicts what two frames suggested - Phase 2 reported residuals of 0.038 to 0.094 at solar
+zenith 79.6 and inferred a three- to sevenfold degradation. That frame
+(`20261101T063201`) was **76 % bright**, leaving only 53 000 clear-land pixels, so its "clear land"
+was almost certainly cloud-contaminated. It is an outlier about cloud, not a data point about
+geometry, and a ceiling placed from it would have refused the better half of the archive.
+
+Two other patterns hold across the whole sweep and are worth more than the zenith question was:
+
+- **560 nm is negative in 12 of the 13 frames that have usable land**, between -0.004 and -0.016,
+  at both zenith groups. So the Phase 2 miss is band-specific and geometry-independent, which rules
+  out the air-mass explanations and points at the gas term or at the band itself.
+- **Water sits at 0.03 to 0.08 in every frame regardless of zenith** - the aerosol gap of A4,
+  stable, and the single largest error anywhere in the correction.
+
+**What this means for a quality band:** inside 63 to 80 degrees there is nothing to refuse on
+geometric grounds. Cloud contamination of the land mask matters far more than the sun angle, and the
+honest per-pixel flag is about the mask and the aerosol source rather than the zenith.
+
 ---
 
 ## B. Phases (one PR each, against `main`)
@@ -346,6 +375,9 @@ the phase that needs them.*
   naming the source - the `SY_2_AOD` path, a scalar AOD, or `"retrieve"` - and never a silent
   fetch.* A single-product entry point quietly opening a second product would be a surprise, and the
   catalogue cannot promise the matching AOD granule exists.
+  **Answered 2026-11-02: the explicit option, never a silent fetch.** So `aerosol` names a path to
+  an AOD product, a scalar, or `"retrieve"`; two runs of the same command cannot differ because of
+  what happens to be on disk.
 - **Q5 (Phase 5). The honest ceiling over water.** *Ship it, with the measured uncertainty, and
   refuse to call it water-leaving reflectance.* A4 says the atmosphere over water is up to 195 times
   the signal; we will not match WFR, and should not imply we do. The alternative - restrict surface
@@ -444,3 +476,15 @@ the phase that needs them.*
   **Deviation:** the plan's acceptance was "under 0.01 at all three bands". Two of three were met;
   560 nm sits at -0.0126 and reproduces on a second frame, so it is carried into Phase 3 rather
   than papered over by loosening the target.
+- **2026-11-02 - Q3 and Q4 answered; the sweep (A9).** Q3 came back "measure first", and the
+  measurement **overturned the question's premise**: across 28 triples the 76-80 degree group is as
+  accurate as the 68-72 group, and better at 490 nm. The 79.6-degree frame Phase 2 reasoned from was
+  76 % bright, so its clear-land statistics were cloud-contaminated - an outlier about cloud, not a
+  data point about geometry. **A threshold set from those two frames would have refused the better
+  half of the archive.** The real lesson is the one the planning rules already encode: two points
+  are an anecdote, and the question to ask of a surprising trend is how many frames it rests on.
+  Q4 answered as recommended: aerosol comes from an explicit option, never a silent fetch.
+  **Deviation:** no solar-zenith ceiling will be implemented, which is not one of the three options
+  Q3 offered. The sweep also sharpened the 560 nm problem - negative in 12 of 13 frames with usable
+  land, at both zenith groups - so it is band-specific and geometry-independent, which is a much
+  better starting point for Phase 3 than Phase 2 had.
