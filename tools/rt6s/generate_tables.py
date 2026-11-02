@@ -26,6 +26,14 @@ rather than convenience:
 The spectral response is OLCI's own, per platform: Py6S ships the S3A and S3B
 band filters, so a coefficient belongs to a real band rather than to its centre
 wavelength.
+
+**The Rayleigh table's pressure axis is driven by altitude**, because
+``set_target_pressure`` is accepted and then ignored by this 6SV build - the
+Rayleigh optical depth stays at its sea-level value, the same at 1013, 850 and
+700 hPa. A table generated through it has a pressure axis holding one value six
+times over, which looks like a table until something asks it how scattering
+varies with elevation. ``tools/rt6s/check.py`` asserts the no-op, so a future
+6SV that fixes it will say so rather than silently changing the tables.
 """
 from __future__ import annotations
 
@@ -53,6 +61,37 @@ BANDS = range(1, 22)
 KG_PER_DU = 2.1415e-5
 
 OZONE_COLUMNS_DU = (100.0, 200.0, 300.0, 400.0)
+
+# The Rayleigh grid. Denser towards the horizon, where the path reflectance
+# changes fastest and where this archive actually lives (every matched frame is
+# at solar zenith 63 to 79 degrees).
+RAYLEIGH_SOLAR_ZENITHS = (
+    0.0, 10.0, 20.0, 30.0, 40.0, 45.0, 50.0, 55.0, 60.0, 65.0, 70.0, 73.0, 76.0, 79.0, 82.0, 85.0,
+)
+# OLCI's own across-track extent reaches about 56 degrees; 60 is headroom.
+RAYLEIGH_VIEW_ZENITHS = (0.0, 8.0, 16.0, 24.0, 32.0, 40.0, 48.0, 56.0, 60.0)
+# Fitted away into three Fourier terms rather than stored, see rayleigh_rows.
+RAYLEIGH_AZIMUTHS = tuple(float(a) for a in range(0, 181, 15))
+# The table's pressure axis is driven by **altitude**, because
+# ``set_target_pressure`` is a silent no-op in this 6SV build: it leaves the
+# Rayleigh optical depth at its sea-level value, identical at 1013, 850 and
+# 700 hPa, while ``set_target_custom_altitude`` varies it correctly. The axis
+# is still labelled in pressure, since that is what a pixel's own sea-level
+# pressure and elevation give, and these altitudes are converted with the same
+# barometric formula the library uses.
+#
+# Sea level is the top: Py6S encodes a target altitude as a negative number in
+# the one field it shares with pressure, so a *negative* altitude - which is
+# what a pressure above 1013.25 hPa would need - is indistinguishable from a
+# positive pressure, and silently ignored. Pressures above sea-level standard
+# are handled by extrapolating along the pressure axis in the library, which is
+# safe because the dependence is nearly linear; see `_axis_weights`.
+RAYLEIGH_ALTITUDES_KM = (0.0, 0.5, 1.0, 2.0, 3.0, 5.0)
+
+
+def pressure_at_altitude(altitude_km):
+    """Standard-atmosphere pressure in hPa, the library's own formula."""
+    return 1013.25 * (1.0 - 2.25577e-5 * altitude_km * 1000.0) ** 5.25588
 # Water columns in g cm-2 (the unit 6S takes) crossed with air masses: the
 # product of the two is what the table is indexed by, and several pairs land on
 # close path amounts on purpose, to measure the collapse.
@@ -76,25 +115,84 @@ def geometry_for_air_mass(air_mass, view_zenith=0.0):
     return float(np.degrees(np.arccos(1.0 / solar_term)))
 
 
-def model(platform, band, solar_zenith, view_zenith, water_g_cm2, ozone_du):
-    """One 6SV run: a black surface under gas only, no aerosols."""
+def model(
+    platform,
+    band,
+    solar_zenith,
+    view_zenith,
+    water_g_cm2,
+    ozone_du,
+    *,
+    relative_azimuth=90.0,
+    altitude_km=None,
+    rayleigh=False,
+):
+    """One 6SV run: a black surface, no aerosols.
+
+    ``rayleigh=True`` switches the gaseous absorption off entirely, so the only
+    thing left in the path reflectance is molecular scattering - which is what
+    the Rayleigh table has to hold, because the gas term is applied separately
+    and multiplying the two corrections together would count absorption twice.
+    """
     run = SixS(SIXS)
     run.geometry = Geometry.User()
     run.geometry.solar_z, run.geometry.view_z = solar_zenith, view_zenith
-    run.geometry.solar_a, run.geometry.view_a = 0.0, 90.0
+    # The solar azimuth is the origin, so the view azimuth *is* the relative
+    # azimuth; the library looks up with the same difference, OAA minus SAA.
+    run.geometry.solar_a, run.geometry.view_a = 0.0, relative_azimuth
     # Without a date the solar term is zero and every output reads 0.000.
     run.geometry.day, run.geometry.month = 25, 10
     # Without this the sensor sits on the ground: no path reflectance and an
     # upward transmittance of exactly 1. See check.py.
-    run.altitudes.set_target_sea_level()
+    # Altitude, never set_target_pressure: that call is accepted and ignored.
+    if not altitude_km:
+        run.altitudes.set_target_sea_level()
+    elif altitude_km < 0:
+        raise ValueError(
+            f"a target altitude of {altitude_km} km cannot be asked for: Py6S encodes it as a "
+            "positive number in the field it shares with pressure, where 6SV ignores it"
+        )
+    else:
+        run.altitudes.set_target_custom_altitude(altitude_km)
     run.altitudes.set_sensor_satellite_level()
-    # 6S takes ozone in cm-atm, where 1 cm-atm is 1000 DU.
-    run.atmos_profile = AtmosProfile.UserWaterAndOzone(water_g_cm2, ozone_du / 1000.0)
+    if rayleigh:
+        run.atmos_profile = AtmosProfile.PredefinedType(AtmosProfile.NoGaseousAbsorption)
+    else:
+        # 6S takes ozone in cm-atm, where 1 cm-atm is 1000 DU.
+        run.atmos_profile = AtmosProfile.UserWaterAndOzone(water_g_cm2, ozone_du / 1000.0)
     run.aero_profile = AeroProfile.PredefinedType(AeroProfile.NoAerosols)
     run.ground_reflectance = GroundReflectance.HomogeneousLambertian(0.0)
     run.wavelength = Wavelength(getattr(PredefinedWavelengths, f"{platform}_OLCI_{band:02d}"))
     run.run()
     return run.outputs
+
+
+def path_reflectance(outputs):
+    """The atmosphere's own contribution at satellite level.
+
+    Py6S exposes no accessor for it, so it comes from the first column of the
+    ``reflectance I`` row of the satellite-level block.
+    """
+    row = next(line for line in outputs.fulltext.splitlines() if "reflectance I" in line)
+    return float(row.split(":")[1].split()[0])
+
+
+def fit_azimuth_terms(azimuths_deg, values):
+    """Three Fourier terms in the relative azimuth, and the worst fit error.
+
+    ``rho(dphi) = a0 + 2 a1 cos(dphi) + 2 a2 cos(2 dphi)`` is the standard form
+    for a Rayleigh path reflectance, and collapsing thirteen azimuths into
+    three numbers is what keeps the committed table small enough to read. The
+    truncation error is **measured here and stored per row**, rather than
+    asserted: three terms is a claim about the atmosphere, not an identity.
+    """
+    radians = np.radians(np.asarray(azimuths_deg, dtype=np.float64))
+    design = np.column_stack(
+        [np.ones_like(radians), 2 * np.cos(radians), 2 * np.cos(2 * radians)]
+    )
+    coefficients, *_ = np.linalg.lstsq(design, np.asarray(values, dtype=np.float64), rcond=None)
+    worst = float(np.max(np.abs(design @ coefficients - values)))
+    return coefficients, worst
 
 
 def band_centre_nm(platform, band):
@@ -172,6 +270,46 @@ def unique_amounts(samples, tolerance=1e-9):
     return kept
 
 
+def rayleigh_rows(job):
+    """One band's Rayleigh table: path reflectance, transmittances, albedo.
+
+    The transmittances and the spherical albedo do not depend on the relative
+    azimuth, so they are taken from one of the azimuth runs - and the spread
+    across the others is returned, so that independence is reported rather than
+    assumed.
+    """
+    platform, band = job
+    rows = []
+    worst_azimuth_independence = 0.0
+    for altitude in RAYLEIGH_ALTITUDES_KM:
+        pressure = pressure_at_altitude(altitude)
+        for solar_zenith in RAYLEIGH_SOLAR_ZENITHS:
+            for view_zenith in RAYLEIGH_VIEW_ZENITHS:
+                reflectances, transmittances = [], []
+                for azimuth in RAYLEIGH_AZIMUTHS:
+                    out = model(
+                        platform, band, solar_zenith, view_zenith, 0.0, 0.0,
+                        relative_azimuth=azimuth, altitude_km=altitude, rayleigh=True,
+                    )
+                    reflectances.append(path_reflectance(out))
+                    transmittances.append(
+                        (
+                            out.transmittance_rayleigh_scattering.downward,
+                            out.transmittance_rayleigh_scattering.upward,
+                            out.spherical_albedo.total,
+                        )
+                    )
+                coefficients, fit_error = fit_azimuth_terms(RAYLEIGH_AZIMUTHS, reflectances)
+                spread = np.ptp(np.asarray(transmittances, dtype=np.float64), axis=0)
+                worst_azimuth_independence = max(worst_azimuth_independence, float(spread.max()))
+                down, up, albedo = transmittances[0]
+                rows.append(
+                    (platform, band, pressure, solar_zenith, view_zenith,
+                     *coefficients, fit_error, down, up, albedo)
+                )
+    return rows, worst_azimuth_independence
+
+
 def provenance(extra=""):
     today = datetime.date.today().isoformat()
     return "\n".join(
@@ -189,12 +327,54 @@ def provenance(extra=""):
     ).rstrip()
 
 
+def write_rayleigh(out, results):
+    """The Rayleigh table, one row per grid point."""
+    rows = [row for chunk, _ in results for row in chunk]
+    worst_fit = max(row[8] for row in rows)
+    worst_independence = max(spread for _, spread in results)
+    path = out / "olci_rayleigh.csv"
+    with path.open("w") as handle:
+        handle.write(provenance(
+            "#\n"
+            "# Molecular scattering only: the gaseous absorption is switched off in these runs,\n"
+            "# because the gas correction is applied separately and a table holding both would\n"
+            "# count absorption twice.\n"
+            "# The path reflectance against relative azimuth dphi (= OAA - SAA, degrees, folded\n"
+            "# into 0..180) is held as three Fourier terms:\n"
+            "#     rho = a0 + 2*a1*cos(dphi) + 2*a2*cos(2*dphi)\n"
+            f"# Fitted to {len(RAYLEIGH_AZIMUTHS)} azimuths; azimuth_fit_error is the worst\n"
+            "# disagreement for that row, and the worst over the whole table is "
+            f"{worst_fit:.2e}.\n"
+            "# The transmittances and the spherical albedo do not depend on the azimuth; the\n"
+            f"# worst spread across azimuths is {worst_independence:.2e}, which is what makes\n"
+            "# storing one value per row legitimate.\n"
+            "# Interpolate multilinearly in (pressure, solar_zenith, view_zenith).\n"
+        ) + "\n")
+        handle.write(
+            "platform,band,pressure_hpa,solar_zenith,view_zenith,a0,a1,a2,"
+            "azimuth_fit_error,transmittance_down,transmittance_up,spherical_albedo\n"
+        )
+        for row in rows:
+            platform, band, pressure, sza, vza = row[:5]
+            a0, a1, a2, fit, down, up, albedo = row[5:]
+            handle.write(
+                f"{platform},{band},{pressure:g},{sza:g},{vza:g},"
+                f"{a0:.6f},{a1:.6f},{a2:.6f},{fit:.2e},"
+                f"{down:.6f},{up:.6f},{albedo:.6f}\n"
+            )
+    print(f"wrote {path} ({len(rows)} rows, worst azimuth fit {worst_fit:.2e}, "
+          f"worst azimuth dependence of the transmittances {worst_independence:.2e})", flush=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default="src/pysent/data")
     parser.add_argument("--platforms", nargs="+", default=["S3A", "S3B"])
     parser.add_argument("--bands", nargs="+", type=int, default=list(BANDS))
     parser.add_argument("--jobs", type=int, default=max(1, multiprocessing.cpu_count() // 2))
+    parser.add_argument(
+        "--tables", nargs="+", default=["gas", "rayleigh"], choices=["gas", "rayleigh"]
+    )
     args = parser.parse_args()
 
     out = pathlib.Path(args.out)
@@ -203,6 +383,10 @@ def main() -> int:
     print(f"{len(jobs)} band-platform pairs, {args.jobs} workers", flush=True)
 
     with multiprocessing.Pool(args.jobs) as pool:
+        if "rayleigh" in args.tables:
+            write_rayleigh(out, pool.map(rayleigh_rows, jobs))
+        if "gas" not in args.tables:
+            return 0
         ozone = pool.map(ozone_row, jobs)
         water = pool.map(water_rows, jobs)
 

@@ -40,7 +40,14 @@ from osgeo import gdal  # noqa: E402
 
 gdal.UseExceptions()
 
-from pysent._atmosphere import gas_transmittance, platform_of  # noqa: E402
+from pysent._atmosphere import (  # noqa: E402
+    gas_transmittance,
+    pixel_pressure,
+    platform_of,
+    rayleigh_terms,
+    relative_azimuth,
+    surface_from_toa,
+)
 from pysent._olci_l1 import (  # noqa: E402
     BAND_WAVELENGTHS,
     GEOMETRY_MEMBER,
@@ -150,6 +157,23 @@ def main() -> int:
     vapour = tie_field(l1, METEO_MEMBER, "total_columnar_water_vapour", shape, scratch)
     platform = platform_of(args.l1)
 
+    # Elevation is per pixel, not on the tie grid, and it matters: Rayleigh
+    # optical depth follows pressure, so ground at 2 km scatters a fifth less.
+    altitude_dataset = open_sen3_variable(
+        extract_member(l1, find_member(l1, "geo_coordinates.nc"), scratch), "altitude"
+    )
+    altitude = read_packed(
+        altitude_dataset.GetRasterBand(1), decimate=args.decimate, log10=False
+    )
+    altitude_dataset = None
+    if altitude.shape != shape:
+        altitude = altitude[: shape[0], : shape[1]]
+    pressure = pixel_pressure(slp, altitude)
+    azimuth = relative_azimuth(saa, oaa)
+    print(f"elevation median {np.nanmedian(altitude):.0f} m, surface pressure median "
+          f"{np.nanmedian(pressure):.1f} hPa, relative azimuth median "
+          f"{np.nanmedian(azimuth):.1f} deg")
+
     rejected, _, bright = quality_mask(l1, scratch, shape, ["invalid", "saturated"])
     land, _, _ = quality_mask(l1, scratch, shape, ["land"])
     water = ~land & ~rejected & ~bright
@@ -172,9 +196,9 @@ def main() -> int:
         root = sen3_root(reference[1])
         print(f"=== {scene}: Level-1 against {kind.upper()} "
               f"({'water-leaving' if kind == 'wfr' else 'surface directional'} reflectance)")
-        print(f"{'band':6s} {'nm':>5s} {'TOA':>8s} {'T_gas':>7s} {'TOA/T_gas':>10s} "
-              f"{'rho_R':>8s} {'corrected':>10s} {'L2':>8s} {'residual':>9s} "
-              f"{'r(TOA,L2)':>10s} {'r(corr,L2)':>11s}")
+        print(f"{'band':6s} {'nm':>5s} {'TOA':>8s} {'T_gas':>7s} {'rho_R(ss)':>10s} "
+              f"{'rho_R(6S)':>10s} {'T_dn*T_up':>10s} {'surface':>9s} {'L2':>8s} "
+              f"{'residual':>9s} {'r(TOA,L2)':>10s} {'r(corr,L2)':>11s}")
         for b in BANDS:
             nm = BAND_WAVELENGTHS[b]
             toa = _toa(l1, b, shape, sza, scratch, args.decimate)
@@ -183,7 +207,13 @@ def main() -> int:
                 platform, b, ozone_kg_m2=ozone, water_kg_m2=vapour,
                 solar_zenith_deg=sza, view_zenith_deg=oza,
             )
-            rho_r = rayleigh_reflectance(nm, slp, sza, oza, saa, oaa)
+            # The audit's own single-scattering estimate, kept as the
+            # comparison: it is what Phase 2 replaces.
+            rho_r_single = rayleigh_reflectance(nm, slp, sza, oza, saa, oaa)
+            terms = rayleigh_terms(
+                platform, b, pressure_hpa=pressure, solar_zenith_deg=sza,
+                view_zenith_deg=oza, relative_azimuth_deg=azimuth,
+            )
             # The member names match across the two products but the variables
             # inside them do not: Synergy calls it SDR_Oa08, not Syn_Oa08_*.
             member = (f"Oa{b:02d}_reflectance.nc", f"Oa{b:02d}_reflectance") if kind == "wfr" else (
@@ -191,14 +221,22 @@ def main() -> int:
             l2 = level2_reflectance(root, member[0], member[1], shape, scratch)
 
             keep = mask & np.isfinite(toa) & np.isfinite(l2)
-            degassed = toa / t_gas
-            corrected = degassed - rho_r
-            stats = [
-                np.nanmedian(x[keep]) for x in (toa, t_gas, degassed, rho_r, corrected, l2)
-            ]
+            two_way = terms["transmittance_down"] * terms["transmittance_up"]
+            corrected = surface_from_toa(
+                toa,
+                gas_transmittance=t_gas,
+                path_reflectance=terms["path_reflectance"],
+                transmittance_down=terms["transmittance_down"],
+                transmittance_up=terms["transmittance_up"],
+                spherical_albedo=terms["spherical_albedo"],
+            )
+            columns = (
+                toa, t_gas, rho_r_single, terms["path_reflectance"], two_way, corrected, l2,
+            )
+            stats = [np.nanmedian(np.where(keep, x, np.nan)) for x in columns]
             print(f"Oa{b:02d}  {nm:5d} {stats[0]:8.4f} {stats[1]:7.4f} {stats[2]:10.4f} "
-                  f"{stats[3]:8.4f} {stats[4]:10.4f} {stats[5]:8.4f} "
-                  f"{stats[4] - stats[5]:9.4f} "
+                  f"{stats[3]:10.4f} {stats[4]:10.4f} {stats[5]:9.4f} {stats[6]:8.4f} "
+                  f"{stats[5] - stats[6]:9.4f} "
                   f"{pearson(np.where(keep, toa, np.nan), np.where(keep, l2, np.nan)):10.3f} "
                   f"{pearson(np.where(keep, corrected, np.nan), np.where(keep, l2, np.nan)):11.3f}")
         print()

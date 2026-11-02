@@ -14,10 +14,16 @@ import pytest
 
 from pysent._atmosphere import (
     KG_M2_PER_DOBSON,
+    PRESSURE_EXTRAPOLATION_HPA,
+    STANDARD_PRESSURE_HPA,
     air_mass,
     gas_transmittance,
     ozone_transmittance,
+    pixel_pressure,
     platform_of,
+    rayleigh_grid_limits,
+    rayleigh_terms,
+    relative_azimuth,
     surface_from_toa,
     toa_from_surface,
     water_path_amount_limit,
@@ -211,3 +217,220 @@ def test_an_undefined_inversion_is_nan():
     assert np.isnan(surface_from_toa(0.2, transmittance_down=0.0))
     assert np.isnan(surface_from_toa(0.2, transmittance_up=0.0))
     assert np.isnan(surface_from_toa(np.nan, path_reflectance=0.01))
+
+
+# band, pressure hPa, solar zenith, view zenith, relative azimuth,
+# then 6S's path reflectance, downward and upward transmittance, spherical albedo.
+# Every one of these is deliberately *off* the generated grid in all four
+# coordinates, so what is being tested is the interpolation and the Fourier
+# reconstruction, not the table's own rows.
+SIXS_RAYLEIGH_OFF_GRID = [
+    (4, 926.34, 71.5, 28.0, 37.5, 0.12331, 0.81779, 0.92525, 0.11427),
+    (6, 983.58, 67.5, 20.0, 112.5, 0.04847, 0.89682, 0.95514, 0.07526),
+    (8, 746.83, 57.5, 44.0, 7.5, 0.03101, 0.96992, 0.97736, 0.03105),
+    (4, 871.82, 78.5, 52.0, 165.0, 0.23402, 0.75264, 0.90173, 0.10863),
+]
+
+
+@pytest.mark.parametrize(
+    "band,pressure,sza,vza,azimuth,path,down,up,albedo", SIXS_RAYLEIGH_OFF_GRID
+)
+def test_the_rayleigh_table_reproduces_6s_off_grid(
+    band, pressure, sza, vza, azimuth, path, down, up, albedo
+):
+    terms = rayleigh_terms(
+        "S3A",
+        band,
+        pressure_hpa=pressure,
+        solar_zenith_deg=sza,
+        view_zenith_deg=vza,
+        relative_azimuth_deg=azimuth,
+    )
+    # 1.5e-3 is the interpolation's own error between grid nodes, not slack:
+    # the Fourier reconstruction is good to 7e-6, so what is left is the
+    # multilinear step, and interpolating in secant space rather than in
+    # degrees is what brought the worst corner from 0.0041 to 0.0011.
+    assert float(terms["path_reflectance"]) == pytest.approx(path, abs=1.5e-3)
+    assert float(terms["transmittance_down"]) == pytest.approx(down, abs=2e-3)
+    assert float(terms["transmittance_up"]) == pytest.approx(up, abs=2e-3)
+    assert float(terms["spherical_albedo"]) == pytest.approx(albedo, abs=2e-3)
+
+
+def test_rayleigh_scattering_is_strongest_at_blue():
+    # The whole reason the correction exists. Same geometry, three bands.
+    def path(band):
+        return float(
+            rayleigh_terms(
+                "S3A", band, pressure_hpa=1013.25, solar_zenith_deg=70.0,
+                view_zenith_deg=20.0, relative_azimuth_deg=90.0,
+            )["path_reflectance"]
+        )
+
+    assert path(4) > path(6) > path(8)
+    # 490 nm scatters about three times as much as 665 nm.
+    assert path(4) / path(8) == pytest.approx(3.0, abs=0.6)
+
+
+def test_the_path_reflectance_grows_towards_the_horizon():
+    def path(solar_zenith):
+        return float(
+            rayleigh_terms(
+                "S3A", 4, pressure_hpa=1013.25, solar_zenith_deg=solar_zenith,
+                view_zenith_deg=20.0, relative_azimuth_deg=90.0,
+            )["path_reflectance"]
+        )
+
+    assert path(20.0) < path(50.0) < path(70.0) < path(85.0)
+    # And the transmittance falls the other way.
+    low = rayleigh_terms(
+        "S3A", 4, pressure_hpa=1013.25, solar_zenith_deg=20.0,
+        view_zenith_deg=20.0, relative_azimuth_deg=90.0,
+    )
+    high = rayleigh_terms(
+        "S3A", 4, pressure_hpa=1013.25, solar_zenith_deg=85.0,
+        view_zenith_deg=20.0, relative_azimuth_deg=90.0,
+    )
+    assert float(high["transmittance_down"]) < float(low["transmittance_down"])
+
+
+def test_a_thinner_atmosphere_scatters_less():
+    # Rayleigh optical depth is proportional to pressure, so ground at
+    # altitude must come out darker. Treating a mountain as sea level is the
+    # mistake this guards.
+    def path(pressure):
+        return float(
+            rayleigh_terms(
+                "S3A", 4, pressure_hpa=pressure, solar_zenith_deg=70.0,
+                view_zenith_deg=20.0, relative_azimuth_deg=90.0,
+            )["path_reflectance"]
+        )
+
+    assert path(700.0) < path(850.0) < path(1013.25) < path(1040.0)
+    # About a third less at 700 hPa, which is roughly 3 km of elevation.
+    assert path(700.0) / path(1013.25) == pytest.approx(0.70, abs=0.08)
+
+
+def test_the_azimuth_dependence_is_not_flat():
+    def path(azimuth):
+        return float(
+            rayleigh_terms(
+                "S3A", 4, pressure_hpa=1013.25, solar_zenith_deg=70.0,
+                view_zenith_deg=40.0, relative_azimuth_deg=azimuth,
+            )["path_reflectance"]
+        )
+
+    values = [path(a) for a in (0.0, 45.0, 90.0, 135.0, 180.0)]
+    # The scattering angle sweeps through the Rayleigh phase function, so the
+    # spread across azimuth is a real effect and a table that ignored it would
+    # be wrong by this much.
+    assert max(values) - min(values) > 0.02
+
+
+def test_the_azimuth_is_folded_and_unsigned():
+    assert relative_azimuth(10.0, 350.0) == pytest.approx(20.0)
+    assert relative_azimuth(350.0, 10.0) == pytest.approx(20.0)
+    assert relative_azimuth(0.0, 180.0) == pytest.approx(180.0)
+    assert relative_azimuth(0.0, 270.0) == pytest.approx(90.0)
+    # And the terms must not care about the sign either.
+    def path(solar, view):
+        return float(
+            rayleigh_terms(
+                "S3A", 4, pressure_hpa=1013.25, solar_zenith_deg=70.0, view_zenith_deg=20.0,
+                relative_azimuth_deg=relative_azimuth(solar, view),
+            )["path_reflectance"]
+        )
+
+    assert path(10.0, 350.0) == pytest.approx(path(350.0, 10.0), rel=1e-12)
+
+
+def test_pressure_comes_from_sea_level_pressure_and_elevation():
+    assert pixel_pressure(STANDARD_PRESSURE_HPA, 0.0) == pytest.approx(STANDARD_PRESSURE_HPA)
+    # The standard atmosphere at 1.5 km is about 845 hPa, which is also the
+    # ratio 6S's own optical depth showed between sea level and 1.5 km.
+    assert pixel_pressure(STANDARD_PRESSURE_HPA, 1500.0) == pytest.approx(845.6, abs=1.0)
+    assert pixel_pressure(STANDARD_PRESSURE_HPA, 3000.0) == pytest.approx(701.1, abs=1.5)
+    # A high-pressure day at sea level is above standard, and elevation still
+    # scales it.
+    assert pixel_pressure(1035.0, 0.0) == pytest.approx(1035.0)
+    assert pixel_pressure(1035.0, 1000.0) < 1035.0
+
+
+def test_pressure_above_the_table_is_extrapolated_not_clamped():
+    # The table stops at sea-level standard because 6SV cannot be asked for a
+    # negative target altitude, but a winter anticyclone reaches 1040 hPa.
+    # Clamping there would cost about a quarter of this phase's error budget,
+    # and the dependence is linear enough to extrapolate safely.
+    def path(pressure):
+        return float(
+            rayleigh_terms(
+                "S3A", 4, pressure_hpa=pressure, solar_zenith_deg=70.0,
+                view_zenith_deg=20.0, relative_azimuth_deg=90.0,
+            )["path_reflectance"]
+        )
+
+    top = rayleigh_grid_limits("S3A", 4)["pressure_hpa"][1]
+    assert top == pytest.approx(STANDARD_PRESSURE_HPA, abs=0.01)
+    assert path(1040.0) > path(top)
+    # Linear in pressure: the step up should match the step down in size.
+    step = 1040.0 - top
+    assert path(1040.0) - path(top) == pytest.approx(path(top) - path(top - step), rel=0.05)
+    # But not without limit - far above, it is held.
+    assert path(top + 500.0) == pytest.approx(path(top + PRESSURE_EXTRAPOLATION_HPA), rel=1e-12)
+
+
+def test_an_angle_outside_the_grid_is_clamped_not_extrapolated():
+    limits = rayleigh_grid_limits("S3A", 4)
+    top = limits["solar_zenith"][1]
+
+    def path(solar_zenith):
+        return float(
+            rayleigh_terms(
+                "S3A", 4, pressure_hpa=1013.25, solar_zenith_deg=solar_zenith,
+                view_zenith_deg=20.0, relative_azimuth_deg=90.0,
+            )["path_reflectance"]
+        )
+
+    # Past the last node the curve is steep, and extrapolating a steep curve
+    # invents brightness; holding the last value is wrong in a way a caller
+    # can see and bound.
+    assert path(top + 4.0) == pytest.approx(path(top), rel=1e-12)
+    assert path(top + 40.0) == pytest.approx(path(top), rel=1e-12)
+
+
+def test_the_terms_interpolate_elementwise_over_an_array():
+    # The pipeline hands whole tie-point fields in, so the lookup has to be
+    # vectorised rather than called per pixel.
+    solar = np.array([[60.0, 70.0], [75.0, 80.0]])
+    terms = rayleigh_terms(
+        "S3A", 4, pressure_hpa=np.full((2, 2), 1000.0), solar_zenith_deg=solar,
+        view_zenith_deg=np.full((2, 2), 20.0), relative_azimuth_deg=np.full((2, 2), 90.0),
+    )
+    path = terms["path_reflectance"]
+    assert path.shape == (2, 2)
+    assert path[0, 0] < path[0, 1] < path[1, 0] < path[1, 1]
+
+
+def test_the_whole_chain_lands_on_a_plausible_surface_reflectance():
+    # Gas and Rayleigh together, on the geometry of the land frame the plan
+    # validates against, with that frame's measured top-of-atmosphere value at
+    # 490 nm. The answer has to be near Synergy's 0.038, not near zero and not
+    # negative - this is Phase 2's acceptance in miniature.
+    terms = rayleigh_terms(
+        "S3A", 4, pressure_hpa=1034.8, solar_zenith_deg=70.9,
+        view_zenith_deg=20.0, relative_azimuth_deg=90.0,
+    )
+    gas = gas_transmittance(
+        "S3A", 4, ozone_kg_m2=0.00611, water_kg_m2=7.53,
+        solar_zenith_deg=70.9, view_zenith_deg=20.0,
+    )
+    surface = float(
+        surface_from_toa(
+            0.1339,
+            gas_transmittance=gas,
+            path_reflectance=terms["path_reflectance"],
+            transmittance_down=terms["transmittance_down"],
+            transmittance_up=terms["transmittance_up"],
+            spherical_albedo=terms["spherical_albedo"],
+        )
+    )
+    assert 0.0 < surface < 0.12

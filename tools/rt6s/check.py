@@ -22,6 +22,12 @@ zero or one rather than failing:
 * **gfortran prints a floating-point-exception summary** that lands in the
   output Py6S parses, so every run raises ``OutputParsingError`` until the
   build passes ``-ffpe-summary=none``.
+* **``set_target_pressure`` does nothing.** It is accepted, and the Rayleigh
+  optical depth stays at its sea-level value - identical at 1013, 850 and
+  700 hPa - while ``set_target_custom_altitude`` varies it correctly. A table
+  generated through the pressure call has a pressure axis that silently holds
+  one value six times over, which looks like a table until something asks it
+  how scattering varies with elevation.
 """
 from __future__ import annotations
 
@@ -73,6 +79,35 @@ def reference_case():
     }
 
 
+def elevation_cases():
+    """Rayleigh depth at sea level, and the two ways of asking for elevation.
+
+    Returns ``(sea_level, by_altitude, by_pressure)`` optical depths at 490 nm.
+    The second must differ from the first and the third must not, which is the
+    whole of the ``set_target_pressure`` trap.
+    """
+    depths = []
+    for setter in (
+        lambda model: model.altitudes.set_target_sea_level(),
+        lambda model: model.altitudes.set_target_custom_altitude(3.0),
+        lambda model: model.altitudes.set_target_pressure(701.09),
+    ):
+        model = SixS(SIXS)
+        model.geometry = Geometry.User()
+        model.geometry.solar_z, model.geometry.view_z = 70.0, 20.0
+        model.geometry.solar_a, model.geometry.view_a = 0.0, 90.0
+        model.geometry.day, model.geometry.month = 25, 10
+        setter(model)
+        model.altitudes.set_sensor_satellite_level()
+        model.atmos_profile = AtmosProfile.PredefinedType(AtmosProfile.NoGaseousAbsorption)
+        model.aero_profile = AeroProfile.PredefinedType(AeroProfile.NoAerosols)
+        model.ground_reflectance = GroundReflectance.HomogeneousLambertian(0.0)
+        model.wavelength = Wavelength(0.490)
+        model.run()
+        depths.append(model.outputs.optical_depth_total.rayleigh)
+    return tuple(depths)
+
+
 def main() -> int:
     measured = reference_case()
     failures = []
@@ -91,6 +126,18 @@ def main() -> int:
         failures.append("path reflectance is not positive - is the sensor at satellite level?")
     if measured["transmittance_up"] >= 1.0:
         failures.append("upward transmittance is 1 - the sensor is below the atmosphere")
+
+    sea_level, by_altitude, by_pressure = elevation_cases()
+    print(f"\n{'rayleigh depth at sea level':34s} {sea_level:.5f}")
+    print(f"{'  via set_target_custom_altitude':34s} {by_altitude:.5f}  (must differ)")
+    print(f"{'  via set_target_pressure':34s} {by_pressure:.5f}  (known no-op)")
+    if by_altitude >= sea_level:
+        failures.append("a target 3 km up did not thin the atmosphere")
+    if by_pressure != sea_level:
+        failures.append(
+            "set_target_pressure now has an effect - it was a silent no-op when the tables "
+            "were generated, so the generator drives altitude instead and may want revisiting"
+        )
 
     if failures:
         print(f"\nFAILED: {', '.join(str(f) for f in failures)}")
