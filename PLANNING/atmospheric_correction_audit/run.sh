@@ -8,6 +8,8 @@
 #   run.sh budget lowsun    A5: the same at a 79.6 degree solar zenith
 #   run.sh tooling          A7: what radiative-transfer tooling the host has
 #   run.sh sweep [n]        A9: residual against solar zenith over n triples
+#   run.sh spectral         A10: the implied aerosol path across Synergy's bands
+#   run.sh aerosol          A6: what the aerosol product holds over the land frame
 #
 # The frames are named here rather than passed in, so a finding is reproduced
 # on the same acquisition it was measured on. They are on the mounted archive
@@ -47,6 +49,20 @@ budget)
   esac
   python3 -I "$here/budget.py" --l1 "$1" --wfr "$2" --syn "$3" --decimate "$decimate" 2>&1 |
     grep -vi "runtimewarning\|nanfunctions\|return np"
+  ;;
+spectral)
+  # Read the decimation before set -- replaces the positional arguments with
+  # the three product paths.
+  decimate=${2:-8}
+  set -- $(frame 2026/10/26 "$LAND")
+  python3 -I "$here/spectral.py" --l1 "$1" --syn "$3" --decimate "$decimate" 2>&1 |
+    grep -vi "runtimewarning\|nanfunctions\|return np\|invalid value\|divide\|mean of empty\|warning 1"
+  ;;
+aerosol)
+  set -- $(frame 2026/10/26 "$LAND")
+  aod=$(ls "$A/2026/10/26/SY-L2-AOD/"*AOD____20261026T072730_*.zip | head -1)
+  python3 -I "$here/aerosol.py" --l1 "$1" --aod "$aod" --syn "$3" --decimate 8 2>&1 |
+    grep -vi "runtimewarning\|nanfunctions\|return np\|invalid value\|divide\|mean of empty\|warning 1"
   ;;
 sweep)
   python3 -I "$here/sweep.py" --count "${2:-28}" --decimate "${3:-8}" 2>&1 |
