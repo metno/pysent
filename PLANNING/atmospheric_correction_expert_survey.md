@@ -197,23 +197,27 @@ covered by an aerosol product, with the number in which the tier improved agreem
 
 | scene | band | gas+Rayleigh | +aerosol | frames better |
 |---|---|---|---|---|
-| water | 665 | 0.0371 | **0.0237** | **19 / 19** |
-| water | 560 | 0.0512 | **0.0360** | **19 / 19** |
-| water | 490 | 0.0697 | **0.0515** | **19 / 19** |
-| land | 665 | 0.0035 | 0.0041 | 10 / 19 |
-| land | 560 | 0.0116 | **0.0206** | **0 / 20** |
-| land | 490 | 0.0107 | **0.0045** | **19 / 20** |
+| water | 665 | 0.0371 | **0.0239** | **19 / 19** |
+| water | 560 | 0.0512 | **0.0369** | **19 / 19** |
+| water | 490 | 0.0697 | **0.0517** | **19 / 19** |
+| land | 665 | 0.0035 | **0.0034** | 10 / 19 |
+| land | 560 | 0.0117 | **0.0175** | **0 / 20** |
+| land | 490 | 0.0107 | **0.0031** | **19 / 20** |
 
-Over water every band improves on every frame. Over land 490 nm more than halves, 665 nm is a
-coin flip, and **560 nm gets worse on all twenty frames** - which is the single most important
-number in this document and the subject of **question E1**. Across frames whose loading spans 0.02
-to 0.25 and whose solar zenith spans 63 to 79 degrees, a correction of the wrong magnitude or the
-wrong spectral shape would scatter. Twenty out of twenty in one direction, at the one band where a
-0.012 disagreement was already localised before any aerosol term existed, points at the reference
-rather than at the correction - but we cannot prove that from our side, which is why nothing is on
-by default (C16).
+Over water every band improves on every frame. Over land 490 nm comes down by a factor of 3.5 and
+665 nm is a wash, but **560 nm gets worse on all twenty frames** - which is the single most
+important number in this document and the subject of **question E1**. Across frames whose loading
+spans 0.012 to 0.288 and whose solar zenith spans 63 to 79 degrees, a correction of the wrong
+magnitude or the wrong spectral shape would scatter. Twenty out of twenty in one direction, at the
+one band where a 0.012 disagreement was already localised before any aerosol term existed, points
+at the reference rather than at the correction - but we cannot prove that from our side, which is
+why nothing is on by default (C16).
 
-Over water the improvement is real and still not sufficient: 0.0697 to 0.0515 at 490 nm leaves a
+What makes that reading harder to dismiss is the **spectral shape**: 560 nm is the only band that
+degrades, and both its immediate neighbours improve. An error in our aerosol magnitude or spectral
+slope would not single out one band between two that get better.
+
+Over water the improvement is real and still not sufficient: 0.0697 to 0.0517 at 490 nm leaves a
 residual **fourteen times** the water-leaving signal it is being compared against. See **E2**; the
 two quantities are not the same thing.
 
@@ -254,6 +258,27 @@ really blending. A reviewer should read the land results as "Continental", not a
 directly about it. Two models span a line in a space that really has at least three dimensions
 (size distribution, absorption, vertical placement), and the archive's own single-scattering albedo
 field - which would have constrained absorption - is empty.
+
+### C11b. How the aerosol table behaves at its own edges
+
+**Chosen.** Below the lightest stored optical depth, 0.05, the terms scale linearly to an **exact
+zero at no aerosol at all** - no path reflectance, no dimming, no addition to the spherical albedo.
+Above the heaviest, 0.4, they are **clamped**, and `aerosol_grid_limits` publishes both ends so a
+caller can tell when a pixel was hazier than the table goes.
+
+**Evidence/judgement.** Three different answers for three axes, chosen by whether the value past
+the edge is known. At zero it is known exactly, so anchoring there is not an approximation; between
+zero and 0.05 the increment per unit depth is 0.157 against 0.148 at 0.15, so a straight line
+through the origin is close. Above 0.4 it is unknown, so clamping is the bounded wrong answer
+rather than an invented one. Pressure, by contrast, extrapolates a little (C9), because it is
+nearly linear there.
+
+**This was wrong in the first implementation, in both directions at once.** The lookup clamped at
+the bottom as well as the top, so an optical depth of zero received the correction for the table's
+lightest haze - and 55 % of this archive's frames sit below 0.05, over-corrected by a median factor
+of 1.54. The top end meanwhile inherited the pressure axis's extrapolation allowance, which drove
+the transmittance ratio **negative** past depth 1.5 and would have flipped the sign of a smoke
+plume's surface reflectance. Every aerosol figure in this document was re-measured after the fix.
 
 ### C12. The aerosol table is at sea level only
 
@@ -350,7 +375,7 @@ is strong?*
 
 **The aerosol tier has now sharpened this into the sharpest result we have.** Correcting for the
 measured aerosol makes 560 nm worse on **20 of 20** frames while making 490 nm better on 19 of 20
-and every water band better on all 20. Those frames span optical depth 0.02 to 0.25 and solar
+and every water band better on all 19. Those frames span optical depth 0.012 to 0.288 and solar
 zenith 63 to 79 degrees. A correction whose magnitude or spectral slope was wrong would have to
 scatter across that range; a reference-side offset of fixed size would behave exactly like this.
 We think the evidence now points at Synergy's 560 nm, and we would rather be told we are wrong

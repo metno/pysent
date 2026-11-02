@@ -384,23 +384,27 @@ error budget is measurable. It is not ordered by difficulty.
 
   | scene | band | gas+Rayleigh | +aerosol | frames better |
   |---|---|---|---|---|
-  | water | 665 | 0.0371 | **0.0237** | **19 / 19** |
-  | water | 560 | 0.0512 | **0.0360** | **19 / 19** |
-  | water | 490 | 0.0697 | **0.0515** | **19 / 19** |
-  | land | 665 | 0.0035 | 0.0041 | 10 / 19 |
-  | land | 560 | 0.0116 | **0.0206** | **0 / 20** |
-  | land | 490 | 0.0107 | **0.0045** | **19 / 20** |
+  | water | 665 | 0.0371 | **0.0239** | **19 / 19** |
+  | water | 560 | 0.0512 | **0.0369** | **19 / 19** |
+  | water | 490 | 0.0697 | **0.0517** | **19 / 19** |
+  | land | 665 | 0.0035 | **0.0034** | 10 / 19 |
+  | land | 560 | 0.0117 | **0.0175** | **0 / 20** |
+  | land | 490 | 0.0107 | **0.0031** | **19 / 20** |
 
-  Over water the tier improves **every band on every frame**, by 26 to 36 %, which is the
-  acceptance met. Over land 490 nm more than halves and 665 nm is a coin flip, but **560 nm gets
-  worse on all twenty frames**, so "smaller at every band" is not met and is recorded as not met.
+  Over water the tier improves **every band on every frame**, by 28 to 36 %, which is the
+  acceptance met. Over land 490 nm comes down by a factor of 3.5 and 665 nm is a wash - marginally
+  better by median, 10 frames of 19 - but **560 nm gets worse on all twenty frames**, so "smaller
+  at every band" is not met and is recorded as not met. Two bands of three meet it.
   The unanimity is the point: a correction with the wrong magnitude or the wrong spectral shape
-  would scatter across frames of differing loading (0.02 to 0.25 here) and geometry. Twenty out of
-  twenty in one direction, at the one band A10 had already localised a 0.012 reference-side bias
+  would scatter across frames of differing loading (0.012 to 0.288 here) and geometry. Twenty out
+  of twenty in one direction, at the one band A10 had already localised a 0.012 reference-side bias
   to - band-specific, geometry-independent, negative in 12 of 13 frames before any aerosol term
   existed - says the aerosol tier is pushing 560 nm down correctly and the reference is not where
-  we are heading. That is a claim for **question E1** to settle, not one to settle here, and it is
-  why Phase 5 must not turn the tier on by default while E1 is open.
+  we are heading. **The spectral signature is cleaner than it was**: with both neighbours now
+  improving (490 by 3.5x, 665 marginally) and only 560 worsening, a band-localised offset in the
+  reference fits and an error in our aerosol magnitude or slope does not. That is a claim for
+  **question E1** to settle, not one to settle here, and it is why Phase 5 must not turn the tier
+  on by default while E1 is open.
 - [ ] **Phase 4 - aerosol retrieval, for when no AOD product is at hand.** Dark-target over water
   (the near-infrared black-pixel assumption at 865 nm), dark-dense-vegetation over land, and a
   climatological fallback. *Acceptance: retrieved AOD against the `SY_2_AOD` product's own
@@ -632,3 +636,45 @@ the phase that needs them.*
   reproduced to the digit and one moved by 3e-4 at 560 nm. Nothing here changes a conclusion, but
   it sets the shelf life of any frame-pinned number in this plan at **days**, and it is the reason
   the acceptance table above states its frame counts rather than just its medians.
+- **2026-11-02 - two interpolation bugs in Phase 3, found while setting up Phase 4.** Both were
+  mine, both were shipped in `00692c7`, and the first invalidated every number Phase 3 reported.
+  They are the same mistake twice: **a rule that was right for one axis, applied to another whose
+  physics differs.**
+  **Clamping at the bottom of the optical-depth axis.** The table's lightest row is 0.05, and
+  `aerosol_terms` held that value below it, so **an optical depth of zero received the correction
+  for the table's lightest haze**. Clamping is correct for the zenith axes and the plan says why -
+  past the last node the curve is steep and unknown, so holding it is wrong in a bounded, visible
+  way. I reused that helper for optical depth without noticing that **the value at zero is not
+  unknown**: an atmosphere with no aerosol in it adds no path reflectance, dims nothing and adds
+  nothing to the spherical albedo, by definition. It now scales linearly from that exact anchor to
+  the first stored node, which the table itself shows is nearly straight - 0.157 of increment per
+  unit depth at 0.05 against 0.148 at 0.15.
+  This was not a corner case. **Of the 47 frames with a reported loading, 26 - 55 % - sit below
+  0.05**, median 0.044, and the clamp over-corrected them by a median factor of **1.54**. Both
+  frames Phase 3 validated on were among them (0.0332 land, 0.0424 water), which is why every
+  number in the first Phase 3 write-up was overstated and has been re-measured here.
+  **Pressure's extrapolation allowance inherited by an axis measured in optical depth.**
+  `_trilinear` was written for the Rayleigh table and hardwired `(PRESSURE_EXTRAPOLATION_HPA, 0,
+  0)`. The aerosol grid reused it, so its *first* axis - optical depth, topping out at 0.4 - was
+  handed 60 units of extrapolation room, which is unbounded in practice. Measured at 490 nm:
+  the transmittance ratio reads +0.703 at the table edge, **-0.010 at depth 1.5 and -2.28 at 5.0**.
+  A negative two-way transmittance flips the sign of the inverted surface reflectance and reports
+  it as confidently as any other pixel; a smoke plume is an ordinary way to reach 1.5. No frame in
+  the current holding exceeds 0.4, so nothing measured was affected - this one was latent. Both
+  tables now name their own rule (`RAYLEIGH_AXES`, `AEROSOL_AXES`) and `_trilinear` requires it
+  rather than defaulting, so the next table cannot inherit the wrong one silently.
+  **`aerosol_grid_limits`** is added alongside, because clamping at the top is only half an answer:
+  a caller handed 1.5 now gets the 0.4 correction with no sign of it, and Phase 5's per-pixel
+  quality band has to be able to say "hazier than the table goes".
+  **What changed in the result, and what did not.** Every direction held; the magnitudes moved in
+  the correction's favour. Land 490 nm went from 0.0045 to **0.0031** against a base of 0.0107,
+  land 665 from 0.0041 to **0.0034** - now marginally *better* than the base rather than worse -
+  and land 560's worsening shrank from +0.0089 to **+0.0058**. Water barely moved, because the
+  water frames carry the heavier loadings. So the acceptance verdict improved from "fails at two
+  bands of three" to "fails at one", and the 560 evidence got **stronger**, not weaker: both its
+  spectral neighbours now improve while it alone degrades on every frame.
+  **The lesson, stated so it is not relearned:** an interpolation rule is part of the physics of
+  the axis it runs on, not a property of the interpolator. Clamping, extrapolating and anchoring at
+  a known value are three different answers, and which is right depends on whether the value past
+  the edge is unknown, nearly linear, or exactly known. Three of this plan's axes wanted three
+  different answers and got one.

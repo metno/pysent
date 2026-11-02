@@ -315,19 +315,33 @@ def _axis_weights(nodes, values, extrapolate_above=0.0, transform=None):
     return lower, upper, weight
 
 
-def _trilinear(cube, axes, coordinates):
+#: How each axis of a table is interpolated past its last node. The two zenith
+#: axes interpolate in their secant, which is what the path reflectance is
+#: linear in, and neither extrapolates.
+#:
+#: **The first axis differs between the two tables, which is why the caller has
+#: to say.** For Rayleigh it is pressure, which may extrapolate a little
+#: because the physics is nearly linear in it. For aerosol it is optical depth,
+#: which may not: the table stops at 0.4, and extrapolating from there drives
+#: the transmittance *negative* past about 1.5 - a smoke plume would come back
+#: with a sign-flipped surface reflectance stated confidently. This used to be
+#: one hardwired tuple naming pressure, inherited by the aerosol grid when it
+#: reused this function.
+RAYLEIGH_AXES = ((PRESSURE_EXTRAPOLATION_HPA, 0.0, 0.0), (None, _secant, _secant))
+AEROSOL_AXES = ((0.0, 0.0, 0.0), (None, _secant, _secant))
+
+
+def _trilinear(cube, axes, coordinates, interpolation):
     """Multilinear interpolation on a regular but unevenly spaced grid.
 
     numpy only - scipy is not a dependency of this library, and a
     three-dimensional multilinear interpolation is eight weighted corners.
 
-    The first axis is pressure, and it is the only one allowed to extrapolate;
-    see :func:`_axis_weights`.
+    ``interpolation`` is ``(allowances, transforms)`` for the three axes -
+    :data:`RAYLEIGH_AXES` or :data:`AEROSOL_AXES`. It is required rather than
+    defaulted because the right answer differs per table; see those two.
     """
-    allowances = (PRESSURE_EXTRAPOLATION_HPA, 0.0, 0.0)
-    # Pressure interpolates linearly; the two zenith angles interpolate in
-    # their secant, which is what the physics is linear in.
-    transforms = (None, _secant, _secant)
+    allowances, transforms = interpolation
     brackets = [
         _axis_weights(nodes, value, allowance, transform)
         for nodes, value, allowance, transform in zip(
@@ -353,6 +367,34 @@ def rayleigh_grid_limits(platform: str, band: int):
     (pressures, solars, views), _ = grids[_table_key(platform, band, grids)]
     return {
         "pressure_hpa": (float(pressures[0]), float(pressures[-1])),
+        "solar_zenith": (float(solars[0]), float(solars[-1])),
+        "view_zenith": (float(views[0]), float(views[-1])),
+    }
+
+
+def aerosol_grid_limits(platform: str = "S3A", band: int = 4):
+    """``{"optical_depth_550": (lo, hi), ...}`` - the aerosol table's coverage.
+
+    Neither end extrapolates, so a caller outside these limits gets the nearest
+    edge: an optical depth of 1.5 is corrected as though it were 0.4. There is
+    no way to tell that from the returned terms, which is why the limits are
+    published - a per-pixel quality band has to be able to say "this pixel was
+    hazier than the table goes". The one exception is below the lightest stored
+    depth, where the terms scale to the exact zero at no aerosol at all rather
+    than being held; see :func:`aerosol_terms`.
+    """
+    grids = _aerosol_grids()
+    keys = [key for key in grids if key[0] == platform and key[1] == int(band)]
+    if not keys:
+        raise ValueError(
+            f"the aerosol table has no rows for {platform} band {band}; it covers "
+            + ", ".join(
+                f"{p} band {b}" for p, b, _ in sorted({(p, b, "") for p, b, _ in grids})
+            )
+        )
+    depths, solars, views = grids[keys[0]][0]
+    return {
+        "optical_depth_550": (float(depths[0]), float(depths[-1])),
         "solar_zenith": (float(solars[0]), float(solars[-1])),
         "view_zenith": (float(views[0]), float(views[-1])),
     }
@@ -411,7 +453,10 @@ def rayleigh_terms(
     grids = _rayleigh_grids()
     axes, cubes = grids[_table_key(platform, band, grids)]
     coordinates = (pressure_hpa, solar_zenith_deg, view_zenith_deg)
-    terms = {name: _trilinear(cube, axes, coordinates) for name, cube in cubes.items()}
+    terms = {
+        name: _trilinear(cube, axes, coordinates, RAYLEIGH_AXES)
+        for name, cube in cubes.items()
+    }
 
     phi = np.radians(np.asarray(relative_azimuth_deg, dtype=np.float64))
     path = terms["a0"] + 2.0 * terms["a1"] * np.cos(phi) + 2.0 * terms["a2"] * np.cos(2.0 * phi)
@@ -621,6 +666,9 @@ def aerosol_terms(
     )
     azimuth = np.asarray(relative_azimuth_deg, dtype=np.float64)
     coordinates = (optical_depth_550, solar_zenith_deg, view_zenith_deg)
+    # The lightest optical depth the table carries. Taken before the blend
+    # rather than from whichever model happened to be looked up last.
+    floor = float(min(grids[key][0][0][0] for key in grids if key[0] == platform))
 
     blended = {"path": 0.0, "down": 0.0, "up": 0.0, "albedo": 0.0, "error": 0.0}
     for model, weight in _model_weights(platform, angstrom).items():
@@ -636,7 +684,7 @@ def aerosol_terms(
         # a fitted form that cannot hold the forward-scattering peak.
         curve = np.stack(
             [
-                _trilinear(cubes[f"azimuth_{int(a):03d}"], axes, coordinates)
+                _trilinear(cubes[f"azimuth_{int(a):03d}"], axes, coordinates, AEROSOL_AXES)
                 for a in azimuths
             ],
             axis=-1,
@@ -656,19 +704,46 @@ def aerosol_terms(
             ("error", "interpolation_error"),
         ):
             blended[name] = blended[name] + weight * _trilinear(
-                cubes[field], axes, coordinates
+                cubes[field], axes, coordinates, AEROSOL_AXES
             )
+
+    # **Below the first stored optical depth, scale towards the exact zero at
+    # tau = 0 rather than clamping.** Clamping is right for the zenith axes,
+    # where the curve past the last node is steep and unknown, and wrong here,
+    # because the value at tau = 0 is not unknown: an atmosphere with no
+    # aerosol in it contributes no aerosol path reflectance, does not dim the
+    # transmittance and adds nothing to the spherical albedo, by definition.
+    # Clamping instead handed a clear-air pixel the whole correction for the
+    # table's lightest haze - and this archive's loading is 0.02 to 0.10, so
+    # that was most of it, over-corrected by up to half again.
+    #
+    # Linear in tau is a good approximation over this one interval and an exact
+    # anchor at the end of it: measured on the table itself, the increment per
+    # unit optical depth is 0.157 at tau 0.05 against 0.148 at 0.15, so the
+    # curve through the origin is nearly straight.
+    depth = np.asarray(optical_depth_550, dtype=np.float64)
+    scale = np.clip(depth / floor, 0.0, 1.0)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         return {
-            "path_increment": blended["path"] - molecular["path_reflectance"],
-            "transmittance_down_ratio": blended["down"] / molecular["transmittance_down"],
-            "transmittance_up_ratio": blended["up"] / molecular["transmittance_up"],
-            "spherical_albedo_increment": blended["albedo"] - molecular["spherical_albedo"],
+            "path_increment": scale * (blended["path"] - molecular["path_reflectance"]),
+            "transmittance_down_ratio": 1.0 + scale * (
+                blended["down"] / molecular["transmittance_down"] - 1.0
+            ),
+            "transmittance_up_ratio": 1.0 + scale * (
+                blended["up"] / molecular["transmittance_up"] - 1.0
+            ),
+            "spherical_albedo_increment": scale * (
+                blended["albedo"] - molecular["spherical_albedo"]
+            ),
             # What the azimuth interpolation costs at this geometry, from the
             # table's own leave-one-out estimate. It is the number to look at
             # before trusting a correction at a large solar and view zenith
             # together, where the aerosol phase function is sharply peaked.
+            # **Not** scaled down with the optical depth like the terms above:
+            # it is the curvature of the whole stored path curve, molecular
+            # part included, so shrinking it towards zero with the aerosol
+            # would understate what the azimuth step actually costs.
             "interpolation_error": blended["error"],
         }
 
