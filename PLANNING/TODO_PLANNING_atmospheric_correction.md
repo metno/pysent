@@ -160,6 +160,10 @@ than an edge case.
 six of the 31 products, `Surface_reflectance_*`, `SSA_*`, `ANG550_865` and every `_uncertainty` are
 **0 % populated** - they exist as variables and hold no data at all. What is actually there is the
 optical depth itself, at **6 to 25 % spatial coverage** depending on the granule, plus `FM_AOD550`.
+*Widened 2026-11-02 during Phase 3:* across the frames the sweep covered, coverage inside a frame's
+own bounding box runs **6 to 58 %** - the land frame is the generous end at 58 %, the water frame
+the sparse end at 9 % - so the range is wider than the first six products suggested, but the
+conclusion is unchanged: on most frames most pixels have no retrieval.
 
 So the aerosol tier gets measured loading but not a measured phase function, and three consequences
 follow: the Angstrom exponent has to be **derived** from `AOD_440`/`AOD_550`/`AOD_670` (over the
@@ -273,7 +277,9 @@ error budget is measurable. It is not ordered by difficulty.
 
 - [x] **Phase 0 - the table generator** (added after Q1 was answered). `tools/rt6s/` builds 6SV 1.1
   in a container, pinned by checksum, with `Py6S` driving it; `tools/rt6s/check.py` pins the
-  reference case so a rebuild that changes the physics fails loudly. **Verified**: at 490 nm, solar
+  reference case so a rebuild that changes the physics fails loudly, and `tools/rt6s/offgrid.py`
+  (added in Phase 3) measures what the tables cost *between* their rows rather than at them - the
+  off-grid reference points the tests pin, the azimuth step, and the sea-level aerosol assumption. **Verified**: at 490 nm, solar
   zenith 70, view zenith 20, relative azimuth 90, no aerosols, black ground, 6SV gives path
   reflectance **0.09609**, `tau_R` **0.15676**, transmittance **0.81451** down and **0.92285** up,
   spherical albedo **0.12390**. Two numbers to carry into Phase 2: `tau_R` agrees with the audit's
@@ -363,13 +369,38 @@ error budget is measurable. It is not ordered by difficulty.
   surface and then divides by a transmittance of 0.75, which amplifies it. A4 said the atmosphere
   over water is up to 195 times the signal; this is what that looks like once the Rayleigh part is
   handled properly.
-- [ ] **Phase 3 - aerosol from the AOD product.** Read `SY_2_AOD` (A6), put it on the frame, and
+- [x] **Phase 3 - aerosol from the AOD product.** Read `SY_2_AOD` (A6), put it on the frame, and
   build the aerosol path reflectance and transmittance from measured `AOD_550`, `ANG550_865` and
   `SSA_*` rather than a chosen model. *Acceptance: over land the residual against `SY_2_SYN` is
   smaller than Phase 2's at every band; over water the residual against `OL_2_WFR` falls from A4's
   0.039 to 0.063 by a stated factor. Both measured on the same frames, so the comparison is like for
   like.* Doing this **before** retrieval is the point of the sequence: with ESA's own aerosol inputs
   the correction's error is isolated, and if it cannot reach WFR here, no retrieval will rescue it.
+  **Acceptance partly met, and the part that failed is the informative one.** Measured over every
+  triple the archive held at the time - **55 frames, none unreadable** - with the loading each
+  frame's own aerosol product reports (`run.sh sweep 60`). Median absolute residual over the frames
+  that carry enough clear pixels of that type *and* have an aerosol product covering them, with the
+  count that improved:
+
+  | scene | band | gas+Rayleigh | +aerosol | frames better |
+  |---|---|---|---|---|
+  | water | 665 | 0.0371 | **0.0237** | **19 / 19** |
+  | water | 560 | 0.0512 | **0.0360** | **19 / 19** |
+  | water | 490 | 0.0697 | **0.0515** | **19 / 19** |
+  | land | 665 | 0.0035 | 0.0041 | 10 / 19 |
+  | land | 560 | 0.0116 | **0.0206** | **0 / 20** |
+  | land | 490 | 0.0107 | **0.0045** | **19 / 20** |
+
+  Over water the tier improves **every band on every frame**, by 26 to 36 %, which is the
+  acceptance met. Over land 490 nm more than halves and 665 nm is a coin flip, but **560 nm gets
+  worse on all twenty frames**, so "smaller at every band" is not met and is recorded as not met.
+  The unanimity is the point: a correction with the wrong magnitude or the wrong spectral shape
+  would scatter across frames of differing loading (0.02 to 0.25 here) and geometry. Twenty out of
+  twenty in one direction, at the one band A10 had already localised a 0.012 reference-side bias
+  to - band-specific, geometry-independent, negative in 12 of 13 frames before any aerosol term
+  existed - says the aerosol tier is pushing 560 nm down correctly and the reference is not where
+  we are heading. That is a claim for **question E1** to settle, not one to settle here, and it is
+  why Phase 5 must not turn the tier on by default while E1 is open.
 - [ ] **Phase 4 - aerosol retrieval, for when no AOD product is at hand.** Dark-target over water
   (the near-infrared black-pixel assumption at 865 nm), dark-dense-vegetation over land, and a
   climatological fallback. *Acceptance: retrieved AOD against the `SY_2_AOD` product's own
@@ -533,3 +564,71 @@ the phase that needs them.*
   Q3 offered. The sweep also sharpened the 560 nm problem - negative in 12 of 13 frames with usable
   land, at both zenith groups - so it is band-specific and geometry-independent, which is a much
   better starting point for Phase 3 than Phase 2 had.
+- **2026-11-02 - Phase 3, the aerosol tier.** Four things had to be measured rather than assumed,
+  and two of them overturned a decision already taken.
+  **Three Fourier terms cannot hold an aerosol phase function.** Phase 2 stores the azimuth
+  dependence as three terms, which is lossless for Rayleigh (7.9e-6 over 21 bands). I reused that
+  form for aerosol after checking **one** geometry, solar zenith 70 and view zenith 40, where it
+  agreed to 4.5e-6. Over the whole table the worst fit is **0.18**, with 37 % of grid points past
+  1e-3, concentrated where both zenith angles are large and the phase function is sharply
+  forward-peaked: at solar zenith 85 and view zenith 60 the path reflectance runs 0.205 to 1.545
+  across azimuth, and seven terms still miss it by 1.6e-2. Restricting to the archive's own
+  envelope does not rescue it - p99 is still 6.6e-3 there, the size of Phase 2's entire budget -
+  and refining the azimuth grid towards the forward peak came out *worse* than uniform spacing,
+  because the curvature is spread across the range rather than concentrated. **The table now
+  stores the samples**, every 10 degrees in columns `az000`..`az180`, and the library interpolates
+  the three grid axes first and then along the azimuth curve.
+  **The cost of that step, measured at the midpoints** where linear interpolation is furthest from
+  the curve (`offgrid.py --what azimuth`, 384 geometries): **2.4e-3** at the archive's loading
+  within its geometry, 9.1e-4 at view zenith 40 or less, 5.5e-3 at optical depth 0.15, and 2.3e-2
+  at the table's worst corner. The `interp_error` column shipped with each row is a leave-one-out
+  estimate over nodes 20 degrees apart, so it **over-states the real step by about 2.4 times** -
+  5.8e-3 where the truth is 2.4e-3. It is a bound for screening a geometry, not the error, and
+  both the generator and the table header now say so.
+  **The whole chain against 6SV off the grid in every coordinate at once** - optical depth,
+  both zeniths and azimuth - agrees to **1.8e-3** in path reflectance, worst at band 17, solar
+  zenith 77.5, view zenith 52. Those four points are pinned in the tests.
+  **Holding the aerosol at sea level is cheap.** The library adds a sea-level aerosol increment to
+  the molecular term at the pixel's own pressure. Against 6SV run at altitude that costs
+  **4.4e-4** or better over ground to 3 km at this archive's loading, reaching 5.5e-3 only at
+  optical depth 0.4 and 3 km together. The elevated-terrain worry in D is therefore quantified and
+  small, and the pressure axis the aerosol table does not carry is not worth its six-fold cost.
+  **Deviation:** the aerosol table covers four bands (490, 560, 665, 865) and not all 21, because
+  an aerosol run costs 6SV 0.65 s against 0.04 s and the azimuth axis is 19 deep - 4,752 rows from
+  about 90,000 runs. Three of those bands are what true colour renders and the fourth is what a
+  dark-target retrieval needs; extending is one command and about two hours.
+  **Deviation:** the audit's water frame had to be repinned. `20261025T111740`'s Level-1 product
+  **aged out of the rolling archive** while its Level-2 products stayed, so the frame reported
+  itself as a half-present acquisition rather than an absent one. The water case is now
+  `20261031T120105` - 63 % clear water against the old 48 %, but at solar zenith 79.5 rather than
+  70.6, so its numbers are not comparable with A4's and are reported separately. `run.sh` now
+  refuses a frame that has expired instead of passing empty paths into the reader, and says why.
+  **Deviation:** the committed table's header prose was corrected in place rather than by
+  regenerating the table, which would have cost two hours of 6SV for a comment. The numbers are
+  untouched and the generator now emits exactly that text.
+  **One defect found in committed audit code:** `aerosol.py` took its "ours" and "SYN" medians over
+  each quantity's own valid pixels, so `ours - SYN` was a difference between two differently
+  sampled populations - it read +0.0101 at 490 nm where the like-for-like figure is +0.0071. Fixed
+  to share one mask, and it now agrees with `budget.py` to the digit on all three bands, which is
+  two independent paths to the same number.
+  **A second defect, and this one stopped the session: the audit scripts never released their
+  scratch.** Every script took a `tempfile.mkdtemp` under `/tmp` and left it there, and `sweep.py`
+  does that once per frame inside a fifty-frame loop. A frame's extracted members are a few
+  hundred megabytes, so the run filled the root volume to **zero bytes free**. The failure wore a
+  convincing disguise: the last two frames reported `RuntimeError` and `OSError` from the product
+  reader, which reads as two corrupt granules rather than as a full disk - and the root volume was
+  already at 97 % for reasons of its own, so there was little margin to begin with.
+  Fixed twice over. Scratch now goes through one `scratch_dir()` helper that puts it on the data
+  volume `/mnt/data` (overridable with `PYSENT_AUDIT_SCRATCH`), where there is 244 GB rather than
+  17 GB; and `sweep.py` deletes each frame's scratch in a `finally` before reading the next, so
+  peak usage is one frame instead of fifty. The re-run held the volume flat at 4.6 GB from first
+  frame to last and read all 55 frames, so the numbers above are from a run with no disk failure
+  in it.
+  **How much the archive moves under a measurement, measured by accident.** Between the two sweeps,
+  about an hour apart: three acquisitions **gained** their Synergy product (52 complete triples
+  became 55), and the last Level-1 product on 2026/10/25 was **deleted**, so a frame that
+  contributed water statistics to the first run had stopped being a complete triple by the second.
+  That is why the water counts read 19 rather than 20. Of the 51 frames common to both runs, 50
+  reproduced to the digit and one moved by 3e-4 at 560 nm. Nothing here changes a conclusion, but
+  it sets the shelf life of any frame-pinned number in this plan at **days**, and it is the reason
+  the acceptance table above states its frame counts rather than just its medians.

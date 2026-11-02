@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
-import tempfile
 
 import numpy as np
 
@@ -37,7 +36,7 @@ from osgeo import gdal  # noqa: E402
 
 gdal.UseExceptions()
 
-from budget import _toa, level2_reflectance, tie_field  # noqa: E402
+from budget import _toa, level2_reflectance, scratch_dir, tie_field  # noqa: E402
 
 from pysent._atmosphere import (  # noqa: E402
     gas_transmittance,
@@ -72,7 +71,7 @@ def main() -> int:
     parser.add_argument("--decimate", type=int, default=8)
     args = parser.parse_args()
 
-    scratch = pathlib.Path(tempfile.mkdtemp(prefix="ac-spectral-"))
+    scratch = scratch_dir("ac-spectral-")
     root = sen3_root(args.l1)
     syn_root = sen3_root(args.syn)
     platform = platform_of(args.l1)

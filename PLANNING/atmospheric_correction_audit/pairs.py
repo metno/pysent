@@ -22,7 +22,6 @@ import collections
 import pathlib
 import re
 import sys
-import tempfile
 
 import numpy as np
 
@@ -31,6 +30,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 from osgeo import gdal  # noqa: E402
 
 gdal.UseExceptions()
+
+from budget import scratch_dir  # noqa: E402
 
 from pysent._olci_l1 import quality_mask  # noqa: E402
 from pysent._sen3 import (  # noqa: E402
@@ -70,7 +71,7 @@ def collect(platform, months):
 
 def probe(l1_path):
     """Solar zenith and the clear land/water split of one Level-1 frame."""
-    scratch = pathlib.Path(tempfile.mkdtemp(prefix="ac-pairs-"))
+    scratch = scratch_dir("ac-pairs-")
     root = sen3_root(str(l1_path))
     dataset = open_sen3_variable(
         extract_member(root, find_member(root, "tie_geometries.nc"), scratch), "SZA"

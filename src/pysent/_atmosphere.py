@@ -425,30 +425,63 @@ def rayleigh_terms(
 
 @functools.lru_cache(maxsize=4)
 def _aerosol_grids():
-    """``{(platform, band, model): (axes, cubes)}`` from the committed table.
+    """``{(platform, band, model): (axes, cubes, azimuths)}`` from the table.
 
     ``axes`` is ``(optical depths, solar zeniths, view zeniths)``; the table is
     at sea level only, so there is no pressure axis - see
     :func:`atmosphere_terms` for how it is combined with the molecular table.
+    ``azimuths`` is the stored azimuth axis in degrees, taken from the header,
+    and ``cubes`` carries one grid per azimuth sample under ``azimuth_NNN``
+    beside the transmittances, the spherical albedo and the interpolation
+    error.
     """
     gathered: dict[tuple[str, int, str], dict[tuple[float, float, float], tuple]] = {}
     path = DATA_DIR / AEROSOL_TABLE
     if not path.exists():
         return {}
+
+    azimuths: list[float] = []
     for line in path.read_text().splitlines():
-        if not line or line.startswith("#") or line.startswith("platform,"):
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("platform,"):
+            # The azimuth axis is in the header: the table stores samples every
+            # ten degrees rather than a fitted form, because three Fourier
+            # terms miss an aerosol phase function by up to 0.18 where both
+            # zenith angles are large.
+            # Exactly ``az`` plus three digits. A looser test matches any other
+            # column that happens to begin with those letters, which an earlier
+            # version of this table did (``azimuth_fit_error``).
+            azimuths = [
+                float(name[2:])
+                for name in line.split(",")
+                if len(name) == 5 and name.startswith("az") and name[2:].isdigit()
+            ]
+            if not azimuths:
+                raise ValueError(
+                    f"{path} has no azXXX columns; it looks like an older table that stored "
+                    "fitted azimuth terms, which cannot hold an aerosol phase function - "
+                    "regenerate it with tools/rt6s/generate_tables.py --tables aerosol"
+                )
             continue
         fields = line.split(",")
         key = (fields[0], int(fields[1]), fields[2])
         coordinate = (float(fields[3]), float(fields[4]), float(fields[5]))
+        samples = [float(value) for value in fields[11:]]
+        if len(samples) != len(azimuths):
+            raise ValueError(
+                f"{path} row for {key} has {len(samples)} azimuth samples but the header "
+                f"names {len(azimuths)}"
+            )
         gathered.setdefault(key, {})[coordinate] = (
-            float(fields[6]), float(fields[7]), float(fields[8]),
-            float(fields[10]), float(fields[11]), float(fields[12]), float(fields[13]),
+            float(fields[7]), float(fields[8]), float(fields[9]), float(fields[10]),
+            float(fields[6]), *samples,
         )
 
     names = (
-        "a0", "a1", "a2",
         "transmittance_down", "transmittance_up", "spherical_albedo", "band_optical_depth",
+        "interpolation_error",
+        *(f"azimuth_{int(a):03d}" for a in azimuths),
     )
     grids = {}
     for key, points in gathered.items():
@@ -470,7 +503,7 @@ def _aerosol_grids():
             )
             for name, value in zip(names, values):
                 cubes[name][index] = value
-        grids[key] = ((depths, solars, views), cubes)
+        grids[key] = ((depths, solars, views), cubes, np.array(azimuths))
     return grids
 
 
@@ -517,7 +550,7 @@ def model_angstrom(platform: str, model: str) -> float:
                 f"the aerosol table has no {model} rows for {platform} band {band}, so this "
                 "model's Angstrom exponent cannot be read from it"
             )
-        _, cubes = grids[key]
+        _, cubes, _ = grids[key]
         depths[nm] = float(np.median(cubes["band_optical_depth"]))
     return float(
         -np.log(depths[490.0] / depths[865.0]) / np.log(490.0 / 865.0)
@@ -586,23 +619,45 @@ def aerosol_terms(
         view_zenith_deg=view_zenith_deg,
         relative_azimuth_deg=relative_azimuth_deg,
     )
-    phi = np.radians(np.asarray(relative_azimuth_deg, dtype=np.float64))
+    azimuth = np.asarray(relative_azimuth_deg, dtype=np.float64)
     coordinates = (optical_depth_550, solar_zenith_deg, view_zenith_deg)
 
-    blended = {"path": 0.0, "down": 0.0, "up": 0.0, "albedo": 0.0}
+    blended = {"path": 0.0, "down": 0.0, "up": 0.0, "albedo": 0.0, "error": 0.0}
     for model, weight in _model_weights(platform, angstrom).items():
         key = (platform, int(band), model)
         if key not in grids:
             raise ValueError(
                 f"the aerosol table has no {model} rows for {platform} band {band}"
             )
-        axes, cubes = grids[key]
-        terms = {name: _trilinear(cube, axes, coordinates) for name, cube in cubes.items()}
-        path = terms["a0"] + 2.0 * terms["a1"] * np.cos(phi) + 2.0 * terms["a2"] * np.cos(2 * phi)
-        blended["path"] = blended["path"] + weight * path
-        blended["down"] = blended["down"] + weight * terms["transmittance_down"]
-        blended["up"] = blended["up"] + weight * terms["transmittance_up"]
-        blended["albedo"] = blended["albedo"] + weight * terms["spherical_albedo"]
+        axes, cubes, azimuths = grids[key]
+        # Interpolate the three grid axes first, which leaves one azimuth curve
+        # per pixel, then interpolate along it. Doing it this way round means
+        # the azimuth step is linear between stored samples rather than through
+        # a fitted form that cannot hold the forward-scattering peak.
+        curve = np.stack(
+            [
+                _trilinear(cubes[f"azimuth_{int(a):03d}"], axes, coordinates)
+                for a in azimuths
+            ],
+            axis=-1,
+        )
+        lower, upper, fraction = _axis_weights(azimuths, azimuth)
+        picked = np.take_along_axis(
+            curve, np.expand_dims(lower, -1), axis=-1
+        )[..., 0] * (1.0 - fraction) + np.take_along_axis(
+            curve, np.expand_dims(upper, -1), axis=-1
+        )[..., 0] * fraction
+
+        blended["path"] = blended["path"] + weight * picked
+        for name, field in (
+            ("down", "transmittance_down"),
+            ("up", "transmittance_up"),
+            ("albedo", "spherical_albedo"),
+            ("error", "interpolation_error"),
+        ):
+            blended[name] = blended[name] + weight * _trilinear(
+                cubes[field], axes, coordinates
+            )
 
     with np.errstate(divide="ignore", invalid="ignore"):
         return {
@@ -610,6 +665,11 @@ def aerosol_terms(
             "transmittance_down_ratio": blended["down"] / molecular["transmittance_down"],
             "transmittance_up_ratio": blended["up"] / molecular["transmittance_up"],
             "spherical_albedo_increment": blended["albedo"] - molecular["spherical_albedo"],
+            # What the azimuth interpolation costs at this geometry, from the
+            # table's own leave-one-out estimate. It is the number to look at
+            # before trusting a correction at a large solar and view zenith
+            # together, where the aerosol phase function is sharply peaked.
+            "interpolation_error": blended["error"],
         }
 
 

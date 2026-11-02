@@ -132,12 +132,32 @@ is centralised and tested against 6SV at columns off the generated grid.
 
 ## 3. Rayleigh scattering
 
-### C7. Three Fourier terms in the relative azimuth
+### C7. Three Fourier terms in the relative azimuth - for Rayleigh only
 
-**Chosen.** `rho = a0 + 2 a1 cos(dphi) + 2 a2 cos(2 dphi)`, fitted to thirteen azimuths.
+**Chosen.** `rho = a0 + 2 a1 cos(dphi) + 2 a2 cos(2 dphi)`, fitted to thirteen azimuths. **The
+aerosol table does not use this form**; it stores samples every 10 degrees and interpolates
+linearly between them.
 
-**Evidence.** The worst fit error anywhere in the table, across all 21 bands and both platforms, is
-**7.9e-6** in reflectance. The compression is effectively lossless.
+**Evidence.** For Rayleigh the worst fit error anywhere in the table, across all 21 bands and both
+platforms, is **7.9e-6** in reflectance - effectively lossless, because molecular scattering really
+is a two-term phase function.
+
+For aerosol the same form fails, and this was measured only after a first table had been generated
+with it. The worst fit is **0.18**, with 37 % of grid points past 1e-3, concentrated where both
+zenith angles are large and the phase function is sharply forward-peaked; at solar zenith 85 and
+view zenith 60 the path reflectance runs 0.205 to 1.545 across azimuth, and *seven* terms still
+miss it by 1.6e-2. Inside this archive's own geometry the p99 was still 6.6e-3, the size of the
+entire molecular error budget. Refining the azimuth grid towards the forward peak came out **worse**
+than uniform spacing, because the curvature is spread across the range rather than concentrated.
+
+Stored samples at 10 degrees cost, measured against 6SV at the midpoints where linear
+interpolation is furthest from the curve: **2.4e-3** at this archive's loading and geometry,
+9.1e-4 at view zenith 40 or less, and 2.3e-2 at the table's worst corner (optical depth 0.4, solar
+zenith 85, view zenith 60).
+
+**Caveat a reviewer should hold us to.** Each aerosol row also ships an `interp_error` column, a
+leave-one-out estimate. It interpolates across 20 degrees where a caller only crosses 10, so it
+**over-states the real error by about 2.4 times**. It is a screening bound, not the error.
 
 ### C8. Interpolate in the secant of each zenith angle, not the angle
 
@@ -168,7 +188,34 @@ sea level over-corrects it.
 
 ---
 
-## 4. Aerosol (Phase 3, in progress)
+## 4. Aerosol
+
+**What the tier does, measured over every matched triple the archive held (55 frames, none
+unreadable), using the loading each frame's own `SY_2_AOD` product reports.** Median absolute
+residual against ESA's Level-2, over the frames carrying enough clear pixels of that type and
+covered by an aerosol product, with the number in which the tier improved agreement:
+
+| scene | band | gas+Rayleigh | +aerosol | frames better |
+|---|---|---|---|---|
+| water | 665 | 0.0371 | **0.0237** | **19 / 19** |
+| water | 560 | 0.0512 | **0.0360** | **19 / 19** |
+| water | 490 | 0.0697 | **0.0515** | **19 / 19** |
+| land | 665 | 0.0035 | 0.0041 | 10 / 19 |
+| land | 560 | 0.0116 | **0.0206** | **0 / 20** |
+| land | 490 | 0.0107 | **0.0045** | **19 / 20** |
+
+Over water every band improves on every frame. Over land 490 nm more than halves, 665 nm is a
+coin flip, and **560 nm gets worse on all twenty frames** - which is the single most important
+number in this document and the subject of **question E1**. Across frames whose loading spans 0.02
+to 0.25 and whose solar zenith spans 63 to 79 degrees, a correction of the wrong magnitude or the
+wrong spectral shape would scatter. Twenty out of twenty in one direction, at the one band where a
+0.012 disagreement was already localised before any aerosol term existed, points at the reference
+rather than at the correction - but we cannot prove that from our side, which is why nothing is on
+by default (C16).
+
+Over water the improvement is real and still not sufficient: 0.0697 to 0.0515 at 490 nm leaves a
+residual **fourteen times** the water-leaving signal it is being compared against. See **E2**; the
+two quantities are not the same thing.
 
 ### C10. The caller names the aerosol source; nothing is fetched silently
 
@@ -191,12 +238,17 @@ mask.
 0.5. Choosing by land mask would mislabel continental outflow over water and marine air over
 coastal land.
 
-**Scope, stated plainly.** The aerosol table is generated for six bands first - 490, 510, 560, 620,
-665 and 865 nm - at optical depths 0.05, 0.15 and 0.4, from seven relative azimuths. That covers the
-three true-colour bands, the two that bracket the 560/620 disagreement of question E1, and the
-near-infrared band a dark-target retrieval would use. Extending to all 21 is one command; it was not
-done first because an aerosol run costs 6SV 0.65 s against 0.04 s for a clear one, sixteen times as
-much, so the full set is a three-hour job rather than a one-hour one.
+**Scope, stated plainly.** The aerosol table covers **four bands** - 490, 560, 665 and 865 nm - at
+optical depths 0.05, 0.15 and 0.4, over 11 solar zeniths, 9 view zeniths and 19 stored azimuths:
+4,752 rows from about 90,000 6SV runs. Three of those bands are what true colour renders and the
+fourth is what a dark-target retrieval needs. Extending to all 21 is one command and about two
+hours; it was not done first because an aerosol run costs 6SV 0.65 s against 0.04 s for a clear
+one, sixteen times as much, and because C7's azimuth axis is 19 deep rather than 13.
+
+The exponents the two models themselves carry, read off their own band optical depths rather than
+quoted from a textbook: **Continental 1.11, Maritime 0.27**. The land frame's measured 1.18
+therefore sits at - in fact just past - the Continental end, so on that frame the blend is not
+really blending. A reviewer should read the land results as "Continental", not as "a mixture".
 
 **If wrong.** This is the weakest physical choice in the correction, and **question E4** asks
 directly about it. Two models span a line in a space that really has at least three dimensions
@@ -208,18 +260,33 @@ field - which would have constrained absorption - is empty.
 **Chosen.** The aerosol increment is tabulated at sea level and added to the pressure-interpolated
 Rayleigh value.
 
-**Evidence/judgement.** Judgement, with a measurement pending: aerosol sits in the boundary layer,
-so the air column above it changes its scattering far less than it changes the molecular term, and a
-pressure axis here would multiply the table sixfold for a second-order effect. **Question E6.**
+**Evidence, now measured.** Against 6SV run at altitude - the only honest test, since the question
+is whether the air column above the aerosol matters - the approximation costs **4.4e-4 or better
+over ground up to 3 km** at this archive's loading, and reaches 5.5e-3 only at optical depth 0.4
+and 3 km together. The reasoning behind it holds: the aerosol sits in the boundary layer, so the
+column above changes its scattering far less than it changes the molecular term, and a pressure
+axis would multiply the table sixfold for an effect smaller than the azimuth step.
+
+**Question E6** stands, but now as a question about the hazy-and-high corner rather than about the
+approximation in general.
 
 ### C13. Where the aerosol product has no value, the granule's own median is used
 
 **Chosen.** Interpolate where measured; fall back to the scene median of that granule; record the
 filled fraction in the product's provenance. Never substitute a climatology silently.
 
-**Evidence.** The aerosol product's optical depth is present on only **6 to 25 %** of its cells,
-depending on the granule, so most pixels of a frame have no measured aerosol at all. **Question
+**Evidence.** The aerosol product's optical depth is present on only **6 to 58 %** of its cells,
+depending on the granule, so most pixels of most frames have no measured aerosol at all. **Question
 E5** asks whether a median fill is acceptable or whether unmeasured ground should be refused.
+
+**How the table in this section was actually measured, stated so it is not over-read.** It used
+**one optical depth and one Angstrom exponent per frame** - the median over the aerosol cells
+inside the frame's bounding box - not a per-pixel field. That was deliberate: with coverage this
+sparse, on a coarse grid unaligned with the radiance grid, a per-pixel field would mostly be
+measuring the gap-filling policy rather than the aerosol tier. So the numbers above answer "given
+the loading ESA itself reports here, does correcting for it help?" and not "does a per-pixel
+aerosol field help?". The second question needs the retrieval and the fill policy, and belongs
+with E5.
 
 ---
 
@@ -249,6 +316,11 @@ better at 490 nm. The frame that suggested degradation was 76 % bright, so its c
 were cloud-contaminated. A ceiling set from those two frames would have refused the better half of
 the archive.
 
+The wider sweep run for the aerosol tier agrees, and adds a detail: by solar-zenith band the
+worst-band median absolute land residual is 0.0131 at 68-72 degrees, 0.0124 at 72-76 and **0.0117
+at 76-80**, over 13, 10 and 31 frames. The relationship with sun angle is flat to slightly
+*improving*, not degrading.
+
 **If wrong.** Beyond 80 degrees we have no matched data at all, so the claim is "no evidence of
 degradation inside 63-80", not "accurate to 85".
 
@@ -276,13 +348,24 @@ chlorophyll absorption should put it well below. *Is this a known feature of the
 reflectance in these bands, or is there a term we are missing that acts only where ozone absorption
 is strong?*
 
+**The aerosol tier has now sharpened this into the sharpest result we have.** Correcting for the
+measured aerosol makes 560 nm worse on **20 of 20** frames while making 490 nm better on 19 of 20
+and every water band better on all 20. Those frames span optical depth 0.02 to 0.25 and solar
+zenith 63 to 79 degrees. A correction whose magnitude or spectral slope was wrong would have to
+scatter across that range; a reference-side offset of fixed size would behave exactly like this.
+We think the evidence now points at Synergy's 560 nm, and we would rather be told we are wrong
+than ship on our own reading of it.
+
 **E2. Can a Rayleigh-and-aerosol correction over water be called anything useful?**
 Over water the atmosphere is up to **195 times** the water-leaving signal (residual 0.063 against a
 signal of 0.0037 at 490 nm). After the full inversion the residual is *larger* than after a crude
 subtraction, because the inversion correctly attributes the leftover aerosol path to the surface and
-then divides by a transmittance of 0.75. *Should we ship a water product at all, with its
-uncertainty stated, or restrict surface reflectance to land and point water users at the Level-2
-products?*
+then divides by a transmittance of 0.75. The aerosol tier improves this on every band of every
+frame - 0.0668 to 0.0511 at 490 nm - but "improved by a quarter" still leaves a residual **fourteen
+times the signal**, and the two quantities are not the same thing in any case: our surface
+reflectance includes the air-water interface, while water-leaving reflectance is defined below it.
+*Should we ship a water product at all, with its uncertainty stated, or restrict surface
+reflectance to land and point water users at the Level-2 products?*
 
 **E3. The true-colour rendering, now that the reflectance changes.**
 The frozen value range `0 - 0.6` and `gamma 0.6` were chosen by eye on pictures that were later
@@ -295,7 +378,7 @@ interpolation on the measured Angstrom exponent adequate for Nordic autumn, or d
 long-range smoke, Arctic haze - need to be in the set? And is the fine-mode fraction a usable proxy
 for the phase function when the single-scattering albedo field is empty?*
 
-**E5. The aerosol product covers 6 to 25 % of its cells.** See C13. *Is filling unmeasured ground
+**E5. The aerosol product covers 6 to 58 % of its cells.** See C13. *Is filling unmeasured ground
 with the granule median acceptable, or should the correction refuse there - and if it fills, what
 should the per-pixel uncertainty be, given the product's own uncertainty field is also empty?*
 
@@ -320,12 +403,19 @@ Everything above is reproducible from the mounted archive with no downloads:
 |---|---|
 | `run.sh pairs` | the matched triples available |
 | `run.sh probe n` | the geometry of the first n |
-| `run.sh budget land` / `water` / `lowsun` | the reflectance budget per band against ESA's Level-2 |
-| `run.sh sweep n` | residual against solar zenith over n triples (C15) |
+| `run.sh budget land` / `water` / `lowsun` | the reflectance budget per band against ESA's Level-2, both tiers |
+| `run.sh sweep n` | residual against solar zenith over n triples, both tiers (C15) |
 | `run.sh spectral` | the implied aerosol path across Synergy's sixteen bands (E1) |
 | `run.sh aerosol` | what the aerosol product holds over the land frame (C13) |
 | `run.sh tooling` | the radiative-transfer tooling present |
 | `docker run ... tools/rt6s/check.py` | that 6SV still reproduces its reference case |
+| `docker run ... tools/rt6s/offgrid.py` | what the tables cost *between* their rows: the off-grid reference points, the azimuth step (C7) and the sea-level aerosol assumption (C12) |
+
+A caveat about reproducibility that cost us a frame: **the archive is a rolling window of about
+seven days.** The water frame these numbers were first measured on had its Level-1 product deleted
+while its Level-2 products remained, so the acquisition went half-present rather than absent. The
+water case is now `20261031T120105` at solar zenith 79.5, and `run.sh` refuses an expired frame
+instead of reading empty paths.
 
 The plan, with the audit findings and the phase-by-phase record, is
 `PLANNING/TODO_PLANNING_atmospheric_correction.md`.

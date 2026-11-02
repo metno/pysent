@@ -310,12 +310,39 @@ AEROSOL_MODELS = ("Continental", "Maritime")
 # Rayleigh table's 1013.25 hPa row, so repeating it here would be a second
 # copy of the same numbers to keep in step.
 AEROSOL_DEPTHS = (0.05, 0.15, 0.4)
-# Seven azimuths rather than thirteen. An aerosol phase function is more
-# forward-peaked than Rayleigh's, so this was measured rather than assumed:
-# fitting the three Fourier terms from seven azimuths reproduces all thirteen
-# to 4.5e-6, against 3.4e-6 from the full set. An aerosol run costs 0.65 s
-# against 0.04 s for a clear one, so halving the count is worth 4e-6.
-AEROSOL_AZIMUTHS = tuple(float(a) for a in range(0, 181, 30))
+# **The aerosol table stores azimuth samples, not Fourier terms.** Three terms
+# are lossless for Rayleigh (7.9e-6 over the whole table) and badly wrong for
+# aerosol: measured across a first generation, 37 % of grid points exceeded
+# 1e-3 and the worst reached 0.18, concentrated where both zenith angles are
+# large and the aerosol phase function is sharply forward-peaked. At solar
+# zenith 85 and view zenith 60 the path reflectance runs from 0.205 to 1.545
+# across azimuth, and seven Fourier terms still miss it by 1.6e-2.
+#
+# Refining the grid towards the forward end was tried and came out *worse*
+# than uniform spacing - the curvature is spread across the range rather than
+# concentrated in a peak - so the axis is uniform at 10 degrees.
+#
+# What that step costs, measured at the azimuth midpoints where linear
+# interpolation is furthest from the curve (``offgrid.py --what azimuth``):
+#
+#   at the archive's loading (tau 0.05), solar zenith <= 79, view <= 56
+#                                                    2.4e-03 worst
+#     ... of that, at view zenith <= 40              9.1e-04 worst
+#   same geometry at tau <= 0.15                     5.5e-03 worst, 5.0e-03 p99
+#   anywhere in the table (tau 0.4, 85 deg, 60 deg)  2.3e-02 worst
+#
+# against 6.6e-03 p99 for the fitted form *inside the same envelope* and 0.18
+# for it at the corners. The ``interp_error`` column stored with each row is a
+# leave-one-out estimate taken over nodes 20 degrees apart, so it over-states
+# this real step by about 2.4 times: it is a bound for screening a geometry,
+# not the error a caller incurs.
+AEROSOL_AZIMUTHS = tuple(float(a) for a in range(0, 181, 10))
+# Fewer bands and a slightly coarser solar-zenith axis than the Rayleigh
+# table, because an aerosol run costs 6SV 0.65 s against 0.04 s and the
+# azimuth axis is now nineteen deep. These four are the three bands true
+# colour renders plus the near-infrared one a dark-target retrieval needs;
+# extending is one command.
+AEROSOL_SOLAR_ZENITHS = (0.0, 20.0, 40.0, 55.0, 65.0, 70.0, 73.0, 76.0, 79.0, 82.0, 85.0)
 
 
 def aerosol_rows(job):
@@ -325,8 +352,10 @@ def aerosol_rows(job):
     air column above it changes its scattering far less than it changes the
     Rayleigh term, and carrying a pressure axis here would multiply the table
     by six for a second-order effect. The library adds this increment to the
-    pressure-interpolated Rayleigh value; ``check.py`` measures what that
-    approximation costs.
+    pressure-interpolated Rayleigh value, and ``offgrid.py --what elevation``
+    measures what that costs against 6SV run at altitude: at the archive's own
+    loading, **4.4e-04** or better over ground up to 3 km, rising to 5.5e-03
+    only at optical depth 0.4 and 3 km together.
 
     The aerosol optical depth at the band's own wavelength is stored with each
     row, because the Angstrom exponent the library interpolates on has to come
@@ -336,7 +365,7 @@ def aerosol_rows(job):
     band = job[1]
     rows = []
     for depth in AEROSOL_DEPTHS:
-        for solar_zenith in RAYLEIGH_SOLAR_ZENITHS:
+        for solar_zenith in AEROSOL_SOLAR_ZENITHS:
             for view_zenith in RAYLEIGH_VIEW_ZENITHS:
                 reflectances, others = [], []
                 for azimuth in AEROSOL_AZIMUTHS:
@@ -355,46 +384,79 @@ def aerosol_rows(job):
                             out.optical_depth_total.aerosol,
                         )
                     )
-                coefficients, fit_error = fit_azimuth_terms(AEROSOL_AZIMUTHS, reflectances)
                 down, up, albedo, band_depth = others[0]
                 rows.append(
                     (platform, band, model_name, depth, solar_zenith, view_zenith,
-                     *coefficients, fit_error, down, up, albedo, band_depth)
+                     interpolation_error(reflectances), down, up, albedo, band_depth,
+                     tuple(reflectances))
                 )
     return rows
 
 
+def interpolation_error(samples):
+    """How much linear interpolation on this azimuth curve costs, per point.
+
+    A leave-one-out estimate: drop each interior node, interpolate it back from
+    its neighbours, and keep the worst miss. Measured from the row's own
+    numbers rather than asserted, so it is the column to look at before
+    trusting a geometry.
+
+    It is an **upper bound, not the error**: leaving a node out interpolates
+    across 20 degrees where a caller only ever crosses 10, and linear error
+    goes as the square of the step. Measured against 6SV at the midpoints
+    (``offgrid.py --what azimuth``) it over-states the real step by about 2.4
+    times - 5.8e-03 here against 2.4e-03 in fact, at the steepest geometry the
+    archive reaches.
+    """
+    values = np.asarray(samples, dtype=np.float64)
+    worst = 0.0
+    for index in range(1, values.size - 1):
+        predicted = 0.5 * (values[index - 1] + values[index + 1])
+        worst = max(worst, abs(predicted - values[index]))
+    return worst
+
+
 def write_aerosol(out, results):
-    """The aerosol table, one row per grid point."""
+    """The aerosol table, one row per grid point, azimuths across the columns."""
     rows = [row for chunk in results for row in chunk]
-    worst_fit = max(row[9] for row in rows)
+    worst_fit = max(row[6] for row in rows)
     path = out / "olci_aerosol.csv"
     with path.open("w") as handle:
         handle.write(provenance(
             "#\n"
             "# Total path reflectance - molecular plus aerosol - with gaseous absorption off,\n"
             "# at sea level only, for two 6SV aerosol models against optical depth at 550 nm.\n"
-            "# The azimuth dependence is three Fourier terms as in the Rayleigh table;\n"
-            f"# the worst fit error here is {worst_fit:.2e}.\n"
+            "# The azimuth dependence is stored as samples every 10 degrees, NOT as Fourier\n"
+            "# terms: three terms are lossless for Rayleigh and miss the aerosol phase\n"
+            "# function by up to 0.18 where both zenith angles are large. Interpolate\n"
+            "# linearly in azimuth. interp_error is a leave-one-out estimate, taken over\n"
+            "# nodes 20 degrees apart, so it over-states the real 10-degree step by about\n"
+            f"# 2.4 times; the worst anywhere here is {worst_fit:.2e}, and the real step\n"
+            "# reaches 2.4e-03 at the archive's loading and geometry (offgrid.py).\n"
             "# band_optical_depth is the aerosol optical depth at that band's own wavelength,\n"
             "# so the Angstrom exponent can be derived from the table rather than assumed.\n"
-            "# The aerosol increment (this row minus its depth-zero row) is added to the\n"
-            "# pressure-interpolated Rayleigh value; see check.py for what that costs.\n"
+            "# The aerosol increment is this row minus the molecular-only value at sea level,\n"
+            "# which is the Rayleigh table's own 1013.25 hPa row - there is no depth-zero row\n"
+            "# here - and it is added to the pressure-interpolated Rayleigh term. Holding the\n"
+            "# aerosol at sea level costs 4.4e-04 or better over ground to 3 km at this\n"
+            "# archive's loading; see offgrid.py --what elevation.\n"
             "# Interpolate multilinearly in (optical depth, solar_zenith, view_zenith) and\n"
             "# between the two models on the measured Angstrom exponent.\n"
         ) + "\n")
         handle.write(
-            "platform,band,model,depth_550,solar_zenith,view_zenith,a0,a1,a2,"
-            "azimuth_fit_error,transmittance_down,transmittance_up,spherical_albedo,"
-            "band_optical_depth\n"
+            "platform,band,model,depth_550,solar_zenith,view_zenith,interp_error,"
+            "transmittance_down,transmittance_up,spherical_albedo,band_optical_depth,"
+            + ",".join(f"az{int(a):03d}" for a in AEROSOL_AZIMUTHS)
+            + "\n"
         )
         for row in rows:
             platform, band, model_name, depth, sza, vza = row[:6]
-            a0, a1, a2, fit, down, up, albedo, band_depth = row[6:]
+            error, down, up, albedo, band_depth, samples = row[6:]
             handle.write(
-                f"{platform},{band},{model_name},{depth:g},{sza:g},{vza:g},"
-                f"{a0:.6f},{a1:.6f},{a2:.6f},{fit:.2e},"
-                f"{down:.6f},{up:.6f},{albedo:.6f},{band_depth:.6f}\n"
+                f"{platform},{band},{model_name},{depth:g},{sza:g},{vza:g},{error:.2e},"
+                f"{down:.6f},{up:.6f},{albedo:.6f},{band_depth:.6f},"
+                + ",".join(f"{value:.6f}" for value in samples)
+                + "\n"
             )
     print(f"wrote {path} ({len(rows)} rows, worst azimuth fit {worst_fit:.2e})", flush=True)
 
