@@ -40,11 +40,15 @@ from osgeo import gdal  # noqa: E402
 
 gdal.UseExceptions()
 
+from pysent._atmosphere import gas_transmittance, platform_of  # noqa: E402
 from pysent._olci_l1 import (  # noqa: E402
     BAND_WAVELENGTHS,
+    GEOMETRY_MEMBER,
+    METEO_MEMBER,
     quality_mask,
     radiance_member,
     solar_flux_per_pixel,
+    tie_point_field,
 )
 from pysent._sen3 import (  # noqa: E402
     extract_member,
@@ -60,32 +64,15 @@ STANDARD_PRESSURE_HPA = 1013.25
 
 
 def tie_field(root, member, variable, shape, scratch):
-    """A tie-point field expanded across track to the image shape.
+    """A tie-point field expanded across track - the library's own reader.
 
-    The tie grid has one row per image row and a few dozen columns against the
-    image's thousands, so rows are decimated to match and columns interpolated
-    - the same treatment ``_olci_l1.solar_zenith`` gives the solar angle.
+    This used to be a copy of the expansion inside ``_olci_l1.solar_zenith``.
+    Phase 1 generalised that into ``tie_point_field``, so the audit now calls
+    the same code the pipeline does, which is the point of the generalisation:
+    a measurement taken with a private copy of the reader proves nothing about
+    the reader that ships.
     """
-    rows, columns = shape
-    local = extract_member(root, find_member(root, member), scratch)
-    dataset = open_sen3_variable(local, variable)
-    band = dataset.GetRasterBand(1)
-    tie = read_packed(band, decimate=max(1, band.YSize // max(1, rows)), log10=False)
-    dataset = None
-
-    if tie.shape[0] > rows:
-        tie = tie[:rows]
-    elif tie.shape[0] < rows:
-        tie = np.vstack([tie, np.repeat(tie[-1:], rows - tie.shape[0], axis=0)])
-    if tie.shape[1] == columns:
-        return tie.astype(np.float32)
-
-    source = np.linspace(0, columns - 1, tie.shape[1])
-    target = np.arange(columns)
-    out = np.empty((rows, columns), dtype=np.float32)
-    for row in range(rows):
-        out[row] = np.interp(target, source, tie[row])
-    return out
+    return tie_point_field(root, member, variable, scratch, shape)
 
 
 def rayleigh_thickness(nm, pressure_hpa):
@@ -154,13 +141,14 @@ def main() -> int:
     print(f"frame {full_columns} x {full_rows}, read at {shape[1]} x {shape[0]} "
           f"(decimate {args.decimate})\n")
 
-    sza = tie_field(l1, "tie_geometries.nc", "SZA", shape, scratch)
-    oza = tie_field(l1, "tie_geometries.nc", "OZA", shape, scratch)
-    saa = tie_field(l1, "tie_geometries.nc", "SAA", shape, scratch)
-    oaa = tie_field(l1, "tie_geometries.nc", "OAA", shape, scratch)
-    slp = tie_field(l1, "tie_meteo.nc", "sea_level_pressure", shape, scratch)
-    ozone = tie_field(l1, "tie_meteo.nc", "total_ozone", shape, scratch)
-    vapour = tie_field(l1, "tie_meteo.nc", "total_columnar_water_vapour", shape, scratch)
+    sza = tie_field(l1, GEOMETRY_MEMBER, "SZA", shape, scratch)
+    oza = tie_field(l1, GEOMETRY_MEMBER, "OZA", shape, scratch)
+    saa = tie_field(l1, GEOMETRY_MEMBER, "SAA", shape, scratch)
+    oaa = tie_field(l1, GEOMETRY_MEMBER, "OAA", shape, scratch)
+    slp = tie_field(l1, METEO_MEMBER, "sea_level_pressure", shape, scratch)
+    ozone = tie_field(l1, METEO_MEMBER, "total_ozone", shape, scratch)
+    vapour = tie_field(l1, METEO_MEMBER, "total_columnar_water_vapour", shape, scratch)
+    platform = platform_of(args.l1)
 
     rejected, _, bright = quality_mask(l1, scratch, shape, ["invalid", "saturated"])
     land, _, _ = quality_mask(l1, scratch, shape, ["land"])
@@ -184,11 +172,17 @@ def main() -> int:
         root = sen3_root(reference[1])
         print(f"=== {scene}: Level-1 against {kind.upper()} "
               f"({'water-leaving' if kind == 'wfr' else 'surface directional'} reflectance)")
-        print(f"{'band':6s} {'nm':>5s} {'TOA':>8s} {'rho_R':>8s} {'TOA-rho_R':>10s} "
-              f"{'L2':>8s} {'residual':>9s} {'r(TOA,L2)':>10s} {'r(corr,L2)':>11s}")
+        print(f"{'band':6s} {'nm':>5s} {'TOA':>8s} {'T_gas':>7s} {'TOA/T_gas':>10s} "
+              f"{'rho_R':>8s} {'corrected':>10s} {'L2':>8s} {'residual':>9s} "
+              f"{'r(TOA,L2)':>10s} {'r(corr,L2)':>11s}")
         for b in BANDS:
             nm = BAND_WAVELENGTHS[b]
             toa = _toa(l1, b, shape, sza, scratch, args.decimate)
+            # The gas term: the library's own tables, not a formula repeated here.
+            t_gas = gas_transmittance(
+                platform, b, ozone_kg_m2=ozone, water_kg_m2=vapour,
+                solar_zenith_deg=sza, view_zenith_deg=oza,
+            )
             rho_r = rayleigh_reflectance(nm, slp, sza, oza, saa, oaa)
             # The member names match across the two products but the variables
             # inside them do not: Synergy calls it SDR_Oa08, not Syn_Oa08_*.
@@ -197,10 +191,14 @@ def main() -> int:
             l2 = level2_reflectance(root, member[0], member[1], shape, scratch)
 
             keep = mask & np.isfinite(toa) & np.isfinite(l2)
-            corrected = toa - rho_r
-            stats = [np.nanmedian(x[keep]) for x in (toa, rho_r, corrected, l2)]
-            print(f"Oa{b:02d}  {nm:5d} {stats[0]:8.4f} {stats[1]:8.4f} {stats[2]:10.4f} "
-                  f"{stats[3]:8.4f} {stats[2] - stats[3]:9.4f} "
+            degassed = toa / t_gas
+            corrected = degassed - rho_r
+            stats = [
+                np.nanmedian(x[keep]) for x in (toa, t_gas, degassed, rho_r, corrected, l2)
+            ]
+            print(f"Oa{b:02d}  {nm:5d} {stats[0]:8.4f} {stats[1]:7.4f} {stats[2]:10.4f} "
+                  f"{stats[3]:8.4f} {stats[4]:10.4f} {stats[5]:8.4f} "
+                  f"{stats[4] - stats[5]:9.4f} "
                   f"{pearson(np.where(keep, toa, np.nan), np.where(keep, l2, np.nan)):10.3f} "
                   f"{pearson(np.where(keep, corrected, np.nan), np.where(keep, l2, np.nan)):11.3f}")
         print()

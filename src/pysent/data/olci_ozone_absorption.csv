@@ -1,0 +1,57 @@
+# Generated 2026-11-02 by tools/rt6s/generate_tables.py with 6SV 1.1 via Py6S 1.9.2,
+# in the container built from tools/rt6s/Dockerfile (6SV pinned by sha256 there).
+# Model: black Lambertian surface, no aerosols, target at sea level, sensor at
+# satellite level, OLCI's own per-platform band filters as shipped with Py6S.
+# Regenerate with:
+#   docker build -t pysent-rt6s:1.1 tools/rt6s
+#   docker run --rm -v "$PWD:/work" -w /work pysent-rt6s:1.1 \
+#       python3 tools/rt6s/generate_tables.py --out src/pysent/data
+#
+# Ozone is Beer-Lambert in the Chappuis band, so one coefficient per band is
+# exact: T = exp(-k U m), U in Dobson units, m = 1/cos(sza) + 1/cos(vza).
+# 1 DU = 2.1415e-05 kg m-2, which is the unit the OLCI product reports.
+# linearity_spread is the relative spread of k over ozone columns of 100, 200, 300, 400 DU;
+# the worst across all bands here is 2.66e-03.
+platform,band,wavelength_nm,coefficient_per_du_per_airmass,linearity_spread
+S3A,1,398.8,0.000000e+00,0.000e+00
+S3A,2,411.2,0.000000e+00,0.000e+00
+S3A,3,441.3,2.624794e-06,2.658e-03
+S3A,4,488.8,1.910564e-05,5.934e-04
+S3A,5,508.8,3.907126e-05,3.116e-04
+S3A,6,558.8,1.007667e-04,2.043e-04
+S3A,7,618.8,1.051275e-04,5.442e-05
+S3A,8,663.8,4.902262e-05,2.253e-04
+S3A,9,672.5,4.004320e-05,2.230e-04
+S3A,10,680.0,3.336483e-05,3.860e-04
+S3A,11,706.2,1.861466e-05,3.906e-04
+S3A,12,752.5,8.757469e-06,1.278e-03
+S3A,13,762.5,6.683738e-06,7.948e-04
+S3A,14,765.0,5.826303e-06,1.977e-03
+S3A,15,767.5,4.458363e-06,1.785e-03
+S3A,16,776.2,0.000000e+00,0.000e+00
+S3A,17,863.8,0.000000e+00,0.000e+00
+S3A,18,883.8,0.000000e+00,0.000e+00
+S3A,19,898.7,0.000000e+00,0.000e+00
+S3A,20,938.8,0.000000e+00,0.000e+00
+S3A,21,1018.8,0.000000e+00,0.000e+00
+S3B,1,398.8,0.000000e+00,0.000e+00
+S3B,2,411.2,0.000000e+00,0.000e+00
+S3B,3,441.3,2.628453e-06,1.578e-03
+S3B,4,488.8,1.908015e-05,5.738e-04
+S3B,5,508.8,3.905617e-05,1.571e-04
+S3B,6,558.8,1.006161e-04,1.167e-04
+S3B,7,618.8,1.053047e-04,1.299e-04
+S3B,8,663.8,4.921362e-05,2.605e-04
+S3B,9,675.0,4.024976e-05,1.617e-04
+S3B,10,680.0,3.355665e-05,3.280e-04
+S3B,11,706.2,1.864013e-05,3.596e-04
+S3B,12,752.5,8.797948e-06,1.763e-03
+S3B,13,762.5,6.738796e-06,1.350e-03
+S3B,14,763.7,5.880272e-06,1.287e-03
+S3B,15,767.5,4.630492e-06,9.273e-04
+S3B,16,778.8,0.000000e+00,0.000e+00
+S3B,17,863.8,0.000000e+00,0.000e+00
+S3B,18,881.2,0.000000e+00,0.000e+00
+S3B,19,896.2,0.000000e+00,0.000e+00
+S3B,20,938.8,0.000000e+00,0.000e+00
+S3B,21,1018.8,0.000000e+00,0.000e+00
