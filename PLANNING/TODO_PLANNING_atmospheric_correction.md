@@ -338,9 +338,27 @@ after the fit is 0.0026, the same size as A13's leftover, so the spectral slope 
 from the difference between two small numbers that are both contaminated by surface reflection and
 glint. The slope is what that contamination destroys first.
 
-**So Phase 4's water arm should retrieve the depth from both bands and decline to claim the
-exponent**, taking that from ESA's `A865` where it exists and a stated climatological value
-otherwise. Solved on 67 % of clear water.
+**The exponent has to be fitted but not believed, and that is not the same as supplying it.** The
+obvious reading of the above is "take the exponent from ESA's `A865` and use both bands to pin the
+depth". Measured on the same pixels, with `A865` supplied per pixel as the exponent:
+
+| inversion | bias in `tau865` | correlation |
+|---|---|---|
+| 865 alone, exponent supplied | +0.0201 | 0.790 |
+| 665 and 865, exponent **supplied and held** | **+0.0432** | 0.779 |
+| 665 and 865, exponent **fitted** | **+0.0061** | 0.838 |
+
+Adding the second band at a *fixed* exponent is **twice as bad as not adding it at all**. The
+reason is A13's leftover: 665 nm carries a larger molecular path and a relatively larger surface
+and glint term, so forcing agreement at both bands with the slope held drags the depth upwards to
+split the difference. Letting the slope float lets the fit put the contamination there instead of
+into the depth.
+
+So the exponent is a **nuisance parameter**: fitted because fitting it protects the quantity we
+care about, and **not reported**, because at a correlation of 0.37 against ESA's own it is not a
+measurement of anything. Phase 4's water arm fits both and publishes only the depth, with the
+fitted slope recorded in provenance as a fit parameter rather than as an aerosol property. Solved
+on 67 % of clear water.
 
 ### A15. There is no sea ice in the archive this plan validates against ⚠️ scope limit
 
@@ -532,11 +550,43 @@ error budget is measurable. It is not ordered by difficulty.
   reference fits and an error in our aerosol magnitude or slope does not. That is a claim for
   **question E1** to settle, not one to settle here, and it is why Phase 5 must not turn the tier
   on by default while E1 is open.
-- [ ] **Phase 4 - aerosol retrieval, for when no AOD product is at hand.** Dark-target over water
+- [x] **Phase 4 - aerosol retrieval, for when no AOD product is at hand.** Dark-target over water
   (the near-infrared black-pixel assumption at 865 nm), dark-dense-vegetation over land, and a
   climatological fallback. *Acceptance: retrieved AOD against the `SY_2_AOD` product's own
   `AOD_550` on the same acquisition - a direct, honest metric - and the end-to-end surface
   reflectance no worse than Phase 3's by a stated margin.*
+  **Shipped as `_aerosol_retrieval.py`, water only, and the acceptance is exceeded - with one
+  caveat that has to be read before the numbers.** Validated against `OL_2_WFR`'s per-pixel `T865`
+  rather than the planned `SY_2_AOD`, because A11 found a better reference and A12 showed the two
+  ESA products disagree by 2.2x.
+
+  Retrieval against ESA's own, on the water frame: `tau865` **0.0708** against **0.0630**, bias
+  **+0.0078**, correlation **+0.841**, on 64,233 pixels - 77 % of clear water. Of the rest, 22.4 %
+  refused as brighter than the table explains and 0.3 % as darker than clean air.
+
+  End to end, median absolute residual against the water-leaving reflectance over clear water:
+
+  | aerosol source | 665 | 560 | 490 |
+  |---|---|---|---|
+  | none | 0.0304 | 0.0439 | 0.0592 |
+  | `SY_2_AOD`, per frame | 0.0215 | 0.0343 | 0.0501 |
+  | `OL_2_WFR` `w_aer`, per pixel | 0.0124 | 0.0239 | 0.0391 |
+  | **retrieved from the frame** | *0.0037* | **0.0142** | **0.0300** |
+
+  **The 665 nm figure is substantially circular and must not be quoted as accuracy.** The
+  retrieval fits the loading that makes 665 and 865 consistent with a black surface, and the
+  reference at 665 is itself near zero, so driving that residual down is close to a tautology. The
+  honest test is **560 and 490, which the retrieval never looks at**: against ESA's own per-pixel
+  aerosol they improve by **41 %** and **23 %**. That is the claim, and it is a real one.
+
+  **Land has no retrieval and will not get one here.** A14: OLCI has no shortwave-infrared band,
+  so there is no dark target to anchor on, and the darkest clear land is 0.018 at 665 nm rather
+  than zero. Over land the loading comes from a product or from the stated climatological value.
+  Scope reduction, taken deliberately after the owner put sea and ocean ahead of land (B2).
+
+  **The fitted exponent is a nuisance parameter and is not published as an aerosol property** -
+  see A13. The fill order is retrieval, then product, then `CLIMATOLOGICAL_DEPTH_550` = 0.044,
+  this archive's own median, with a `source` array recording which tier answered each pixel.
 - [ ] **Phase 5 - the product surface.** A `surface_reflectance` product and an
   `atmospheric_correction` option on `truecolor` (Q2), defaulting off until the owner says
   otherwise. Provenance tags recording the tier, the aerosol source and every optical depth used; a

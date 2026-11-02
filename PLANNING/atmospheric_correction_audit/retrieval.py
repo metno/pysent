@@ -390,6 +390,73 @@ def main() -> int:
     else:
         print("  too few pixels to compare")
 
+    # 2d. Which inversion to actually implement. 2c showed a joint fit over
+    # depth *and* exponent gives a better depth while getting the exponent
+    # badly wrong, which is the model absorbing surface contamination into a
+    # physical parameter - a better number by a fragile route. So compare three
+    # inversions against ESA's T865 with ESA's own A865 supplied as the
+    # exponent, which is what the library will do where that field exists:
+    #
+    #   a. one band, 865 only, exact inversion
+    #   b. two bands, least squares at fixed exponent
+    #   c. two bands, joint fit over the exponent too (2c, repeated here on the
+    #      same pixels so the comparison is like for like)
+    print("\n=== 2d. three inversions, with ESA's own A865 as the exponent")
+    esa_alpha = np.where(np.isfinite(esa["A865"]), esa["A865"], np.nan)
+
+    def paths_for(band, measured_shape, alpha):
+        stack = []
+        for depth in DEPTH_GRID:
+            stack.append(
+                atmosphere_terms(
+                    platform, band, pressure_hpa=pressure, solar_zenith_deg=sza,
+                    view_zenith_deg=oza, relative_azimuth_deg=azimuth,
+                    ozone_kg_m2=ozone, water_kg_m2=vapour,
+                    optical_depth_550=np.full(measured_shape, depth),
+                    angstrom=alpha,
+                )["path_reflectance"]
+            )
+        return np.stack(stack, axis=-1)
+
+    at_865 = paths_for(DARK_BAND, shape, esa_alpha)
+    at_665 = paths_for(8, shape, esa_alpha)
+
+    # a. 865 alone: the depth whose 865 path matches the measurement.
+    cost_one = np.abs(at_865 - apparent[..., None])
+    # b. both bands at the same fixed exponent.
+    cost_two = cost_one + np.abs(at_665 - apparent_665[..., None])
+
+    rows = []
+    for label, cost in (("865 alone", cost_one), ("665 and 865, fixed exponent", cost_two)):
+        pick = np.argmin(np.where(np.isfinite(cost), cost, np.inf), axis=-1)
+        depth = DEPTH_GRID[pick]
+        # Refuse where the measurement is darker than the cleanest node: that
+        # is not a retrieval of zero.
+        depth = np.where(apparent >= at_865[..., 0], depth, np.nan)
+        # _model_weights is already vectorised over the exponent, so one call
+        # with the whole field. Calling it per pixel, as this first did, is
+        # 152,000 table lookups and does not finish.
+        blend = _model_weights(platform, np.where(np.isfinite(esa_alpha), esa_alpha, 0.5))
+        ratio_blend = sum(weight * ratio[name] for name, weight in blend.items())
+        rows.append((label, depth * ratio_blend))
+
+    for label, at_865_ours in rows:
+        keep = (
+            water
+            & np.isfinite(at_865_ours)
+            & np.isfinite(esa["T865"])
+            & (esa["T865"] > 0)
+        )
+        if keep.sum() < 100:
+            print(f"  {label:32s} too few pixels")
+            continue
+        ours, theirs = at_865_ours[keep], esa["T865"][keep]
+        print(f"  {label:32s} tau865 {np.median(ours):.4f} vs {np.median(theirs):.4f}  "
+              f"bias {np.median(ours) - np.median(theirs):+.4f}  "
+              f"r {np.corrcoef(ours, theirs)[0, 1]:+.3f}  "
+              f"on {100.0 * keep.sum() / max(1, int(water.sum())):.0f} %")
+    print("  (2c's joint fit over the exponent gave bias +0.0061 at r +0.838)")
+
     # 3. What a land retrieval would have to assume.
     if args.syn:
         print("\n=== 3. how dark the darkest clear land actually is, per Synergy")
