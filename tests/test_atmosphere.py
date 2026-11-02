@@ -16,6 +16,7 @@ from pysent._atmosphere import (
     KG_M2_PER_DOBSON,
     PRESSURE_EXTRAPOLATION_HPA,
     STANDARD_PRESSURE_HPA,
+    aerosol_grid_limits,
     aerosol_models,
     aerosol_terms,
     air_mass,
@@ -586,6 +587,85 @@ def test_aerosol_brightens_the_path_and_dims_the_transmission():
     assert float(terms["transmittance_down_ratio"]) < 1.0
     assert float(terms["transmittance_up_ratio"]) < 1.0
     assert float(terms["spherical_albedo_increment"]) > 0.0
+
+
+GEOMETRY = dict(solar_zenith_deg=70.9, view_zenith_deg=20.0, relative_azimuth_deg=58.1)
+
+
+def _increment(depth, band=4, angstrom=1.18):
+    return aerosol_terms(
+        "S3A", band, optical_depth_550=depth, angstrom=angstrom, **GEOMETRY
+    )
+
+
+def test_no_aerosol_means_no_aerosol_correction():
+    # The table's lightest optical depth is 0.05, and clamping to it handed a
+    # clear-air pixel the whole correction for the lightest haze it carries.
+    # The value at zero is not unknown and must not be guessed: an atmosphere
+    # with no aerosol in it adds no path reflectance, dims nothing and adds
+    # nothing to the spherical albedo.
+    terms = _increment(0.0)
+    assert float(terms["path_increment"]) == 0.0
+    assert float(terms["transmittance_down_ratio"]) == 1.0
+    assert float(terms["transmittance_up_ratio"]) == 1.0
+    assert float(terms["spherical_albedo_increment"]) == 0.0
+
+
+def test_a_light_loading_is_not_rounded_up_to_the_table_floor():
+    # This archive's measured loading is 0.02 to 0.10, so most of it sits at or
+    # below the table's lightest row: rounding up over-corrected the majority
+    # of the holding by up to half again.
+    floor = aerosol_grid_limits("S3A", 4)["optical_depth_550"][0]
+    full = float(_increment(floor)["path_increment"])
+    assert float(_increment(0.5 * floor)["path_increment"]) == pytest.approx(0.5 * full)
+    light = float(_increment(0.033)["path_increment"])
+    assert light < full
+    assert light == pytest.approx(full * 0.033 / floor)
+
+
+def test_an_optical_depth_above_the_table_is_clamped_not_extrapolated():
+    # The aerosol grid shares its interpolation with the Rayleigh grid, whose
+    # first axis is pressure and is allowed to extrapolate 60 units past its
+    # last node. Inherited by an axis measured in optical depth, that allowance
+    # is unbounded in practice, and past about 1.5 it drives the transmittance
+    # ratio **negative** - which flips the sign of the retrieved surface
+    # reflectance and reports it with no indication of trouble. A smoke plume
+    # is a real way to reach 1.5.
+    top = aerosol_grid_limits("S3A", 4)["optical_depth_550"][1]
+    edge = _increment(top)
+    for beyond in (1.5, 5.0, 20.0):
+        terms = _increment(beyond)
+        assert float(terms["path_increment"]) == pytest.approx(
+            float(edge["path_increment"])
+        )
+        assert float(terms["transmittance_down_ratio"]) > 0.0
+        assert float(terms["transmittance_up_ratio"]) > 0.0
+
+
+def test_the_aerosol_table_publishes_its_own_limits():
+    # So a caller - and the per-pixel quality band - can say "hazier than the
+    # table goes" rather than silently receiving the nearest edge.
+    limits = aerosol_grid_limits("S3A", 4)
+    assert limits["optical_depth_550"] == (0.05, 0.4)
+    assert limits["solar_zenith"][1] >= 85.0
+    assert limits["view_zenith"][1] >= 60.0
+    with pytest.raises(ValueError, match="no rows for"):
+        aerosol_grid_limits("S3A", 11)
+
+
+def test_the_pressure_axis_keeps_its_extrapolation_after_the_split():
+    # The fix separates the two tables' interpolation rules. Rayleigh's
+    # pressure axis must still open at the top, because surface pressure above
+    # sea-level standard is ordinary and clamping it costs 0.0025.
+    def path(pressure):
+        return float(
+            rayleigh_terms(
+                "S3A", 4, pressure_hpa=pressure, solar_zenith_deg=70.9,
+                view_zenith_deg=20.0, relative_azimuth_deg=58.1,
+            )["path_reflectance"]
+        )
+
+    assert path(1040.0) > path(STANDARD_PRESSURE_HPA)
 
 
 def test_a_thicker_aerosol_brightens_the_path_further():
