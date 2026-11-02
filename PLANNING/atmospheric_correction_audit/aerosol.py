@@ -29,11 +29,8 @@ will need.
 from __future__ import annotations
 
 import argparse
-import datetime
 import pathlib
-import re
 import sys
-import tempfile
 
 import numpy as np
 
@@ -45,46 +42,21 @@ from osgeo import gdal  # noqa: E402
 
 gdal.UseExceptions()
 
-from budget import BANDS, tie_field  # noqa: E402
+# The aerosol readers used to be local copies here. Phase 3 needs the same
+# ones in the budget script to apply the tier, and two copies of a reader are
+# two things to keep in step, so they live there now and this calls them.
+from budget import (  # noqa: E402
+    BANDS,
+    NEAREST_AEROSOL_NM,
+    aod_field,
+    covers,
+    scratch_dir,
+    sensing_window,
+    tie_field,
+)
 from sweep import corrected_frame  # noqa: E402
 
-from pysent._sen3 import (  # noqa: E402
-    extract_member,
-    find_member,
-    open_sen3_variable,
-    read_packed,
-    sen3_root,
-)
-
-AOD_MEMBER = "NTC_AOD.nc"
-# Which aerosol wavelength stands closest to each band the composite renders.
-NEAREST_AEROSOL_NM = {8: 670, 6: 550, 4: 440}
-TIMES = re.compile(r"____(\d{8}T\d{6})_(\d{8}T\d{6})_")
-
-
-def sensing_window(path):
-    """The start and stop a product name declares."""
-    match = TIMES.search(pathlib.Path(str(path)).name)
-    if not match:
-        raise ValueError(f"cannot read a sensing window from {pathlib.Path(str(path)).name!r}")
-    fmt = "%Y%m%dT%H%M%S"
-    return (
-        datetime.datetime.strptime(match.group(1), fmt),
-        datetime.datetime.strptime(match.group(2), fmt),
-    )
-
-
-def covers(outer, inner):
-    """Does the outer sensing window contain the inner one?"""
-    return outer[0] <= inner[0] and inner[1] <= outer[1]
-
-
-def aod_field(root, variable, scratch):
-    local = extract_member(root, find_member(root, AOD_MEMBER), scratch)
-    dataset = open_sen3_variable(local, variable)
-    values = read_packed(dataset.GetRasterBand(1), decimate=1, log10=False)
-    dataset = None
-    return values
+from pysent._sen3 import sen3_root  # noqa: E402
 
 
 def main() -> int:
@@ -104,7 +76,7 @@ def main() -> int:
         return 2
     print("the aerosol product covers the frame\n")
 
-    scratch = pathlib.Path(tempfile.mkdtemp(prefix="ac-aerosol-"))
+    scratch = scratch_dir("ac-aerosol-")
     frame = corrected_frame(args.l1, args.decimate)
     shape = frame["shape"]
     root = sen3_root(args.l1)
@@ -166,7 +138,13 @@ def main() -> int:
                     syn_root, f"Syn_Oa{band:02d}_reflectance.nc", f"SDR_Oa{band:02d}",
                     shape, scratch,
                 )
-                synergy = float(np.nanmedian(np.where(land, values, np.nan)))
+                # Both medians over the *same* pixels. Taking each over its own
+                # valid pixels made "ours - SYN" a difference of two
+                # differently-sampled populations, which at 490 nm read 0.0101
+                # where the like-for-like figure is 0.0071.
+                keep = land & np.isfinite(frame["surfaces"][band]) & np.isfinite(values)
+                ours = float(np.nanmedian(np.where(keep, frame["surfaces"][band], np.nan)))
+                synergy = float(np.nanmedian(np.where(keep, values, np.nan)))
             except (ValueError, RuntimeError):
                 pass
 

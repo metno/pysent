@@ -16,8 +16,13 @@ from pysent._atmosphere import (
     KG_M2_PER_DOBSON,
     PRESSURE_EXTRAPOLATION_HPA,
     STANDARD_PRESSURE_HPA,
+    aerosol_models,
+    aerosol_terms,
     air_mass,
+    angstrom_exponent,
+    atmosphere_terms,
     gas_transmittance,
+    model_angstrom,
     ozone_transmittance,
     pixel_pressure,
     platform_of,
@@ -434,3 +439,239 @@ def test_the_whole_chain_lands_on_a_plausible_surface_reflectance():
         )
     )
     assert 0.0 < surface < 0.12
+
+
+# band, 6SV model, optical depth at 550, solar zenith, view zenith, relative
+# azimuth, then 6S's total path reflectance, downward and upward transmittance
+# and spherical albedo. Off the stored grid in **every** coordinate: the depths
+# lie between 0.05, 0.15 and 0.4, the zeniths between the table's nodes, and the
+# azimuths on the midpoints of the ten-degree axis, where linear interpolation
+# is at its worst. Reproduce with ``tools/rt6s/offgrid.py --what reference``.
+SIXS_AEROSOL_OFF_GRID = [
+    (4, "Continental", 0.08, 62.0, 28.0, 35.0, 0.11725, 0.81345, 0.89808, 0.13761),
+    (6, "Maritime", 0.22, 71.5, 44.0, 95.0, 0.11953, 0.77401, 0.90640, 0.12134),
+    (8, "Continental", 0.12, 45.0, 12.0, 155.0, 0.02297, 0.93484, 0.95601, 0.06660),
+    (17, "Maritime", 0.09, 77.5, 52.0, 25.0, 0.06916, 0.88276, 0.97039, 0.03728),
+]
+
+
+@pytest.mark.parametrize(
+    "band,name,depth,sza,vza,azimuth,path,down,up,albedo", SIXS_AEROSOL_OFF_GRID
+)
+def test_the_aerosol_table_reproduces_6s_off_grid(
+    band, name, depth, sza, vza, azimuth, path, down, up, albedo
+):
+    # Asking for exactly one model's own exponent clamps the blend onto that
+    # model, so what is measured here is the table and the interpolation rather
+    # than the two-model blend.
+    terms = aerosol_terms(
+        "S3A", band,
+        optical_depth_550=depth, angstrom=model_angstrom("S3A", name),
+        solar_zenith_deg=sza, view_zenith_deg=vza, relative_azimuth_deg=azimuth,
+    )
+    molecular = rayleigh_terms(
+        "S3A", band, pressure_hpa=STANDARD_PRESSURE_HPA,
+        solar_zenith_deg=sza, view_zenith_deg=vza, relative_azimuth_deg=azimuth,
+    )
+    # 2e-3 is the measured cost of interpolating this grid, not slack: the
+    # worst of these four is band 17 at solar zenith 77.5, which is the
+    # sharpest phase function at the steepest geometry the table carries.
+    assert float(molecular["path_reflectance"] + terms["path_increment"]) == pytest.approx(
+        path, abs=2e-3
+    )
+    assert float(
+        molecular["transmittance_down"] * terms["transmittance_down_ratio"]
+    ) == pytest.approx(down, abs=4e-3)
+    assert float(
+        molecular["transmittance_up"] * terms["transmittance_up_ratio"]
+    ) == pytest.approx(up, abs=2e-3)
+    assert float(
+        molecular["spherical_albedo"] + terms["spherical_albedo_increment"]
+    ) == pytest.approx(albedo, abs=2e-3)
+
+
+def test_three_fourier_terms_cannot_hold_the_azimuth_curve():
+    # Why the aerosol table stores samples where the Rayleigh table stores a
+    # fit. This reconstructs the stored curve, fits the Rayleigh table's own
+    # three-term form to it, and shows the fit missing by more than the whole
+    # Phase 2 error budget. Should anyone compress this axis again to save
+    # rows, this is the test that says what it costs.
+    azimuths = np.arange(0.0, 181.0, 10.0)
+    curve = np.array(
+        [
+            float(
+                aerosol_terms(
+                    "S3A", 17,
+                    optical_depth_550=0.4, angstrom=model_angstrom("S3A", "Maritime"),
+                    solar_zenith_deg=85.0, view_zenith_deg=60.0,
+                    relative_azimuth_deg=azimuth,
+                )["path_increment"]
+            )
+            for azimuth in azimuths
+        ]
+    )
+    # rho = a0 + 2 a1 cos d + 2 a2 cos 2d, least squares over the samples.
+    radians = np.radians(azimuths)
+    design = np.stack(
+        [np.ones_like(radians), 2.0 * np.cos(radians), 2.0 * np.cos(2.0 * radians)], axis=-1
+    )
+    coefficients, *_ = np.linalg.lstsq(design, curve, rcond=None)
+    fitted = design @ coefficients
+    assert np.abs(fitted - curve).max() > 1e-2
+    # And the curve really does have that much shape in it to lose.
+    assert curve.max() - curve.min() > 0.5
+
+
+def test_the_angstrom_exponent_comes_from_the_measured_depths():
+    # The aerosol product's own Angstrom field is empty in every granule
+    # checked, so the exponent is derived from the optical depths at 440 and
+    # 670 nm. These two are the land frame's medians.
+    assert angstrom_exponent(0.0436, 0.0265) == pytest.approx(1.184, abs=1e-3)
+    # A flat spectrum is exponent zero, whichever pair of wavelengths.
+    assert angstrom_exponent(0.1, 0.1) == pytest.approx(0.0)
+    # Coarse marine aerosol scatters almost greyly; fine smoke steeply.
+    assert angstrom_exponent(0.11, 0.1) < 0.5
+    assert angstrom_exponent(0.2, 0.1) > 1.5
+
+
+def test_the_model_blend_follows_the_measured_exponent():
+    models = aerosol_models("S3A")
+    assert set(models) == {"Continental", "Maritime"}
+    exponents = {name: model_angstrom("S3A", name) for name in models}
+    # Read off the table's own band optical depths rather than asserted: the
+    # continental model is the fine-mode one, so its exponent is the larger.
+    assert exponents["Continental"] > exponents["Maritime"]
+
+    def increment(angstrom):
+        return float(
+            aerosol_terms(
+                "S3A", 4, optical_depth_550=0.15, angstrom=angstrom,
+                solar_zenith_deg=70.0, view_zenith_deg=20.0, relative_azimuth_deg=90.0,
+            )["path_increment"]
+        )
+
+    maritime, continental = increment(exponents["Maritime"]), increment(exponents["Continental"])
+    assert maritime != pytest.approx(continental, abs=1e-4)
+    # Between the two exponents the answer is between the two models, and
+    # outside them it is clamped rather than extrapolated into a model that
+    # does not exist.
+    middle = increment(0.5 * (exponents["Maritime"] + exponents["Continental"]))
+    assert min(maritime, continental) < middle < max(maritime, continental)
+    assert increment(exponents["Maritime"] - 1.0) == pytest.approx(maritime, rel=1e-12)
+    assert increment(exponents["Continental"] + 1.0) == pytest.approx(continental, rel=1e-12)
+
+
+def test_an_unknown_exponent_takes_the_midpoint_rather_than_an_extreme():
+    # The exponent needs two optical depths, and the aerosol product is sparse,
+    # so some pixels will have none. Picking either model there would be a
+    # silent choice; the midpoint is wrong by a bounded amount instead.
+    def increment(angstrom):
+        return float(
+            aerosol_terms(
+                "S3A", 4, optical_depth_550=0.15, angstrom=angstrom,
+                solar_zenith_deg=70.0, view_zenith_deg=20.0, relative_azimuth_deg=90.0,
+            )["path_increment"]
+        )
+
+    exponents = [model_angstrom("S3A", name) for name in aerosol_models("S3A")]
+    assert increment(np.nan) == pytest.approx(increment(0.5 * (min(exponents) + max(exponents))))
+
+
+def test_aerosol_brightens_the_path_and_dims_the_transmission():
+    terms = aerosol_terms(
+        "S3A", 4, optical_depth_550=0.15, angstrom=1.1,
+        solar_zenith_deg=70.0, view_zenith_deg=20.0, relative_azimuth_deg=90.0,
+    )
+    assert float(terms["path_increment"]) > 0.0
+    assert float(terms["transmittance_down_ratio"]) < 1.0
+    assert float(terms["transmittance_up_ratio"]) < 1.0
+    assert float(terms["spherical_albedo_increment"]) > 0.0
+
+
+def test_a_thicker_aerosol_brightens_the_path_further():
+    def increment(depth):
+        return float(
+            aerosol_terms(
+                "S3A", 4, optical_depth_550=depth, angstrom=1.1,
+                solar_zenith_deg=70.0, view_zenith_deg=20.0, relative_azimuth_deg=90.0,
+            )["path_increment"]
+        )
+
+    assert increment(0.05) < increment(0.15) < increment(0.4)
+
+
+def test_the_interpolation_error_is_reported_with_the_terms():
+    # The table's own leave-one-out estimate of what the azimuth step costs at
+    # this grid point, so a caller can bound a geometry instead of trusting a
+    # single number quoted for the whole table. It is worst where the phase
+    # function is sharpest.
+    def error(band, depth, sza, vza):
+        return float(
+            aerosol_terms(
+                "S3A", band, optical_depth_550=depth, angstrom=model_angstrom("S3A", "Maritime"),
+                solar_zenith_deg=sza, view_zenith_deg=vza, relative_azimuth_deg=90.0,
+            )["interpolation_error"]
+        )
+
+    assert error(17, 0.4, 85.0, 60.0) > error(17, 0.05, 40.0, 16.0)
+    assert error(4, 0.05, 40.0, 16.0) < 1e-3
+
+
+def test_an_aerosol_atmosphere_is_the_molecular_one_plus_the_increment():
+    # The two tiers compose: without an optical depth this is Phase 2's
+    # atmosphere exactly, and with one the path reflectances add, the
+    # transmittances multiply and the spherical albedos add.
+    geometry = dict(
+        pressure_hpa=1004.0, solar_zenith_deg=71.0, view_zenith_deg=22.0,
+        relative_azimuth_deg=48.0, ozone_kg_m2=0.00611, water_kg_m2=7.53,
+    )
+    clear = atmosphere_terms("S3A", 4, **geometry)
+    hazy = atmosphere_terms("S3A", 4, optical_depth_550=0.05, angstrom=1.184, **geometry)
+    assert float(hazy["gas_transmittance"]) == pytest.approx(float(clear["gas_transmittance"]))
+    assert float(hazy["path_reflectance"]) > float(clear["path_reflectance"])
+    assert float(hazy["transmittance_down"]) < float(clear["transmittance_down"])
+    assert float(hazy["spherical_albedo"]) > float(clear["spherical_albedo"])
+
+    increment = aerosol_terms(
+        "S3A", 4, optical_depth_550=0.05, angstrom=1.184,
+        solar_zenith_deg=71.0, view_zenith_deg=22.0, relative_azimuth_deg=48.0,
+    )
+    assert float(hazy["path_reflectance"]) == pytest.approx(
+        float(clear["path_reflectance"] + increment["path_increment"])
+    )
+
+
+def test_correcting_for_aerosol_lowers_the_surface_reflectance():
+    # The point of the tier. Same measurement, same geometry, with and without
+    # the aerosol term: the aerosol adds brightness the molecular atmosphere
+    # cannot account for, so leaving it out credits that brightness to the
+    # ground.
+    geometry = dict(
+        pressure_hpa=1034.8, solar_zenith_deg=70.9, view_zenith_deg=20.0,
+        relative_azimuth_deg=90.0, ozone_kg_m2=0.00611, water_kg_m2=7.53,
+    )
+
+    def surface(**extra):
+        terms = atmosphere_terms("S3A", 4, **geometry, **extra)
+        return float(surface_from_toa(0.1339, **terms))
+
+    without = surface()
+    with_aerosol = surface(optical_depth_550=0.033, angstrom=1.184)
+    assert with_aerosol < without
+    # The archive's loading is light, so this is a nudge rather than a
+    # rewrite - about a hundredth of a reflectance unit at 490 nm.
+    assert 0.002 < without - with_aerosol < 0.02
+
+
+def test_the_terms_interpolate_elementwise_over_an_aerosol_field():
+    # Aerosol optical depth arrives as a field of its own, coarser than the
+    # radiance grid and with holes in it, so every axis has to be an array.
+    depth = np.array([[0.05, 0.15], [0.25, 0.4]])
+    terms = aerosol_terms(
+        "S3A", 4, optical_depth_550=depth, angstrom=np.full((2, 2), 1.1),
+        solar_zenith_deg=np.full((2, 2), 70.0), view_zenith_deg=np.full((2, 2), 20.0),
+        relative_azimuth_deg=np.full((2, 2), 90.0),
+    )
+    increment = terms["path_increment"]
+    assert increment.shape == (2, 2)
+    assert increment[0, 0] < increment[0, 1] < increment[1, 0] < increment[1, 1]

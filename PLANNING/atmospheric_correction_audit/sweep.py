@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import shutil
 import sys
-import tempfile
 
 import numpy as np
 
@@ -32,10 +32,20 @@ from osgeo import gdal  # noqa: E402
 
 gdal.UseExceptions()
 
-from budget import BANDS, _toa, level2_reflectance, tie_field  # noqa: E402
+from budget import (  # noqa: E402
+    BANDS,
+    _toa,
+    covers,
+    frame_aerosol,
+    level2_reflectance,
+    scratch_dir,
+    sensing_window,
+    tie_field,
+)
 from pairs import collect  # noqa: E402
 
 from pysent._atmosphere import (  # noqa: E402
+    atmosphere_terms,
     gas_transmittance,
     pixel_pressure,
     platform_of,
@@ -61,9 +71,17 @@ from pysent._sen3 import (  # noqa: E402
 MINIMUM_PIXELS = 20_000
 
 
-def corrected_frame(l1_path, decimate):
-    """Surface reflectance for the three bands, plus the masks and geometry."""
-    scratch = pathlib.Path(tempfile.mkdtemp(prefix="ac-sweep-"))
+def corrected_frame(l1_path, decimate, aod_paths=()):
+    """Surface reflectance for the three bands, plus the masks and geometry.
+
+    With ``aod_paths``, the one whose orbit-long sensing window covers this
+    frame is used to apply the aerosol tier as well, and the result carries a
+    second set of surfaces under ``aerosol_surfaces`` along with the loading it
+    used. Without one - or when none of them covers the frame - that key is
+    ``None``, which is how a frame with no aerosol retrieval reports itself
+    rather than silently falling back to a guessed loading.
+    """
+    scratch = scratch_dir("ac-sweep-")
     root = sen3_root(str(l1_path))
     platform = platform_of(str(l1_path))
 
@@ -95,7 +113,19 @@ def corrected_frame(l1_path, decimate):
     land, _, _ = quality_mask(root, scratch, shape, ["land"])
     usable = ~rejected & ~bright
 
-    surfaces = {}
+    aerosol = None
+    window = sensing_window(str(l1_path))
+    for candidate in aod_paths:
+        if covers(sensing_window(str(candidate)), window):
+            latitude = tie_field(root, "tie_geo_coordinates.nc", "latitude", shape, scratch)
+            longitude = tie_field(root, "tie_geo_coordinates.nc", "longitude", shape, scratch)
+            try:
+                aerosol = frame_aerosol(str(candidate), latitude, longitude, scratch)
+            except ValueError:
+                aerosol = None
+            break
+
+    surfaces, aerosol_surfaces = {}, {} if aerosol else None
     for band in BANDS:
         toa = _toa(root, band, shape, sza, scratch, decimate)
         t_gas = gas_transmittance(
@@ -114,6 +144,17 @@ def corrected_frame(l1_path, decimate):
             transmittance_up=terms["transmittance_up"],
             spherical_albedo=terms["spherical_albedo"],
         )
+        if aerosol is not None and np.isfinite(aerosol["optical_depth_550"]):
+            hazy = atmosphere_terms(
+                platform, band, pressure_hpa=pressure, solar_zenith_deg=sza,
+                view_zenith_deg=oza, relative_azimuth_deg=azimuth,
+                ozone_kg_m2=ozone, water_kg_m2=vapour,
+                optical_depth_550=aerosol["optical_depth_550"],
+                angstrom=aerosol["angstrom"],
+            )
+            aerosol_surfaces[band] = surface_from_toa(toa, **hazy)
+        elif aerosol_surfaces is not None:
+            aerosol_surfaces = None
     return {
         "shape": shape,
         "scratch": scratch,
@@ -121,11 +162,21 @@ def corrected_frame(l1_path, decimate):
         "land": land & usable,
         "water": ~land & usable,
         "surfaces": surfaces,
+        "aerosol": aerosol,
+        "aerosol_surfaces": aerosol_surfaces,
     }
 
 
-def residuals(frame, reference_path, kind):
-    """Median residual per band against one Level-2 reference."""
+def residuals(frame, reference_path, kind, which="surfaces"):
+    """Median residual per band against one Level-2 reference.
+
+    ``which`` selects the tier: ``surfaces`` is gas and Rayleigh, and
+    ``aerosol_surfaces`` the same with the aerosol increment applied. Both are
+    measured over the same pixels, so the difference between them is the tier
+    and not a change of sample.
+    """
+    if frame.get(which) is None:
+        return {band: (float("nan"), 0) for band in BANDS}
     root = sen3_root(str(reference_path))
     mask = frame["land"] if kind == "syn" else frame["water"]
     out = {}
@@ -140,8 +191,14 @@ def residuals(frame, reference_path, kind):
         except (ValueError, RuntimeError):
             out[band] = (float("nan"), 0)
             continue
-        surface = frame["surfaces"][band]
+        surface = frame[which][band]
+        # The two tiers are compared over the pixels both can answer, so a
+        # frame cannot look better simply by answering fewer pixels.
         keep = mask & np.isfinite(surface) & np.isfinite(l2)
+        if frame.get("aerosol_surfaces") is not None:
+            keep = keep & np.isfinite(frame["surfaces"][band]) & np.isfinite(
+                frame["aerosol_surfaces"][band]
+            )
         count = int(keep.sum())
         if count < MINIMUM_PIXELS:
             out[band] = (float("nan"), count)
@@ -166,43 +223,66 @@ def main() -> int:
     complete = sorted(
         key for key, kinds in found.items() if {"l1", "wfr", "syn"} <= set(kinds)
     )
+    # Aerosol products are orbit-long, so they never share an acquisition key
+    # with a frame and have to be matched by sensing window instead.
+    aod_paths = sorted(
+        {str(kinds["aod"]) for kinds in found.values() if "aod" in kinds}
+    )
     # Consecutive, not strided: the archive alternates two solar-zenith groups
     # between neighbouring acquisitions, so a stride lands on one group only -
     # a sample of three strided frames came out all at 78 to 79 degrees.
     sample = complete[args.offset:][: args.count]
-    print(f"{len(complete)} complete triples; taking {len(sample)} consecutively "
-          f"from offset {args.offset}\n")
+    print(f"{len(complete)} complete triples and {len(aod_paths)} aerosol products; "
+          f"taking {len(sample)} triples consecutively from offset {args.offset}\n")
 
-    print(f"{'acquisition':18s} {'SZA':>6s} "
+    print(f"{'acquisition':18s} {'SZA':>6s} {'AOD':>6s} {'alpha':>6s} "
           f"{'land 665':>9s} {'land 560':>9s} {'land 490':>9s} "
           f"{'water 665':>10s} {'water 560':>10s} {'water 490':>10s}")
     rows = []
     for key in sample:
         paths = found[key]
         try:
-            frame = corrected_frame(paths["l1"], args.decimate)
+            frame = corrected_frame(paths["l1"], args.decimate, aod_paths)
         except Exception as error:
-            print(f"{key[0]:18s} unreadable: {type(error).__name__}")
+            print(f"{key[0]:18s} unreadable: {type(error).__name__}: {error}")
             continue
-        land = residuals(frame, paths["syn"], "syn")
-        water = residuals(frame, paths["wfr"], "wfr")
-        zenith = float(np.nanmedian(frame["solar_zenith"]))
-        rows.append((zenith, land, water))
-        print(f"{key[0]:18s} {zenith:6.1f} "
-              + " ".join(
-                  f"{land[b][0]:9.4f}" if np.isfinite(land[b][0]) else f"{'-':>9s}"
-                  for b in BANDS
-              )
-              + " "
-              + " ".join(
-                  f"{water[b][0]:10.4f}" if np.isfinite(water[b][0]) else f"{'-':>10s}"
-                  for b in BANDS
-              ), flush=True)
+        try:
+            land = residuals(frame, paths["syn"], "syn")
+            water = residuals(frame, paths["wfr"], "wfr")
+            hazy_land = residuals(frame, paths["syn"], "syn", "aerosol_surfaces")
+            hazy_water = residuals(frame, paths["wfr"], "wfr", "aerosol_surfaces")
+            zenith = float(np.nanmedian(frame["solar_zenith"]))
+            loading = frame["aerosol"] or {}
+            rows.append((zenith, land, water, hazy_land, hazy_water, loading))
+
+            def cells(values, width):
+                return " ".join(
+                    f"{values[b][0]:{width}.4f}" if np.isfinite(values[b][0])
+                    else f"{'-':>{width}s}"
+                    for b in BANDS
+                )
+
+            depth = loading.get("optical_depth_550", float("nan"))
+            alpha = loading.get("angstrom", float("nan"))
+            depth_cell = f"{depth:6.3f}" if np.isfinite(depth) else f"{'-':>6s}"
+            alpha_cell = f"{alpha:6.2f}" if np.isfinite(alpha) else f"{'-':>6s}"
+            print(f"{key[0]:18s} {zenith:6.1f} {depth_cell} {alpha_cell} "
+                  + cells(land, 9) + " " + cells(water, 10), flush=True)
+            if frame["aerosol_surfaces"] is not None:
+                print(f"{'  + aerosol':18s} {'':6s} {'':6s} {'':6s} "
+                      + cells(hazy_land, 9) + " " + cells(hazy_water, 10), flush=True)
+        finally:
+            # **Release the frame before reading the next one.** A frame's
+            # extracted members are a few hundred megabytes and this loop walks
+            # fifty of them, so holding them all filled the volume to zero bytes
+            # free mid-run - which showed up as two frames at the tail failing
+            # with OSError, a disk fault wearing the costume of a data fault.
+            shutil.rmtree(frame["scratch"], ignore_errors=True)
 
     print("\nBy solar zenith band, median of the absolute land residual:")
     print(f"{'zenith':12s} {'frames':>7s} {'665':>8s} {'560':>8s} {'490':>8s} {'worst':>8s}")
     for low, high in ((0, 68), (68, 72), (72, 76), (76, 80), (80, 90)):
-        inside = [(z, land) for z, land, _ in rows if low <= z < high]
+        inside = [(z, land) for z, land, _, _, _, _ in rows if low <= z < high]
         if not inside:
             continue
         per_band = []
@@ -213,6 +293,30 @@ def main() -> int:
         print(f"{low:3d}-{high:<8d} {len(inside):7d} "
               + " ".join(f"{v:8.4f}" if np.isfinite(v) else f"{'-':>8s}" for v in per_band)
               + f" {worst:8.4f}")
+
+    # Does the aerosol tier move the answer towards ESA's or away from it? Over
+    # every frame that has an aerosol retrieval, counted per band and per scene
+    # type, because the two scenes answer different questions: Synergy's
+    # surface directional reflectance is the quantity being produced, while the
+    # water-leaving reflectance is a different quantity and agreement with it
+    # has a floor that no correction can go below.
+    print("\nWhat the aerosol tier does to the agreement, per band:")
+    print(f"{'scene':8s} {'band':>5s} {'frames':>7s} {'|res| base':>11s} "
+          f"{'|res| +aer':>11s} {'better':>7s} {'worse':>7s}")
+    for scene, base_index, hazy_index in (("land", 1, 3), ("water", 2, 4)):
+        for band in BANDS:
+            pairs = [
+                (abs(row[base_index][band][0]), abs(row[hazy_index][band][0]))
+                for row in rows
+                if np.isfinite(row[base_index][band][0]) and np.isfinite(row[hazy_index][band][0])
+            ]
+            if not pairs:
+                continue
+            base = float(np.median([p[0] for p in pairs]))
+            hazy = float(np.median([p[1] for p in pairs]))
+            better = sum(1 for b, h in pairs if h < b)
+            print(f"{scene:8s} {band:5d} {len(pairs):7d} {base:11.4f} {hazy:11.4f} "
+                  f"{better:7d} {len(pairs) - better:7d}")
     return 0
 
 
