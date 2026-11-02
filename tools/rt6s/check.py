@@ -9,8 +9,8 @@ The reference case is 490 nm, solar zenith 70 degrees, view zenith 20, relative
 azimuth 90, mid-latitude-summer profile, no aerosols, black ground, target at
 sea level and sensor at satellite level.
 
-Three traps are baked into that description, each of which silently returns
-zero or one rather than failing:
+Five traps are baked into that description, each of which silently returns a
+plausible wrong answer rather than failing:
 
 * **The sensor defaults to ground level.** With it there, there is no
   atmosphere above the sensor, so the path reflectance is 0 and the upward
@@ -28,6 +28,12 @@ zero or one rather than failing:
   generated through the pressure call has a pressure axis that silently holds
   one value six times over, which looks like a table until something asks it
   how scattering varies with elevation.
+* **With an aerosol present, the path reflectance is split across columns.**
+  The column labelled ``atm. intrin. ref.`` holds only the molecular part, the
+  next column the aerosol part, and the third their sum. Read the first column
+  with an aerosol loaded and the number does not move when the optical depth or
+  the model changes - it sits at the Rayleigh value, which reads as an axis
+  having no effect. With a black ground the apparent reflectance is the sum.
 """
 from __future__ import annotations
 
@@ -108,6 +114,39 @@ def elevation_cases():
     return tuple(depths)
 
 
+def aerosol_cases():
+    """Path reflectance with and without aerosol, both ways of reading it.
+
+    Returns ``(molecular_column, apparent)`` for a clear run and for one with
+    a continental aerosol of optical depth 0.4. The molecular column must be
+    the *same* in both - that is the trap - while the apparent reflectance must
+    rise.
+    """
+    results = []
+    for depth in (0.0, 0.4):
+        model = SixS(SIXS)
+        model.geometry = Geometry.User()
+        model.geometry.solar_z, model.geometry.view_z = 70.0, 40.0
+        model.geometry.solar_a, model.geometry.view_a = 0.0, 90.0
+        model.geometry.day, model.geometry.month = 25, 10
+        model.altitudes.set_target_sea_level()
+        model.altitudes.set_sensor_satellite_level()
+        model.atmos_profile = AtmosProfile.PredefinedType(AtmosProfile.NoGaseousAbsorption)
+        if depth:
+            model.aero_profile = AeroProfile.PredefinedType(AeroProfile.Continental)
+            model.aot550 = depth
+        else:
+            model.aero_profile = AeroProfile.PredefinedType(AeroProfile.NoAerosols)
+        model.ground_reflectance = GroundReflectance.HomogeneousLambertian(0.0)
+        model.wavelength = Wavelength(0.490)
+        model.run()
+        row = next(
+            line for line in model.outputs.fulltext.splitlines() if "reflectance I" in line
+        )
+        results.append((float(row.split(":")[1].split()[0]), model.outputs.apparent_reflectance))
+    return results
+
+
 def main() -> int:
     measured = reference_case()
     failures = []
@@ -138,6 +177,20 @@ def main() -> int:
             "set_target_pressure now has an effect - it was a silent no-op when the tables "
             "were generated, so the generator drives altitude instead and may want revisiting"
         )
+
+    (clear_column, clear_apparent), (hazy_column, hazy_apparent) = aerosol_cases()
+    print(f"\n{'clear: molecular column / apparent':40s} {clear_column:.5f} / {clear_apparent:.5f}")
+    print(f"{'aerosol 0.4: molecular column / apparent':40s} "
+          f"{hazy_column:.5f} / {hazy_apparent:.5f}")
+    if abs(clear_column - clear_apparent) > 1e-4:
+        failures.append("with no aerosol the molecular column and the apparent reflectance differ")
+    if abs(hazy_column - clear_column) > 1e-4:
+        failures.append(
+            "the molecular column now moves with the aerosol - the tables take the total from "
+            "the apparent reflectance on the assumption that it does not"
+        )
+    if hazy_apparent <= clear_apparent:
+        failures.append("adding an aerosol did not brighten the path")
 
     if failures:
         print(f"\nFAILED: {', '.join(str(f) for f in failures)}")

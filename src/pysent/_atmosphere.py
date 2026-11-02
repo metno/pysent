@@ -56,6 +56,11 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 OZONE_TABLE = "olci_ozone_absorption.csv"
 WATER_TABLE = "olci_water_transmittance.csv"
 RAYLEIGH_TABLE = "olci_rayleigh.csv"
+AEROSOL_TABLE = "olci_aerosol.csv"
+
+#: Wavelengths the aerosol product reports optical depth at, used to derive the
+#: Angstrom exponent from the measurement rather than assuming a model.
+ANGSTROM_PAIR_NM = (440.0, 670.0)
 
 #: Standard sea-level pressure, the reference the barometric formula uses.
 STANDARD_PRESSURE_HPA = 1013.25
@@ -416,6 +421,265 @@ def rayleigh_terms(
         "transmittance_up": terms["transmittance_up"],
         "spherical_albedo": terms["spherical_albedo"],
     }
+
+
+@functools.lru_cache(maxsize=4)
+def _aerosol_grids():
+    """``{(platform, band, model): (axes, cubes)}`` from the committed table.
+
+    ``axes`` is ``(optical depths, solar zeniths, view zeniths)``; the table is
+    at sea level only, so there is no pressure axis - see
+    :func:`atmosphere_terms` for how it is combined with the molecular table.
+    """
+    gathered: dict[tuple[str, int, str], dict[tuple[float, float, float], tuple]] = {}
+    path = DATA_DIR / AEROSOL_TABLE
+    if not path.exists():
+        return {}
+    for line in path.read_text().splitlines():
+        if not line or line.startswith("#") or line.startswith("platform,"):
+            continue
+        fields = line.split(",")
+        key = (fields[0], int(fields[1]), fields[2])
+        coordinate = (float(fields[3]), float(fields[4]), float(fields[5]))
+        gathered.setdefault(key, {})[coordinate] = (
+            float(fields[6]), float(fields[7]), float(fields[8]),
+            float(fields[10]), float(fields[11]), float(fields[12]), float(fields[13]),
+        )
+
+    names = (
+        "a0", "a1", "a2",
+        "transmittance_down", "transmittance_up", "spherical_albedo", "band_optical_depth",
+    )
+    grids = {}
+    for key, points in gathered.items():
+        depths = np.array(sorted({d for d, _, _ in points}))
+        solars = np.array(sorted({s for _, s, _ in points}))
+        views = np.array(sorted({v for _, _, v in points}))
+        shape = (depths.size, solars.size, views.size)
+        if len(points) != shape[0] * shape[1] * shape[2]:
+            raise ValueError(
+                f"the aerosol table is not a full grid for {key}: {len(points)} rows "
+                f"for a {shape} grid"
+            )
+        cubes = {name: np.empty(shape) for name in names}
+        for (depth, solar, view), values in points.items():
+            index = (
+                int(np.searchsorted(depths, depth)),
+                int(np.searchsorted(solars, solar)),
+                int(np.searchsorted(views, view)),
+            )
+            for name, value in zip(names, values):
+                cubes[name][index] = value
+        grids[key] = ((depths, solars, views), cubes)
+    return grids
+
+
+def aerosol_models(platform: str = "S3A") -> tuple[str, ...]:
+    """Which aerosol models the committed table covers."""
+    return tuple(sorted({model for p, _, model in _aerosol_grids() if p == platform}))
+
+
+def angstrom_exponent(depth_short, depth_long, wavelengths_nm=ANGSTROM_PAIR_NM):
+    """The Angstrom exponent implied by two optical depths.
+
+    ``alpha = -ln(tau_short / tau_long) / ln(lam_short / lam_long)``. Derived
+    from the aerosol product's own measurements, because the field that would
+    have stated it directly is empty in every granule checked - and because
+    choosing an aerosol model from a land/water mask mislabels continental
+    outflow over water and marine air over coastal land.
+
+    NaN where either depth is non-positive, which is also what the product
+    gives where it has no retrieval.
+    """
+    short = np.asarray(depth_short, dtype=np.float64)
+    long = np.asarray(depth_long, dtype=np.float64)
+    ratio_nm = np.log(wavelengths_nm[0] / wavelengths_nm[1])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        alpha = -np.log(short / long) / ratio_nm
+    return np.where((short > 0) & (long > 0), alpha, np.nan)
+
+
+@functools.lru_cache(maxsize=16)
+def model_angstrom(platform: str, model: str) -> float:
+    """One model's own Angstrom exponent, read off the table.
+
+    Taken from the band optical depths the generator stored, so it describes
+    the model as 6SV implements it rather than as a textbook summarises it.
+    Bands 4 (490 nm) and 17 (865 nm) are the pair with the widest separation
+    the aerosol table covers.
+    """
+    grids = _aerosol_grids()
+    depths = {}
+    for band, nm in ((4, 490.0), (17, 865.0)):
+        key = (platform, band, model)
+        if key not in grids:
+            raise ValueError(
+                f"the aerosol table has no {model} rows for {platform} band {band}, so this "
+                "model's Angstrom exponent cannot be read from it"
+            )
+        _, cubes = grids[key]
+        depths[nm] = float(np.median(cubes["band_optical_depth"]))
+    return float(
+        -np.log(depths[490.0] / depths[865.0]) / np.log(490.0 / 865.0)
+    )
+
+
+def _model_weights(platform, alpha):
+    """How much of each model to use, from the measured Angstrom exponent.
+
+    A linear blend between the two models on their own exponents, clamped at
+    both ends. **This is the weakest physical choice in the correction**: two
+    models span a line through a space that has at least three dimensions -
+    size distribution, absorption and vertical placement - and the archive's
+    own single-scattering albedo field, which would have constrained
+    absorption, is empty. Where the exponent is unknown the more absorbing of
+    the two is not assumed; the blend falls back to the model nearer the
+    scene's own median.
+    """
+    models = aerosol_models(platform)
+    if len(models) == 1:
+        return {models[0]: 1.0}
+    exponents = {name: model_angstrom(platform, name) for name in models}
+    low, high = min(exponents, key=exponents.get), max(exponents, key=exponents.get)
+    span = exponents[high] - exponents[low]
+    if span <= 0:
+        return {low: 1.0}
+    alpha = np.asarray(alpha, dtype=np.float64)
+    weight = np.clip((alpha - exponents[low]) / span, 0.0, 1.0)
+    # An unknown exponent gets the midpoint rather than a silent extreme.
+    weight = np.where(np.isfinite(weight), weight, 0.5)
+    return {low: 1.0 - weight, high: weight}
+
+
+def aerosol_terms(
+    platform: str,
+    band: int,
+    *,
+    optical_depth_550,
+    angstrom,
+    solar_zenith_deg,
+    view_zenith_deg,
+    relative_azimuth_deg,
+):
+    """The aerosol contribution, as an increment over the molecular atmosphere.
+
+    The committed table holds the **total** path reflectance at sea level - the
+    molecular part and the aerosol part together, since that is what 6SV
+    reports as one number - so what comes back here is that total minus the
+    molecular-only value at sea level, which is the increment
+    :func:`atmosphere_terms` adds to the pressure-corrected Rayleigh term.
+
+    The transmittances come back as *ratios* to the sea-level molecular ones,
+    because transmittances multiply along a path, and the spherical albedo as a
+    difference.
+    """
+    grids = _aerosol_grids()
+    if not grids:
+        raise ValueError(
+            f"{DATA_DIR / AEROSOL_TABLE} is absent, so no aerosol correction is available; "
+            "generate it with tools/rt6s/generate_tables.py --tables aerosol"
+        )
+    molecular = rayleigh_terms(
+        platform, band,
+        pressure_hpa=STANDARD_PRESSURE_HPA,
+        solar_zenith_deg=solar_zenith_deg,
+        view_zenith_deg=view_zenith_deg,
+        relative_azimuth_deg=relative_azimuth_deg,
+    )
+    phi = np.radians(np.asarray(relative_azimuth_deg, dtype=np.float64))
+    coordinates = (optical_depth_550, solar_zenith_deg, view_zenith_deg)
+
+    blended = {"path": 0.0, "down": 0.0, "up": 0.0, "albedo": 0.0}
+    for model, weight in _model_weights(platform, angstrom).items():
+        key = (platform, int(band), model)
+        if key not in grids:
+            raise ValueError(
+                f"the aerosol table has no {model} rows for {platform} band {band}"
+            )
+        axes, cubes = grids[key]
+        terms = {name: _trilinear(cube, axes, coordinates) for name, cube in cubes.items()}
+        path = terms["a0"] + 2.0 * terms["a1"] * np.cos(phi) + 2.0 * terms["a2"] * np.cos(2 * phi)
+        blended["path"] = blended["path"] + weight * path
+        blended["down"] = blended["down"] + weight * terms["transmittance_down"]
+        blended["up"] = blended["up"] + weight * terms["transmittance_up"]
+        blended["albedo"] = blended["albedo"] + weight * terms["spherical_albedo"]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return {
+            "path_increment": blended["path"] - molecular["path_reflectance"],
+            "transmittance_down_ratio": blended["down"] / molecular["transmittance_down"],
+            "transmittance_up_ratio": blended["up"] / molecular["transmittance_up"],
+            "spherical_albedo_increment": blended["albedo"] - molecular["spherical_albedo"],
+        }
+
+
+def atmosphere_terms(
+    platform: str,
+    band: int,
+    *,
+    pressure_hpa,
+    solar_zenith_deg,
+    view_zenith_deg,
+    relative_azimuth_deg,
+    ozone_kg_m2,
+    water_kg_m2,
+    optical_depth_550=None,
+    angstrom=None,
+):
+    """Everything :func:`surface_from_toa` needs, for one band.
+
+    With no ``optical_depth_550`` this is the gas-and-Rayleigh atmosphere of
+    Phase 2. With one, the aerosol increment is applied on top:
+
+    - the path reflectances **add**, molecular at the pixel's own pressure plus
+      the aerosol increment taken at sea level;
+    - the transmittances **multiply**, molecular at pressure times the
+      aerosol's ratio;
+    - the spherical albedos **add**.
+
+    The aerosol part is tabulated at sea level only, so this combination
+    assumes the aerosol's own scattering does not depend on the air column
+    above it - true to the extent that the aerosol sits in the boundary layer,
+    and the reason elevated terrain is an open question for review.
+    """
+    molecular = rayleigh_terms(
+        platform, band,
+        pressure_hpa=pressure_hpa,
+        solar_zenith_deg=solar_zenith_deg,
+        view_zenith_deg=view_zenith_deg,
+        relative_azimuth_deg=relative_azimuth_deg,
+    )
+    terms = {
+        "gas_transmittance": gas_transmittance(
+            platform, band,
+            ozone_kg_m2=ozone_kg_m2, water_kg_m2=water_kg_m2,
+            solar_zenith_deg=solar_zenith_deg, view_zenith_deg=view_zenith_deg,
+        ),
+        "path_reflectance": molecular["path_reflectance"],
+        "transmittance_down": molecular["transmittance_down"],
+        "transmittance_up": molecular["transmittance_up"],
+        "spherical_albedo": molecular["spherical_albedo"],
+    }
+    if optical_depth_550 is None:
+        return terms
+
+    aerosol = aerosol_terms(
+        platform, band,
+        optical_depth_550=optical_depth_550,
+        angstrom=angstrom,
+        solar_zenith_deg=solar_zenith_deg,
+        view_zenith_deg=view_zenith_deg,
+        relative_azimuth_deg=relative_azimuth_deg,
+    )
+    terms["path_reflectance"] = terms["path_reflectance"] + aerosol["path_increment"]
+    terms["transmittance_down"] = (
+        terms["transmittance_down"] * aerosol["transmittance_down_ratio"]
+    )
+    terms["transmittance_up"] = terms["transmittance_up"] * aerosol["transmittance_up_ratio"]
+    terms["spherical_albedo"] = (
+        terms["spherical_albedo"] + aerosol["spherical_albedo_increment"]
+    )
+    return terms
 
 
 def surface_from_toa(

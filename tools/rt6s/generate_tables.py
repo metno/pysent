@@ -126,6 +126,8 @@ def model(
     relative_azimuth=90.0,
     altitude_km=None,
     rayleigh=False,
+    aerosol_model=None,
+    aerosol_depth=0.0,
 ):
     """One 6SV run: a black surface, no aerosols.
 
@@ -160,7 +162,13 @@ def model(
     else:
         # 6S takes ozone in cm-atm, where 1 cm-atm is 1000 DU.
         run.atmos_profile = AtmosProfile.UserWaterAndOzone(water_g_cm2, ozone_du / 1000.0)
-    run.aero_profile = AeroProfile.PredefinedType(AeroProfile.NoAerosols)
+    if aerosol_model is None or not aerosol_depth:
+        run.aero_profile = AeroProfile.PredefinedType(AeroProfile.NoAerosols)
+    else:
+        run.aero_profile = AeroProfile.PredefinedType(getattr(AeroProfile, aerosol_model))
+        # 6S takes the loading as optical depth at 550 nm, separately from the
+        # model that gives it a shape.
+        run.aot550 = aerosol_depth
     run.ground_reflectance = GroundReflectance.HomogeneousLambertian(0.0)
     run.wavelength = Wavelength(getattr(PredefinedWavelengths, f"{platform}_OLCI_{band:02d}"))
     run.run()
@@ -175,6 +183,25 @@ def path_reflectance(outputs):
     """
     row = next(line for line in outputs.fulltext.splitlines() if "reflectance I" in line)
     return float(row.split(":")[1].split()[0])
+
+
+def total_path_reflectance(outputs):
+    """The **whole** atmospheric path reflectance, molecular and aerosol.
+
+    Not ``path_reflectance``. With an aerosol present, 6SV splits the satellite
+    level reflectance across the columns of its own table: the one labelled
+    ``atm. intrin. ref.`` holds only the molecular part, the next column holds
+    the aerosol part, and the third is their sum. Reading the first column with
+    an aerosol loaded therefore returns a number that does not move when the
+    optical depth or the aerosol model changes - it stays at the Rayleigh
+    value, which looks like a table axis having no effect.
+
+    With a black Lambertian ground the apparent reflectance *is* that sum, so
+    it is what the tables store. For a purely molecular run the two agree
+    exactly, which is why the Rayleigh table generated from the first column is
+    still correct.
+    """
+    return outputs.apparent_reflectance
 
 
 def fit_azimuth_terms(azimuths_deg, values):
@@ -268,6 +295,108 @@ def unique_amounts(samples, tolerance=1e-9):
         if not kept or abs(amount - kept[-1][0]) > tolerance:
             kept.append((amount, value))
     return kept
+
+
+# The aerosol table. Two models rather than one, because the measured Angstrom
+# exponent decides between them: over the land frame the aerosol product's own
+# optical depths give about 1.18, which is fine-mode continental, while marine
+# air runs nearer 0.1 to 0.5. The library interpolates between the two on the
+# measured exponent rather than picking one by land mask.
+AEROSOL_MODELS = ("Continental", "Maritime")
+# Optical depth at 550 nm. Zero is included so the aerosol increment is defined
+# against the same geometry, and 0.4 covers a hazy day; the measured loading in
+# this archive is nearer 0.03, so the useful accuracy is at the bottom.
+# Zero is absent on purpose: the aerosol-free case at sea level is already the
+# Rayleigh table's 1013.25 hPa row, so repeating it here would be a second
+# copy of the same numbers to keep in step.
+AEROSOL_DEPTHS = (0.05, 0.15, 0.4)
+# Seven azimuths rather than thirteen. An aerosol phase function is more
+# forward-peaked than Rayleigh's, so this was measured rather than assumed:
+# fitting the three Fourier terms from seven azimuths reproduces all thirteen
+# to 4.5e-6, against 3.4e-6 from the full set. An aerosol run costs 0.65 s
+# against 0.04 s for a clear one, so halving the count is worth 4e-6.
+AEROSOL_AZIMUTHS = tuple(float(a) for a in range(0, 181, 30))
+
+
+def aerosol_rows(job):
+    """One band's aerosol table: total path, transmittances and albedo.
+
+    Held at **sea level only**. The aerosol sits in the boundary layer, so the
+    air column above it changes its scattering far less than it changes the
+    Rayleigh term, and carrying a pressure axis here would multiply the table
+    by six for a second-order effect. The library adds this increment to the
+    pressure-interpolated Rayleigh value; ``check.py`` measures what that
+    approximation costs.
+
+    The aerosol optical depth at the band's own wavelength is stored with each
+    row, because the Angstrom exponent the library interpolates on has to come
+    from the table rather than from a remembered value for the model.
+    """
+    platform, model_name = job[0], job[2]
+    band = job[1]
+    rows = []
+    for depth in AEROSOL_DEPTHS:
+        for solar_zenith in RAYLEIGH_SOLAR_ZENITHS:
+            for view_zenith in RAYLEIGH_VIEW_ZENITHS:
+                reflectances, others = [], []
+                for azimuth in AEROSOL_AZIMUTHS:
+                    out = model(
+                        platform, band, solar_zenith, view_zenith, 0.0, 0.0,
+                        relative_azimuth=azimuth, rayleigh=True,
+                        aerosol_model=model_name, aerosol_depth=depth,
+                    )
+                    # The total, not the molecular column - see the docstring.
+                    reflectances.append(total_path_reflectance(out))
+                    others.append(
+                        (
+                            out.transmittance_total_scattering.downward,
+                            out.transmittance_total_scattering.upward,
+                            out.spherical_albedo.total,
+                            out.optical_depth_total.aerosol,
+                        )
+                    )
+                coefficients, fit_error = fit_azimuth_terms(AEROSOL_AZIMUTHS, reflectances)
+                down, up, albedo, band_depth = others[0]
+                rows.append(
+                    (platform, band, model_name, depth, solar_zenith, view_zenith,
+                     *coefficients, fit_error, down, up, albedo, band_depth)
+                )
+    return rows
+
+
+def write_aerosol(out, results):
+    """The aerosol table, one row per grid point."""
+    rows = [row for chunk in results for row in chunk]
+    worst_fit = max(row[9] for row in rows)
+    path = out / "olci_aerosol.csv"
+    with path.open("w") as handle:
+        handle.write(provenance(
+            "#\n"
+            "# Total path reflectance - molecular plus aerosol - with gaseous absorption off,\n"
+            "# at sea level only, for two 6SV aerosol models against optical depth at 550 nm.\n"
+            "# The azimuth dependence is three Fourier terms as in the Rayleigh table;\n"
+            f"# the worst fit error here is {worst_fit:.2e}.\n"
+            "# band_optical_depth is the aerosol optical depth at that band's own wavelength,\n"
+            "# so the Angstrom exponent can be derived from the table rather than assumed.\n"
+            "# The aerosol increment (this row minus its depth-zero row) is added to the\n"
+            "# pressure-interpolated Rayleigh value; see check.py for what that costs.\n"
+            "# Interpolate multilinearly in (optical depth, solar_zenith, view_zenith) and\n"
+            "# between the two models on the measured Angstrom exponent.\n"
+        ) + "\n")
+        handle.write(
+            "platform,band,model,depth_550,solar_zenith,view_zenith,a0,a1,a2,"
+            "azimuth_fit_error,transmittance_down,transmittance_up,spherical_albedo,"
+            "band_optical_depth\n"
+        )
+        for row in rows:
+            platform, band, model_name, depth, sza, vza = row[:6]
+            a0, a1, a2, fit, down, up, albedo, band_depth = row[6:]
+            handle.write(
+                f"{platform},{band},{model_name},{depth:g},{sza:g},{vza:g},"
+                f"{a0:.6f},{a1:.6f},{a2:.6f},{fit:.2e},"
+                f"{down:.6f},{up:.6f},{albedo:.6f},{band_depth:.6f}\n"
+            )
+    print(f"wrote {path} ({len(rows)} rows, worst azimuth fit {worst_fit:.2e})", flush=True)
 
 
 def rayleigh_rows(job):
@@ -373,7 +502,8 @@ def main() -> int:
     parser.add_argument("--bands", nargs="+", type=int, default=list(BANDS))
     parser.add_argument("--jobs", type=int, default=max(1, multiprocessing.cpu_count() // 2))
     parser.add_argument(
-        "--tables", nargs="+", default=["gas", "rayleigh"], choices=["gas", "rayleigh"]
+        "--tables", nargs="+", default=["gas", "rayleigh"],
+        choices=["gas", "rayleigh", "aerosol"],
     )
     args = parser.parse_args()
 
@@ -383,6 +513,13 @@ def main() -> int:
     print(f"{len(jobs)} band-platform pairs, {args.jobs} workers", flush=True)
 
     with multiprocessing.Pool(args.jobs) as pool:
+        if "aerosol" in args.tables:
+            aerosol_jobs = [
+                (platform, band, name)
+                for platform, band in jobs
+                for name in AEROSOL_MODELS
+            ]
+            write_aerosol(out, pool.map(aerosol_rows, aerosol_jobs))
         if "rayleigh" in args.tables:
             write_rayleigh(out, pool.map(rayleigh_rows, jobs))
         if "gas" not in args.tables:
