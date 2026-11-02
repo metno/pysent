@@ -55,6 +55,10 @@ import numpy as np
 DATA_DIR = Path(__file__).resolve().parent / "data"
 OZONE_TABLE = "olci_ozone_absorption.csv"
 WATER_TABLE = "olci_water_transmittance.csv"
+RAYLEIGH_TABLE = "olci_rayleigh.csv"
+
+#: Standard sea-level pressure, the reference the barometric formula uses.
+STANDARD_PRESSURE_HPA = 1013.25
 
 #: One Dobson unit of ozone in kg m-2 (0.4462 mmol m-2 of O3).
 KG_M2_PER_DOBSON = 2.1415e-5
@@ -210,6 +214,208 @@ def gas_transmittance(
     return ozone_transmittance(platform, band, ozone_kg_m2, mass) * water_transmittance(
         platform, band, water_kg_m2, mass
     )
+
+
+@functools.lru_cache(maxsize=4)
+def _rayleigh_grids():
+    """``{(platform, band): (axes, cubes)}`` read from the committed table.
+
+    ``axes`` is ``(pressures, solar zeniths, view zeniths)``, each ascending;
+    ``cubes`` maps a quantity name to an array of that shape.
+    """
+    gathered: dict[tuple[str, int], dict[tuple[float, float, float], tuple]] = {}
+    for line in (DATA_DIR / RAYLEIGH_TABLE).read_text().splitlines():
+        if not line or line.startswith("#") or line.startswith("platform,"):
+            continue
+        fields = line.split(",")
+        key = (fields[0], int(fields[1]))
+        pressure, solar, view = (float(fields[2]), float(fields[3]), float(fields[4]))
+        a0, a1, a2 = (float(fields[5]), float(fields[6]), float(fields[7]))
+        down, up, albedo = (float(fields[9]), float(fields[10]), float(fields[11]))
+        gathered.setdefault(key, {})[(pressure, solar, view)] = (a0, a1, a2, down, up, albedo)
+
+    grids = {}
+    for key, points in gathered.items():
+        pressures = np.array(sorted({p for p, _, _ in points}))
+        solars = np.array(sorted({s for _, s, _ in points}))
+        views = np.array(sorted({v for _, _, v in points}))
+        shape = (pressures.size, solars.size, views.size)
+        if len(points) != shape[0] * shape[1] * shape[2]:
+            raise ValueError(
+                f"the Rayleigh table is not a full grid for {key[0]} band {key[1]}: "
+                f"{len(points)} rows for a {shape} grid"
+            )
+        names = ("a0", "a1", "a2", "transmittance_down", "transmittance_up", "spherical_albedo")
+        cubes = {name: np.empty(shape) for name in names}
+        for (pressure, solar, view), values in points.items():
+            index = (
+                int(np.searchsorted(pressures, pressure)),
+                int(np.searchsorted(solars, solar)),
+                int(np.searchsorted(views, view)),
+            )
+            for name, value in zip(names, values):
+                cubes[name][index] = value
+        grids[key] = ((pressures, solars, views), cubes)
+    if not grids:
+        raise ValueError(f"{DATA_DIR / RAYLEIGH_TABLE} holds no grid")
+    return grids
+
+
+#: How far above the Rayleigh table's top pressure a value may be
+#: extrapolated, in hPa. The table stops at sea-level standard because 6SV
+#: cannot be asked for a negative target altitude, but real sea-level pressure
+#: reaches about 1040 hPa in a winter anticyclone.
+PRESSURE_EXTRAPOLATION_HPA = 60.0
+
+
+def _secant(degrees):
+    """``1/cos`` of an angle in degrees - the axis the path reflectance is linear in.
+
+    Rayleigh path reflectance goes as ``tau * P(theta) / (4 mu_s mu_v)``, so it
+    is close to linear in the *secant* of each zenith angle and markedly curved
+    in the angle itself. Interpolating in secant space is therefore not a
+    refinement but most of the accuracy: on the steepest corner of the grid -
+    solar zenith 78.5, view zenith 52 - interpolating in degrees misses 6SV by
+    0.0041 in reflectance, and in secant space by about a tenth of that.
+    """
+    return 1.0 / np.cos(np.radians(np.asarray(degrees, dtype=np.float64)))
+
+
+def _axis_weights(nodes, values, extrapolate_above=0.0, transform=None):
+    """Bracketing indices and the upper weight.
+
+    Clamped to the nodes by default, which is deliberate for the angles: past
+    the last solar zenith the path reflectance rises steeply, and a linear
+    extrapolation of a steep curve invents brightness.
+
+    ``extrapolate_above`` opens the top end by that much, for the pressure
+    axis only. That is safe where clamping an angle would not be, because the
+    path reflectance is nearly linear in pressure: measured with 6SV at 490 nm
+    and solar zenith 70, a straight line through the top two nodes predicts the
+    third to 5e-5 in reflectance. Clamping instead would cost about 0.0025 at
+    1040 hPa, a quarter of this phase's whole error budget.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    # Clamp before transforming: the secant of 90 degrees is infinite, and the
+    # bracketing has to happen on finite numbers.
+    bounded = np.clip(values, nodes[0], nodes[-1] + extrapolate_above)
+    upper = np.clip(np.searchsorted(nodes, bounded, side="left"), 1, nodes.size - 1)
+    lower = upper - 1
+    if transform is not None:
+        scale = transform(nodes)
+        bounded = transform(bounded)
+    else:
+        scale = nodes
+    weight = (bounded - scale[lower]) / (scale[upper] - scale[lower])
+    return lower, upper, weight
+
+
+def _trilinear(cube, axes, coordinates):
+    """Multilinear interpolation on a regular but unevenly spaced grid.
+
+    numpy only - scipy is not a dependency of this library, and a
+    three-dimensional multilinear interpolation is eight weighted corners.
+
+    The first axis is pressure, and it is the only one allowed to extrapolate;
+    see :func:`_axis_weights`.
+    """
+    allowances = (PRESSURE_EXTRAPOLATION_HPA, 0.0, 0.0)
+    # Pressure interpolates linearly; the two zenith angles interpolate in
+    # their secant, which is what the physics is linear in.
+    transforms = (None, _secant, _secant)
+    brackets = [
+        _axis_weights(nodes, value, allowance, transform)
+        for nodes, value, allowance, transform in zip(
+            axes, coordinates, allowances, transforms
+        )
+    ]
+    total = 0.0
+    for first in (0, 1):
+        for second in (0, 1):
+            for third in (0, 1):
+                picks = []
+                weight = 1.0
+                for choice, (lower, upper, fraction) in zip((first, second, third), brackets):
+                    picks.append(upper if choice else lower)
+                    weight = weight * (fraction if choice else 1.0 - fraction)
+                total = total + weight * cube[tuple(picks)]
+    return total
+
+
+def rayleigh_grid_limits(platform: str, band: int):
+    """``{"pressure_hpa": (lo, hi), ...}`` - the table's own coverage."""
+    grids = _rayleigh_grids()
+    (pressures, solars, views), _ = grids[_table_key(platform, band, grids)]
+    return {
+        "pressure_hpa": (float(pressures[0]), float(pressures[-1])),
+        "solar_zenith": (float(solars[0]), float(solars[-1])),
+        "view_zenith": (float(views[0]), float(views[-1])),
+    }
+
+
+def pixel_pressure(sea_level_pressure_hpa, altitude_m):
+    """Air pressure at the surface, from the product's own two fields.
+
+    The barometric formula of the standard atmosphere. Elevation matters more
+    than it looks: Rayleigh optical depth is proportional to pressure, so
+    ground at 2 km scatters about a fifth less than the same scene at sea
+    level, and treating a mountain as sea level over-corrects it.
+
+    Negative elevations (a few hundred metres below sea level exist in the
+    products as fill or as genuine depressions) are kept rather than clipped;
+    the formula is smooth through zero.
+    """
+    pressure = np.asarray(sea_level_pressure_hpa, dtype=np.float64)
+    altitude = np.asarray(altitude_m, dtype=np.float64)
+    return pressure * (1.0 - 2.25577e-5 * altitude) ** 5.25588
+
+
+def relative_azimuth(solar_azimuth_deg, view_azimuth_deg):
+    """The azimuth difference the Rayleigh table is indexed by, folded to 0-180.
+
+    Scattering depends on the angle between the two planes and not on its
+    sign, so the difference is folded: the table holds 0 to 180 only.
+    """
+    difference = np.abs(
+        np.asarray(view_azimuth_deg, dtype=np.float64)
+        - np.asarray(solar_azimuth_deg, dtype=np.float64)
+    ) % 360.0
+    return np.where(difference > 180.0, 360.0 - difference, difference)
+
+
+def rayleigh_terms(
+    platform: str,
+    band: int,
+    *,
+    pressure_hpa,
+    solar_zenith_deg,
+    view_zenith_deg,
+    relative_azimuth_deg,
+):
+    """The four molecular-scattering terms the inversion needs.
+
+    The path reflectance is held as three Fourier terms in the relative
+    azimuth, ``rho = a0 + 2 a1 cos(dphi) + 2 a2 cos(2 dphi)``, which is not an
+    approximation worth worrying about: fitted to thirteen azimuths, the worst
+    disagreement anywhere in the table is about 7e-6 in reflectance.
+
+    These are **molecular scattering only** - the generated runs have gaseous
+    absorption switched off, because the gas term is applied separately and a
+    table holding both would count absorption twice.
+    """
+    grids = _rayleigh_grids()
+    axes, cubes = grids[_table_key(platform, band, grids)]
+    coordinates = (pressure_hpa, solar_zenith_deg, view_zenith_deg)
+    terms = {name: _trilinear(cube, axes, coordinates) for name, cube in cubes.items()}
+
+    phi = np.radians(np.asarray(relative_azimuth_deg, dtype=np.float64))
+    path = terms["a0"] + 2.0 * terms["a1"] * np.cos(phi) + 2.0 * terms["a2"] * np.cos(2.0 * phi)
+    return {
+        "path_reflectance": path,
+        "transmittance_down": terms["transmittance_down"],
+        "transmittance_up": terms["transmittance_up"],
+        "spherical_albedo": terms["spherical_albedo"],
+    }
 
 
 def surface_from_toa(

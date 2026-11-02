@@ -248,13 +248,47 @@ error budget is measurable. It is not ordered by difficulty.
   measured claims check the tables against 6SV at geometries and columns deliberately **off** the
   generated grid, so they test the interpolation and the unit conversions rather than the table
   they came from. Suite **461 passed, 13 skipped**. S5P freeze re-checked: zero differing hashes.
-- [ ] **Phase 2 - Rayleigh, properly.** Multiple scattering, the transmittance division, the
+- [x] **Phase 2 - Rayleigh, properly.** Multiple scattering, the transmittance division, the
   spherical-albedo coupling, pressure from `sea_level_pressure` scaled by per-pixel `altitude`.
   *Acceptance: on the A3 land frame, the residual against `SY_2_SYN` is under 0.01 at all three
   bands - including 560 nm, where single scattering misses by 0.028 - and the correlation is no worse
   than A3's. On the A5 low-sun frame the result is not negative anywhere the quality band calls
   usable.* This is the phase that makes true colour defensible, and the phase that re-opens the
   frozen style question (Q6).
+  **Done; the acceptance was met at two of the three bands, not all three.** The table is 36 288
+  rows covering all 21 bands on both platforms: three Fourier terms in the relative azimuth, and
+  pressure, solar zenith and view zenith on a grid. Measured on the A3 land frame:
+
+  | band | T_gas | rho_R single | rho_R 6SV | T_dn*T_up | surface | SYN SDR | residual | r before | r after |
+  |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+  | Oa08 665 | 0.9439 | 0.0305 | 0.0324 | 0.9136 | 0.0600 | 0.0609 | **-0.0009** | 0.854 | **0.920** |
+  | Oa06 560 | 0.8893 | 0.0613 | 0.0635 | 0.8377 | 0.0571 | 0.0697 | **-0.0126** | 0.814 | **0.929** |
+  | Oa04 490 | 0.9780 | 0.1058 | 0.1049 | 0.7467 | 0.0445 | 0.0380 | **+0.0065** | 0.353 | **0.818** |
+
+  665 and 490 nm are inside the 0.01 target; **560 nm misses it at -0.0126**. The correlation part of
+  the acceptance is met with room to spare - at blue it goes 0.353 (uncorrected) to 0.555
+  (single-scattering subtraction) to **0.818** (this phase), which is the clearest single number for
+  what the phase bought.
+
+  **The 560 nm miss is systematic, not noise, and it is not aerosol-shaped.** A second land sample
+  (the clear-land part of the water frame) gives +0.0019, **-0.0099**, +0.0109: the same pattern,
+  low at 560 and high at 490. An unmodelled aerosol inflates every band and inflates blue most, so
+  it would push 560 *up*, not down. Something band-specific is left at 560 - most likely in how our
+  ozone coefficient and Synergy's own correction treat that band, since 560 carries by far the
+  largest gas term (T_gas 0.889). **Carried into Phase 3 as its first question**, since aerosol
+  changes all three bands and diagnosing one through the other would be guesswork.
+
+  **The low-sun half of the acceptance is met**: on the A5 frame at solar zenith 79.6 nothing is
+  negative any more (0.1157 / 0.1284 / 0.1401 where single-scattering subtraction gave 0.088 /
+  0.053 / 0.050). But the residuals there are **-0.038 / -0.094 / -0.079**, three to seven times
+  the 70-degree frames, so the regime needs the ceiling Q3 asks about - now with numbers.
+
+  **Over water the full inversion is further from WFR than a crude subtraction was** - residual
+  0.0411 / 0.0558 / **0.0746** against the audit's 0.0391 / 0.0420 / 0.0634 - and that is correct
+  behaviour, not a regression: the inversion attributes the leftover aerosol path radiance to the
+  surface and then divides by a transmittance of 0.75, which amplifies it. A4 said the atmosphere
+  over water is up to 195 times the signal; this is what that looks like once the Rayleigh part is
+  handled properly.
 - [ ] **Phase 3 - aerosol from the AOD product.** Read `SY_2_AOD` (A6), put it on the frame, and
   build the aerosol path reflectance and transmittance from measured `AOD_550`, `ANG550_865` and
   `SSA_*` rather than a chosen model. *Acceptance: over land the residual against `SY_2_SYN` is
@@ -389,3 +423,24 @@ the phase that needs them.*
   documented direction by the documented amount". It moved all three bands and closed 490 nm
   entirely (+0.0001), which the plan had not predicted - so the acceptance was met on a band it
   did not name.
+- **2026-11-02 - Phase 2.** Two findings worth more than the phase itself.
+  **`set_target_pressure` is a silent no-op in this 6SV build**: accepted, and the Rayleigh optical
+  depth stays at its sea-level value, identical at 1013, 850 and 700 hPa, while
+  `set_target_custom_altitude` varies it correctly. The first table was generated through it and had
+  a pressure axis holding one value five times over - it looked like a table and passed every test
+  that did not ask how scattering varies with elevation. The generator now drives altitude and
+  labels the axis in pressure, `check.py` asserts the no-op so a fixed 6SV announces itself, and
+  the table had to be regenerated. Sea level is the axis top, because Py6S encodes a target altitude
+  as a negative number in the field it shares with pressure, so a negative altitude is
+  indistinguishable from a positive pressure and ignored; pressures above standard are
+  **extrapolated** instead, which is safe on that axis only because a straight line through the top
+  two nodes predicts the third to 5e-5.
+  **Interpolate in the secant of the zenith angle, not the angle.** The path reflectance goes as
+  `1/(mu_s mu_v)`, so it is nearly bilinear in the two secants and visibly curved in the angles. In
+  degrees, the worst grid corner (solar zenith 78.5, view zenith 52) missed 6SV by **0.0041** - 40 %
+  of the whole phase budget; in secant space the same corner misses by **0.0011** and the other
+  reference points by about 1e-4. That is a four-fold accuracy gain for a one-line transform, and
+  it is why the table did not need a denser grid.
+  **Deviation:** the plan's acceptance was "under 0.01 at all three bands". Two of three were met;
+  560 nm sits at -0.0126 and reproduces on a second frame, so it is carried into Phase 3 rather
+  than papered over by loosening the target.
