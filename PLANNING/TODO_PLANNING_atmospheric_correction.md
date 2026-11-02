@@ -154,10 +154,19 @@ than an edge case.
 - `SSA_440` ... `SSA_2250` (single-scattering albedo), `Surface_reflectance_440` ... `_2250`
 - `aod_quality_flags`, `cloud_fraction_nadir`
 
-440, 550 and 670 bracket the three bands true colour renders. So the aerosol tier can be built
-**with measured aerosol loading and a measured phase-function shape** rather than a guessed model -
-which turns the hardest tier into interpolation plus arithmetic, and leaves retrieval (Phase 4) as
-the only genuinely open piece.
+440, 550 and 670 bracket the three bands true colour renders.
+
+**Corrected 2026-11-02, and the correction matters: most of those fields are empty.** Checked across
+six of the 31 products, `Surface_reflectance_*`, `SSA_*`, `ANG550_865` and every `_uncertainty` are
+**0 % populated** - they exist as variables and hold no data at all. What is actually there is the
+optical depth itself, at **6 to 25 % spatial coverage** depending on the granule, plus `FM_AOD550`.
+
+So the aerosol tier gets measured loading but not a measured phase function, and three consequences
+follow: the Angstrom exponent has to be **derived** from `AOD_440`/`AOD_550`/`AOD_670` (over the
+land frame that gives about 1.18, a fine-mode continental aerosol, and a fine-mode fraction of 0.69
+from `FM_AOD550`); most pixels of a frame have **no measured aerosol at all**, so Phase 3 needs a
+stated fill policy rather than an interpolation; and the product's surface reflectance, which would
+have been an independent second reference for A10 below, cannot be used.
 
 ### A7. numpy and GDAL, and nothing else ✅ verified
 
@@ -217,6 +226,42 @@ Two other patterns hold across the whole sweep and are worth more than the zenit
 **What this means for a quality band:** inside 63 to 80 degrees there is nothing to refuse on
 geometric grounds. Cloud contamination of the land mask matters far more than the sun angle, and the
 honest per-pixel flag is about the mask and the aerosol source rather than the zenith.
+
+### A10. The 560 nm bias is spectrally localised and the ozone term is not at fault ✅ verified
+
+`run.sh spectral` turns the comparison round. Instead of asking what surface reflectance we produce,
+it asks what path reflectance **Synergy's own answer implies**, and subtracts the Rayleigh part we
+model:
+
+    rho_implied = rho_toa / T_gas  -  rho_R  -  T_down T_up rho_syn / (1 - S rho_syn)
+
+What is left must be the aerosol path reflectance, which **cannot be negative** and must fall
+smoothly with wavelength. Over the A3 land frame, across the sixteen bands Synergy publishes:
+
+| band | 400 | 412 | 442 | 490 | 510 | **560** | **620** | 665 | 674 | 681 | 709 | 865 | 1020 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| implied aerosol path | .0078 | .0066 | .0076 | .0046 | .0006 | **-.0102** | **-.0095** | -.0004 | .0008 | .0017 | .0011 | -.0033 | .0053 |
+
+It is positive and smoothly falling from 400 to 510 nm - and consistent in size with the measured
+`AOD_440` of 0.044 - then near zero from 665 to 1020. **It is strongly negative at exactly two
+bands, 560 and 620**, which are the two with the strongest ozone absorption (gaseous transmittance
+0.889 and 0.885, against 0.956 at 510 and 0.944 at 665). Both need the same factor, about 1.7x more
+ozone absorption, to come out physical.
+
+**But the ozone term is right.** Derived independently from 6SV at 300 DU and air mass 4, the
+coefficient for band 7 is 1.0511e-4 against the table's 1.0513e-4; and `transmittance_ozone.total`
+really is the two-way transmittance, since it equals `downward * upward` to five decimals and is
+identical (0.88147 against 0.88148) for two geometries with the same air mass but a different split
+between the legs. A column error of 1.7x would mean 485 Dobson units where the product says 285,
+which is not a value the atmosphere takes at 50-62 degrees north in October.
+
+So the disagreement is **0.012 of surface reflectance in two bands**, and the evidence points at the
+reference rather than at this correction: Synergy's own spectrum there is 0.0451 at 510, 0.0697 at
+560, **0.0701 at 620** and 0.0609 at 665 - a 620 nm value equal to the green peak, where chlorophyll
+absorption should put it well below. **This is not settled**, and the thing that would settle it -
+the aerosol product's own surface reflectance - is empty (A6). Recorded as a disagreement with
+Synergy at 560 and 620, to be validated against the 400-510 nm bands where the implied path is
+physical, rather than chased as a defect.
 
 ---
 
