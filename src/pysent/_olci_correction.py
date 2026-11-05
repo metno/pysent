@@ -372,6 +372,11 @@ def correct_frame(
             band,
             land=land,
             tier=tier,
+            # Bright is its own class: Phase 6 measured the correction as 1.4
+            # times worse at 490 nm over bright surfaces than over clear water
+            # and nearly ten times worse at 665, so an ice pixel borrowing a
+            # clear-surface figure understates itself badly.
+            bright=bright,
             aerosol_source=loading["source"] if loading is not None else None,
             depth_uncertainty=aerosol_uncertainty,
             sensitivity=sensitivity,

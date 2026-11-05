@@ -16,6 +16,8 @@
 #   run.sh retrieval        A11: can the loading be retrieved from Level-1 alone?
 #   run.sh stretch          Q6: what stretch a corrected picture needs, both platforms
 #   run.sh arctic [month]   A16: Arctic OLCI in the catalogue, and matched L1+WFR sets
+#   run.sh validate         Phase 6: the shipped correction against ESA, and whether
+#                           the published uncertainty covers the error that occurred
 #                               (and the per-pixel T865/A865 reference in WFR)
 #
 # The frames are named here rather than passed in, so a finding is reproduced
@@ -109,6 +111,15 @@ retrieval)
 sweep)
   python3 -I "$here/sweep.py" --count "${2:-28}" --decimate "${3:-8}" 2>&1 |
     grep -vi "runtimewarning\|nanfunctions\|return np\|invalid value\|divide\|mean of empty"
+  ;;
+validate)
+  # Phase 6. Runs the shipped correct_frame, not the audit's re-implementation,
+  # and reports coverage: the share of pixels whose real disagreement with ESA
+  # fell inside the figure the product published for them. Under Q5 that is the
+  # number the product's honesty rests on.
+  python3 -I "$here/validate.py" --platform S3A S3B --count "${2:-44}" \
+    --decimate "${3:-8}" --arctic "${4:-/mnt/data/arctic-scenes}" 2>&1 |
+    grep -vi "runtimewarning\|nanfunctions\|return np\|invalid value\|divide\|mean of empty\|warning 1"
   ;;
 arctic)
   # The sea-ice gap of A15. The mounted archive stops at 68.7 N; the catalogue

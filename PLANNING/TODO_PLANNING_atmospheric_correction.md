@@ -687,10 +687,61 @@ error budget is measurable. It is not ordered by difficulty.
   product to `S3_TYPE_PRODUCTS` would have made it a *default* for every `OL_1_EFR` request - an
   aerosol retrieval nobody asked for. Fixed with an `S3_OPT_IN_PRODUCTS` table, so the completeness
   check still covers it while `default_sentinel_s3_products` still returns `("truecolor",)` alone.
-- [ ] **Phase 6 - validation across the holding, not one frame.** Run the accepted correction over a
+- [x] **Phase 6 - validation across the holding, not one frame.** Run the accepted correction over a
   sample of A1's 58 triples, both platforms, and report the residual distribution by band, by
   land/water and by solar zenith. *Acceptance: a table the next reviewer can argue with, and a
   stated regime where we refuse.*
+  **Done, through `validate.py` (`run.sh validate`), and it found three defects in the uncertainty
+  band rather than in the correction.** 55 comparisons over both platforms - 25 land, 16 bright, 14
+  water - run through the **shipped** `correct_frame` rather than the audit's re-implementation, on
+  the instrument grid so no warp enters the comparison.
+
+  **The measurement that mattered is coverage**, which no earlier phase computed: the share of
+  pixels whose real disagreement with ESA falls inside the figure the product published for them.
+  It ran at **8 to 15 %** where a one-sigma band should reach 68 %.
+
+  | surface | band | residual | p68 | ESA's signal | coverage before | after |
+  |---|---|---:|---:|---:|---:|---:|
+  | water | 665 | 0.0049 | 0.0094 | 0.0007 | 73.3 % | 79.3 % |
+  | water | 560 | 0.0167 | 0.0252 | 0.0028 | 39.4 % | 67.7 % |
+  | water | 490 | 0.0327 | 0.0486 | 0.0042 | 44.0 % | 67.6 % |
+  | **bright** | 665 | 0.0475 | 0.0759 | 0.2639 | **5.0 %** | 68.0 % |
+  | **bright** | 560 | 0.0681 | 0.0984 | 0.3114 | **12.2 %** | 68.0 % |
+  | **bright** | 490 | 0.0454 | 0.0696 | 0.2900 | **5.8 %** | 68.1 % |
+  | land | 665 | 0.0169 | 0.0294 | 0.0690 | 14.8 % | 67.9 % |
+  | land | 560 | 0.0221 | 0.0419 | 0.0785 | 41.9 % | 68.1 % |
+  | land | 490 | 0.0221 | 0.0329 | 0.0458 | 8.2 % | 68.0 % |
+
+  **Three defects, none of which any test could have caught, because they were all defects in what
+  was being measured rather than in how.**
+  1. **A bias published where a spread was needed.** `sweep.py` computes `median(ours - reference)`,
+     and the table was filled from those numbers while being used as a typical *absolute* error. At
+     490 nm over land the bias is 0.0031 and the typical absolute error is 0.0221 - **seven times
+     larger**. This happened immediately after writing an elaborate argument for not understating
+     this band, which is worth remembering: the argument was right and the data fed into it was the
+     wrong statistic.
+  2. **A median where a p68 was needed.** A median absolute residual is exceeded by half of all
+     pixels *by construction*, so publishing one as an uncertainty guarantees it is wrong half the
+     time. The band now carries p68 and coverage lands at 67.6-68.1 % across every surface and band.
+  3. **Bright surfaces had no row.** Ice over ocean took the water row and ice over land took the
+     land row, understating a 665 nm ice pixel by a factor of ten. `bright` is now its own class.
+
+  **And it refuted the premise Q5's answer was argued from.** The claim was that the error is
+  absolute and so barely depends on target brightness. Measured, the correction is **1.4 times worse
+  at 490 nm over bright surfaces than over clear water and nearly ten times worse at 665**. The
+  *conclusion* survives comfortably - against ESA's 0.26 to 0.31 over those pixels, 0.045 to 0.068
+  is 16 to 22 % relative where open ocean is 780 % - but it survives because the signal is seventy
+  times larger, not because the error is the same. One of those was measured and the other was
+  reasoning. A caveat that cannot be resolved with these products: over bright pixels ESA's own
+  reference is least reliable, so some share of that 0.0475 is theirs.
+
+  **The stated regime (the acceptance's second half).** No solar-zenith ceiling is imposed - A9
+  killed that and this run agrees, with coverage holding near 68 % across 63 to 80 degrees. But
+  **beyond 80 degrees over bright surfaces the band under-covers**: 41.7 % at 560 nm and 45.8 % at
+  490, against a residual of 0.1224 where 0.0984 is published. That is spring and autumn sea ice, so
+  it is the regime this group most needs and the one the single figure fits worst. The quality
+  band's `outside_validated_geometry` bit already marks it; a zenith-dependent uncertainty is the
+  obvious next refinement and is **not** in this phase.
 
 ---
 
