@@ -1176,3 +1176,44 @@ the phase that needs them.*
 
   **This is what makes Phase 6 possible**: 55 triples at 215 s a frame is three and a half hours; at
   28 s it is 26 minutes.
+- **2026-11-05 - the Arctic gap, opened.** The owner answered A15's "we have no sea ice" by pointing
+  at the catalogue rather than a directory: **`https://nbs.csw-staging.met.no/csw`**, a new DNS for
+  the NBS CSW (pycsw 3.0-dev), and authorised copying scenes onto `/mnt/data`.
+  `atmospheric_correction_audit/arctic_find.py` queries it; `run.sh arctic` reproduces.
+  **Three things the catalogue settled.** It holds **1805 `OL_1_EFR` records for April 2026**, with
+  real Arctic coverage - frames reaching **85.8 and 90.0 degrees north** - so the sea-ice regime is
+  reachable after all. The records carry **THREDDS `fileServer` URLs**, so a frame is fetchable even
+  though the mounted archive's seven-day window dropped it months ago; the local mount was never the
+  limit, only the thing I had looked at. And **a title pattern and a bounding box can be combined**
+  in one constraint here (1805 narrowing to 1002 for a 75-85 N box) - the S5P/S3 plan recorded that
+  they could not, so either the new service fixed it or that note was written too broadly.
+  **What does not match is `SY_2_AOD`**, and not for a catalogue reason: those products are
+  orbit-long, so their sensing window *contains* an OLCI frame instead of equalling it, and an
+  exact-key join finds zero. The existing audit already matches them by coverage (`sensing_window` /
+  `covers`) for exactly this reason. Ten April acquisitions carry `OL_1_EFR` + `OL_2_WFR` above
+  78 N, which is the pair that matters anyway, since `w_aer` is the better reference (A11/A12).
+  **A pair 38 minutes apart exists**: S3B `20260419T171323` and S3A `20260419T175203`, both above
+  76.7 N. That is the reference-free geometry-consistency test the plan asked for, with two
+  platforms and two viewing geometries over very nearly the same surface. Downloaded, not yet run.
+- **2026-11-05 - the first sea-ice frame, and what it showed.** S3A `20260412T072814`, 76.8 to
+  **90.0 N**, 12 April 2026, run through `surface_reflectance` end to end.
+  **Every design decision about bright surfaces fired correctly, which is the first real evidence
+  any of them work.** The frame is **99.99 % `bright`** - that is sea ice, and OLCI has no ice flag,
+  exactly as A15 said. The retrieval **refused 99.994 % of it as not clear water** and the
+  climatological loading filled in; `aerosol_retrieved` is 0.000. Median corrected reflectance at
+  665 nm is **0.80**, which is right for snow-covered sea ice, and nothing is negative.
+  **And it vindicated this morning's climatological fix in the sharpest possible way.** Had
+  `climatological` stayed in `UNMEASURED_TIERS`, this entire frame - every pixel of it - would have
+  shipped with **no uncertainty at all**, which under Q5 is the one thing the product must not do.
+  As it is, `uncertainty_unmeasured` is **0.000**. The decision that looked like tidiness over a
+  land frame turns out to be the difference between a usable ice product and an unusable one.
+  **The honest limitation, measured rather than asserted.** Every validation row was measured on
+  pixels the product does *not* call bright, so over ice the published figure is an extrapolation
+  along exactly the axis Q5 says matters. One term in that extrapolation can be checked: the surface
+  coupling `1/(1 - S*rho_s)` is 1.004 over dark water and 1.106 at reflectance 0.8, and through the
+  real inversion a 5 % error in the spherical albedo moves the answer by **0.00001 at 490 nm over
+  dark water against 0.00418 over ice** - four hundred times more, but still an order of magnitude
+  under the 0.039 published for that class. So the figure is not an understatement on that account;
+  what the *other* terms do over ice is unmeasured, and that is Phase 6's job now that the frames
+  exist. `19.3 %` of the frame is also flagged `outside_validated_geometry`, April at 76-90 N being
+  outside the autumn solar-zenith range every number was measured in.

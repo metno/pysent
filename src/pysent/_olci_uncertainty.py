@@ -34,6 +34,22 @@ Two rules follow from not wanting to overstate what has been measured:
   also near zero does not measure accuracy - it is close to a tautology. Those
   bands take the figure from the nearest band the retrieval does *not* fit, and
   are flagged as inferred.
+
+**Over a bright surface the figure is an extrapolation, and the quality band's
+``bright_surface`` bit is how a reader can tell.** Every residual below was
+measured on pixels the product does *not* call bright, because that is where
+both reference products have a value - so sea ice, snow and cloud are outside
+the sample entirely. The argument for using these numbers there anyway is that
+the error is an absolute one contributed by the atmosphere and so barely depends
+on the target's brightness, which is also why the plan's Q5 came out the way it
+did. That argument is reasoning rather than measurement, and one term in it can
+be checked: the surface coupling ``1 / (1 - S * rho_s)``, which is 1.004 over
+dark water and 1.106 at a reflectance of 0.8. Measured through the real
+inversion, a 5 % error in the spherical albedo moves the answer by **0.00001 at
+490 nm over dark water and 0.00418 over ice** - four hundred times more, but
+still an order of magnitude below the 0.039 published for that class, so it does
+not by itself make the figure an understatement. What other terms do over ice is
+not known here, and measuring it is what the Arctic frames are for.
 """
 from __future__ import annotations
 
