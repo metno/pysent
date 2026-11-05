@@ -126,7 +126,8 @@ arctic)
   # does not, and its records carry THREDDS URLs, so a frame months outside the
   # seven-day window is still fetchable. Default box is Fram Strait to Barents.
   python3 -I "$here/arctic_find.py" --sets --month "${2:-202604}" \
-    --bbox "${3:--10,75,35,85}" --min-lat "${4:-78}" --need l1,wfr
+    --bbox "${3:--10,75,35,85}" --min-lat "${4:-78}" --need l1,wfr \
+    ${NBS_CSW_ENDPOINT:+--endpoint "$NBS_CSW_ENDPOINT"}
   ;;
 stretch)
   # Q6: what stretch a corrected true-colour picture needs. Both platforms,

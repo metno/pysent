@@ -21,7 +21,6 @@ only worth asking if the first works:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 import urllib.error
@@ -31,7 +30,14 @@ import xml.etree.ElementTree as ET
 
 #: The new DNS the owner gave on 2026-11-05. The older helper in
 #: PLANNING/s5p_s3_audit hardcodes an IP that this replaces.
-ENDPOINT = os.environ.get("NBS_CSW_ENDPOINT", "https://nbs.csw-staging.met.no/csw")
+#:
+#: Overridden by ``--endpoint`` rather than by an environment variable, for two
+#: reasons. An evidence script should carry the service it queried in the
+#: command line that reproduces it, not hidden in the caller's environment; and
+#: a URL taken from the environment may carry credentials in its userinfo, which
+#: this script would then print. CodeQL flags exactly that, and it is right to.
+DEFAULT_ENDPOINT = "https://nbs.csw-staging.met.no/csw"
+ENDPOINT = DEFAULT_ENDPOINT
 
 NS = {
     "csw": "http://www.opengis.net/cat/csw/2.0.2",
@@ -198,7 +204,12 @@ def main() -> int:
                         help="which of l1,wfr,aod,syn an acquisition must have")
     parser.add_argument("--urls", default="",
                         help="write the matched download URLs to this file")
+    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT,
+                        help="the CSW service to query")
     arguments = parser.parse_args()
+
+    global ENDPOINT
+    ENDPOINT = arguments.endpoint
 
     if arguments.sets:
         need = tuple(part.strip() for part in arguments.need.split(",") if part.strip())
