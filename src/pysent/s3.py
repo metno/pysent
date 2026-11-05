@@ -75,7 +75,9 @@ from ._swath import (
     RESAMPLING_METHODS,
     choose_grid,
     footprint_polygon,
+    decimation_for,
     grid_bounds,
+    refine_for_thin_swath,
     valid_fraction,
     value_statistics,
     warp_swath,
@@ -1284,6 +1286,10 @@ def _process_swath_product(
     local, member, variable = resolve_variable(root, list(options["candidates"]), scratch)
     science = open_sen3_variable(local, variable)
     science_band = science.GetRasterBand(1)
+    # Same guard as the composite path: a granule short enough that the
+    # decimation would leave too few rows to warp keeps more of them. No
+    # ordinary granule is anywhere near this.
+    decimate = decimation_for((science_band.YSize, science_band.XSize), decimate)
     values = read_packed(science_band, decimate=decimate, log10=options["log10"])
     science = None
 
@@ -1373,6 +1379,17 @@ def _process_swath_product(
         ground_sampling_m=(options.get("ground_sampling_m") or OLCI_GROUND_SAMPLING_M)
         * settings["grid_multiplier"],
     )
+    # A swath far narrower in one direction than the grid it is going on cannot
+    # be warped at all: GDAL's geolocation transformer has too few points and
+    # returns an empty raster. The grid gives way rather than the frame - see
+    # refine_for_thin_swath, which leaves every ordinary granule alone.
+    refined = refine_for_thin_swath(
+        lat.shape, epsg, resolution,
+        ground_sampling_m=(options.get("ground_sampling_m") or OLCI_GROUND_SAMPLING_M)
+        * decimate,
+    )
+    grid_refined = refined != resolution
+    resolution = refined
     bounds = grid_bounds(lat, lon, epsg, resolution)
     cells = ((bounds[2] - bounds[0]) / resolution) * ((bounds[3] - bounds[1]) / resolution)
     if cells > settings["max_output_pixels"]:
@@ -1421,6 +1438,7 @@ def _process_swath_product(
         decimate=decimate, source_valid=source_valid, table=table,
         extra={"geoloc_step": step, "member": member, "variable": variable,
                "unavailable_flags": missing_flags,
+               "grid_refined_for_thin_swath": grid_refined,
                "footprint": footprint_polygon(lat, lon)},
     )
 
@@ -1455,6 +1473,13 @@ def _process_rgb_product(
     geo_local = extract_member(root, geo_member, scratch)
     lat_ds = open_sen3_variable(geo_local, lat_name)
     lon_ds = open_sen3_variable(geo_local, lon_name)
+    # Decimation is a cost control, and on a frame small enough it costs the
+    # frame instead: a ten-row stub decimated by eight is one row, which no
+    # grid can rescue. Ordinary granules are thousands of rows and keep the
+    # decimation they asked for.
+    decimate = decimation_for(
+        (lat_ds.GetRasterBand(1).YSize, lat_ds.GetRasterBand(1).XSize), decimate
+    )
     lat = read_packed(lat_ds.GetRasterBand(1), decimate=decimate, log10=False)
     lon = read_packed(lon_ds.GetRasterBand(1), decimate=decimate, log10=False)
     lat_ds = lon_ds = None
@@ -1513,6 +1538,17 @@ def _process_rgb_product(
         ground_sampling_m=(options.get("ground_sampling_m") or OLCI_GROUND_SAMPLING_M)
         * settings["grid_multiplier"],
     )
+    # A swath far narrower in one direction than the grid it is going on cannot
+    # be warped at all: GDAL's geolocation transformer has too few points and
+    # returns an empty raster. The grid gives way rather than the frame - see
+    # refine_for_thin_swath, which leaves every ordinary granule alone.
+    refined = refine_for_thin_swath(
+        lat.shape, epsg, resolution,
+        ground_sampling_m=(options.get("ground_sampling_m") or OLCI_GROUND_SAMPLING_M)
+        * decimate,
+    )
+    grid_refined = refined != resolution
+    resolution = refined
     bounds = grid_bounds(lat, lon, epsg, resolution)
     cells = ((bounds[2] - bounds[0]) / resolution) * ((bounds[3] - bounds[1]) / resolution)
     # Count the layers the file will actually hold, not the spectral bands: a
@@ -1614,6 +1650,10 @@ def _process_rgb_product(
         "output_file": float_path.name,
         "epsg": int(epsg),
         "resolution": float(resolution),
+        # True when the grid was made finer than asked for because the swath
+        # was too narrow to warp otherwise. Never silent: a caller comparing
+        # two products needs to know their grids differ, and why.
+        "grid_refined_for_thin_swath": grid_refined,
         "bounds": [float(value) for value in bounds],
         "width": int(warped[0].shape[1]),
         "height": int(warped[0].shape[0]),
