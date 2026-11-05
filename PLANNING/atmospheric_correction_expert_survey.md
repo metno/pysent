@@ -40,6 +40,14 @@ reflectance of 0.8 against 1.004 over dark water; and the near-infrared retrieva
 refuse over `bright`, because ice reflects 0.3 to 0.9 where that method assumes zero. But a
 reviewer should read every water number here as *open water*, and treat ice as undemonstrated.
 
+**That gap cuts the opposite way from how it reads.** The residuals in this document are absolute
+reflectance errors contributed by the atmosphere, so they are nearly independent of how bright the
+target is — which means the *same* error that is 800 % of clear open ocean is under 4 % of dry
+snow-covered ice. The regime this document cannot demonstrate is therefore the regime the method
+should be **best** in, and the open-water numbers reported throughout are close to its worst case.
+That is an argument for getting Arctic frames, not a reason to discount the method over ice. C17
+sets out the decision that follows.
+
 ---
 
 ## 0. What the correction is, and what it is not
@@ -383,6 +391,67 @@ degradation inside 63-80", not "accurate to 85".
 **Chosen.** A new `surface_reflectance` product for the physical quantity, and an
 `atmospheric_correction: "none" | "gas" | "rayleigh" | "full"` option on `truecolor` that defaults to
 `"none"`. The frozen Sentinel-3 defaults - masks, value ranges, colour ramps, gamma - are untouched.
+
+### C17. A value is returned over dark water, where its error exceeds the signal
+
+**Chosen.** The product returns a number on every clear pixel, including clear open ocean where the
+error is several times the quantity being measured, and publishes the measured absolute uncertainty
+per pixel beside it. It refuses nothing on the grounds of being too dark. Nothing in the product,
+its tags or its documentation calls the result water-leaving reflectance.
+
+**Evidence.** After the full correction with the frame-retrieved loading, the median absolute
+residual against `OL_2_WFR` over clear water is 0.0142 at 560 nm and 0.0300 at 490 nm. ESA's own
+water-leaving reflectance on those pixels is **0.0016 and 0.0037**. The error is therefore about
+**nine times the signal**, even though these are the best numbers in the plan and improve on ESA's
+own per-pixel aerosol by 41 % and 23 %.
+
+The reason that is nevertheless shippable is that the residual is an *absolute* error contributed by
+the atmosphere, nearly independent of target brightness, so what changes between surfaces is only
+what it is a fraction of:
+
+| surface | reflectance at 490 nm | 0.030 absolute becomes |
+|---|---:|---:|
+| clear open ocean | 0.004 | **800 %** |
+| turbid coastal water | 0.03 | 100 % |
+| melting / wet sea ice | 0.4 | 7.5 % |
+| dry snow-covered ice | 0.8 | **3.8 %** |
+
+**The useful axis is bright against dark, not water against land** - and both ends of that axis are
+water. Restricting the product to land, which was the alternative considered, would have refused
+sea ice along with the open ocean while admitting the weakest arm of the method (C-section 4: no
+shortwave-infrared band, so no dark target over land).
+
+**If wrong.** A user who reads the value and ignores the uncertainty band will publish ocean-colour
+numbers that are wrong by a factor of nine. This decision puts the whole weight of that on the
+uncertainty band and the documentation, which is a real risk and is accepted deliberately rather
+than mitigated away. **If the expert thinks a dark-pixel refusal is the safer engineering choice,
+this is the decision to argue with** - the alternative is implemented and costs nothing but a
+threshold.
+
+### C18. Corrected true colour gets its own stretch; the frozen one does not move
+
+**Chosen.** The top-of-atmosphere style stays byte-identical - `value_range (0.0, 0.6)`,
+`gamma 0.6`. A second stretch applies when `atmospheric_correction` is not `"none"`.
+
+**Evidence.** Rayleigh correction does not scale the bands together. Backing the measured
+top-of-atmosphere values out of the published terms on the validation land frame:
+
+| band | TOA | corrected surface | change |
+|---|---:|---:|---:|
+| 665 nm | 0.082 | 0.060 | -27 % |
+| 560 nm | 0.099 | 0.057 | -42 % |
+| 490 nm | 0.135 | 0.045 | **-67 %** |
+
+The spectral *shape* inverts: top-of-atmosphere rises towards blue, the corrected surface is nearly
+flat. Held at the frozen range, corrected land would use about the bottom tenth of the ramp where
+top-of-atmosphere used a fifth, rendering near 25 % grey instead of 40 %.
+
+**If wrong.** Two stretches mean a picture's appearance depends on the option, so a side-by-side
+comparison shows a restyling on top of the physical change. The alternative - one stretch for both -
+is more honest as a comparison and worse as a picture. Note also that the frozen range and gamma
+were themselves chosen on pictures **2.1x too blue** (the solar-flux fix), so they are already open
+independently; this decision deliberately leaves that question where it is rather than compounding
+it.
 
 ---
 

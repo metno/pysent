@@ -593,6 +593,19 @@ error budget is measurable. It is not ordered by difficulty.
   per-pixel quality band carrying the high-air-mass ceiling (Q3); and an uncertainty derived from
   `AOD_*_uncertainty`. *Acceptance: the provenance is enough to reproduce the pixel, and the frozen
   defaults are untouched.*
+
+  Fixed by the owner's answers of 2026-11-05, and all four are acceptance conditions rather than
+  preferences:
+  - **A value on every clear pixel, dark water included, with the per-pixel absolute uncertainty
+    beside it** (Q5). The uncertainty band is not optional decoration here - it is the only thing
+    that makes shipping a 490 nm number whose error is nine times the open-ocean signal an honest
+    act. A test must fail if the product can be written without it.
+  - **The phrase "water-leaving reflectance" appears nowhere** in the label, the tags, the
+    docstrings or the documentation (Q5).
+  - **A second true-colour stretch for corrected mode, measured here and reported for sign-off**
+    (Q6), selected when `atmospheric_correction` is not `"none"`.
+  - **The frozen top-of-atmosphere style stays byte-identical** - `(0.0, 0.6)`, `gamma 0.6` (Q6).
+    A regression test should pin that, because this phase is the one that could break it.
 - [ ] **Phase 6 - validation across the holding, not one frame.** Run the accepted correction over a
   sample of A1's 58 triples, both platforms, and report the residual distribution by band, by
   land/water and by solar zenith. *Acceptance: a table the next reviewer can argue with, and a
@@ -678,11 +691,61 @@ the phase that needs them.*
   the signal; we will not match WFR, and should not imply we do. The alternative - restrict surface
   reflectance to land and point water users at `chl`/`tsm` and WFR - is defensible and should be the
   owner's call once Phase 3 has a number.
+  **Answered 2026-11-05: ship everywhere, publish the error**, as recommended - a value on every
+  clear pixel, the measured absolute uncertainty in a per-pixel band, and the phrase "water-leaving
+  reflectance" nowhere in the product, its tags or its documentation.
+
+  **The question was put to the owner in the wrong frame, and the re-framing is the part worth
+  keeping.** Q5 as written above asks "water or land". That axis is wrong. The residual is an
+  *absolute* reflectance error contributed by the atmosphere, so it is very nearly independent of
+  how bright the target is, and what changes is only what it is a fraction *of*:
+
+  | surface | reflectance at 490 nm | what 0.030 absolute becomes |
+  |---|---:|---:|
+  | clear open ocean | 0.004 | **800 %** |
+  | turbid coastal water | 0.03 | 100 % |
+  | melting / wet sea ice | 0.4 | 7.5 % |
+  | dry snow-covered ice | 0.8 | **3.8 %** |
+
+  So the real axis is **bright against dark, not water against land**, and both ends of it are
+  water. The product is close to useless for open-ocean colour and genuinely good on sea ice. Two
+  things follow, and they are the owner's answer rather than an inference from it:
+  - The product **does not refuse a dark pixel**. It returns the number and publishes the error
+    beside it, and the only thing standing between a user and a misreading is the uncertainty band.
+    That puts a real obligation on Phase 5: the uncertainty has to be present, per pixel, and
+    documented, or this answer has been implemented dishonestly.
+  - **Nothing anywhere may call this water-leaving reflectance** - not the label, not a tag, not a
+    docstring. The nearest wrong word would make the product look like a WFR substitute, which at
+    nine times the signal it is not.
 - **Q6 (Phase 2). Truecolor's frozen style.** *Ask the review study again, with corrected pictures.*
   The `0 - 0.6` range and `gamma 0.6` were chosen on pictures 2.1x too blue and are already open as
   Q5 of the Sentinel-3 review plan. After Phase 2 they will be wrong for a second reason: a
   Rayleigh-corrected blue band is roughly a third of the TOA value. No default moves without
   sign-off.
+  **Answered 2026-11-05: a separate stretch per mode.** The frozen top-of-atmosphere style stays
+  exactly as it is - `(0.0, 0.6)` and `gamma 0.6`, byte-identical output - and a second stretch,
+  measured in Phase 5, is selected by the `atmospheric_correction` option when it is not `"none"`.
+
+  Why a second stretch is needed at all, backing the TOA values out of Phase 2's own published
+  terms on the A3 land frame:
+
+  | band | TOA | corrected surface | change |
+  |---|---:|---:|---:|
+  | 665 nm | 0.082 | 0.060 | -27 % |
+  | 560 nm | 0.099 | 0.057 | -42 % |
+  | 490 nm | 0.135 | 0.045 | **-67 %** |
+
+  The level drops, but the **shape inverting is the real change**: TOA rises towards blue, corrected
+  is nearly flat. That is the haze leaving the picture, which is the entire point of the option. Held
+  at `(0.0, 0.6)`, corrected land would use about the bottom tenth of the ramp where TOA used a
+  fifth, rendering near 25 % grey instead of 40 % - a picture that is more correct and visibly
+  darker at once, which users read as a bug in the correction rather than as honesty.
+
+  **This answer deliberately does not re-open the frozen default**, so no pinned baseline moves for
+  a third time this month and nobody who has not asked for the correction sees any change. The
+  corrected-mode numbers are new defaults on a new code path, measured in Phase 5 and reported for
+  sign-off before that path is reachable; the 2.1x-too-blue question against the frozen style stays
+  with the review study, where it already is.
 
 ---
 
@@ -699,8 +762,11 @@ the phase that needs them.*
    to 79 degrees (A5); there is no mid-latitude summer pair in the holding, because the archive has
    only October and November 2026 for S3A. *Mitigation: Phase 6 reports by solar zenith; if a
    high-sun check is wanted, one matched pair has to be fetched from the catalogue - ask first.*
-4. **Water may stay out of reach** (A4). *Mitigation: Q5 before Phase 5, and no labelling of a
-   corrected product as water-leaving reflectance.*
+4. **Water may stay out of reach** (A4), and over clear open ocean it has stayed out of reach: the
+   best residual is nine times ESA's own signal there. *Mitigation, now settled by Q5: ship the
+   value anyway with its measured per-pixel uncertainty, and let no product, tag or docstring call
+   it water-leaving reflectance. The risk is therefore accepted rather than closed, and the
+   uncertainty band is what carries it.*
 5. **Cost.** Three more tie-grid expansions and several array operations per band, on top of a
    true-colour path that takes 6.5 s. *Mitigation: measure it in Phase 1 and report it next to the
    failure count, per the benchmarking rule.*
@@ -893,3 +959,59 @@ the phase that needs them.*
   a known value are three different answers, and which is right depends on whether the value past
   the edge is unknown, nearly linear, or exactly known. Three of this plan's axes wanted three
   different answers and got one.
+- **2026-11-03 - Phase 4, retrieving the loading from the frame.** Committed as `a2f62bb`. Three
+  things had to be measured rather than reasoned, and one of them reversed a design I would have
+  defended.
+  **Two bands beat one only if the spectral slope floats.** The obvious design is to take ESA's own
+  Angstrom exponent and invert both retrieval bands against it. Measured, that is **twice as bad as
+  inverting 865 nm alone** - bias +0.043 against +0.020 - because 665 nm carries more surface and
+  whitecap contamination, and a held slope has nowhere to put it except into the depth. Letting the
+  slope float gives **+0.006**. So the exponent is fitted, and then *not published*: its correlation
+  against ESA's own is 0.37, which means it measures nothing. It is a nuisance parameter that
+  protects the depth, and it goes into provenance as a fit parameter rather than as an aerosol
+  property (A13).
+  **The inversion is exact, not a search.** The first version searched a 61-node grid and took
+  **151 s for 15 tests** against 23 s for the entire rest of the suite. The forward model is
+  piecewise linear in optical depth between the table's own nodes, with an exactly known anchor at
+  zero, so evaluating four breakpoints and inverting analytically is **44x faster at 3.3 s** and
+  continuous rather than snapped to a candidate. The tests retrieve 0.04, 0.12, 0.2 and 0.3 exactly,
+  none of which is a node - which is the check that it is an inverse and not a lookup.
+  **A refusal has to carry its reason, and twice it nearly did not.** `0.3999999999999999 >= 0.4` is
+  False, so the ceiling refusal never fired until the comparison was moved to `nodes[-1] - 1e-9`.
+  Worse, above the top path the exact inversion returns a bare **NaN**, so a bright pixel came back
+  empty with nothing saying why - precisely the outcome the four reason masks exist to prevent. Now
+  `brightest` is tracked across exponents so the pixel is refused *as* brighter than the table
+  explains. Over sea ice this is the whole safety story: ice sits in `bright`, OLCI Level-1 has no
+  ice flag, and the black-pixel assumption inverts to confident nonsense there.
+  **Deviation: validated against a different product than the plan specified.** The acceptance named
+  `SY_2_AOD`'s `AOD_550`. It was measured against `OL_2_WFR`'s per-pixel `T865` instead, because A11
+  found the better reference and A12 found the two ESA products disagree with each other by 2.2x.
+  Measuring against the worse of two references to honour the letter of an acceptance would have
+  been theatre, but the substitution is a deviation and is logged as one.
+  **Deviation: a disk fault that read as a data fault, and cost the most time of anything here.**
+  Every audit script leaked its `tempfile.mkdtemp` scratch, which filled the root volume to zero
+  bytes mid-sweep. The symptom was two granules failing with `RuntimeError` and `OSError`, which
+  looks exactly like corrupt input - I went looking at the granules first. The fix is `scratch_dir()`
+  onto `/mnt/data`, `atexit`, and a per-frame `rmtree` in a `finally`. **The lesson: when two
+  unrelated granules fail at the same moment, suspect the machine before the data.**
+- **2026-11-05 - Q5 and Q6 answered, both as recommended.** Q5: ship a value everywhere and publish
+  the per-pixel error. Q6: a separate stretch per mode, leaving the frozen one alone.
+  **The more useful outcome is that Q5 turned out to be asked in the wrong frame**, and the owner's
+  answer is to the re-framed version. The question as written in section C asks whether to ship over
+  water or restrict to land. But the residual is an absolute error contributed by the atmosphere, so
+  it hardly depends on the target's brightness - only on what it is a fraction of. The same 0.030 at
+  490 nm is **800 % of clear open ocean and 3.8 % of dry snow-covered ice**, and both of those are
+  water. The axis was never water against land; it is bright against dark. That makes the product
+  close to useless for ocean colour and genuinely good on sea ice, which is the surface this group
+  actually works on - so "ship everywhere" is not a compromise here, it is the case where the answer
+  and the purpose line up.
+  The cost of that answer is a real obligation rather than a caveat: nothing refuses a dark pixel, so
+  **the per-pixel uncertainty band is the only thing standing between a user and a misreading**. If
+  Phase 5 ships the value without the error beside it, this answer has been implemented dishonestly,
+  which is why it is written into Phase 5 as an acceptance condition with a test rather than as a
+  preference.
+  Q6 costs least of the four options offered precisely because it **does not touch the frozen
+  default**: the pinned Sentinel-3 baselines have already been invalidated twice this month by the
+  solar-flux fix, and a third time for a style compromise - decided before the review study has seen
+  a single corrected picture - would have been the worst trade available. The corrected-mode numbers
+  are new defaults on a new code path, reported for sign-off before that path is reachable.
