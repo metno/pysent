@@ -40,13 +40,21 @@ reflectance of 0.8 against 1.004 over dark water; and the near-infrared retrieva
 refuse over `bright`, because ice reflects 0.3 to 0.9 where that method assumes zero. But a
 reviewer should read every water number here as *open water*, and treat ice as undemonstrated.
 
-**That gap cuts the opposite way from how it reads.** The residuals in this document are absolute
-reflectance errors contributed by the atmosphere, so they are nearly independent of how bright the
-target is — which means the *same* error that is 800 % of clear open ocean is under 4 % of dry
-snow-covered ice. The regime this document cannot demonstrate is therefore the regime the method
-should be **best** in, and the open-water numbers reported throughout are close to its worst case.
-That is an argument for getting Arctic frames, not a reason to discount the method over ice. C17
-sets out the decision that follows.
+**Arctic frames have since been obtained, and they corrected the argument above.** This section
+previously claimed the residual is an absolute error contributed by the atmosphere and so nearly
+independent of how bright the target is. **Measured, that is false**: over bright surfaces the
+correction is **1.4 times worse at 490 nm and nearly ten times worse at 665** than over clear
+water (Phase 6, 16 bright comparisons).
+
+The conclusion it was used to support survives anyway, and by a wider margin than the original
+reasoning gave it. Against ESA's own signal of 0.26 to 0.31 over those pixels, an error of 0.045 to
+0.068 is **16 to 22 % relative**, where over clear open ocean 0.033 against 0.004 is **780 %**. Ice
+remains the regime where this product is worth having - but because the signal there is seventy
+times larger, not because the error is the same size. One of those is a measurement and the other
+was an inference, and a reviewer should know which was which.
+
+**A caveat we cannot resolve with these products**: over bright pixels ESA's own reference is least
+reliable, so some share of that 0.0475 at 665 nm is theirs rather than ours.
 
 ---
 
@@ -405,16 +413,19 @@ water-leaving reflectance on those pixels is **0.0016 and 0.0037**. The error is
 **nine times the signal**, even though these are the best numbers in the plan and improve on ESA's
 own per-pixel aerosol by 41 % and 23 %.
 
-The reason that is nevertheless shippable is that the residual is an *absolute* error contributed by
-the atmosphere, nearly independent of target brightness, so what changes between surfaces is only
-what it is a fraction of:
+The reason that is nevertheless shippable is what the error is a *fraction* of. **Phase 6 measured
+both halves of this** across the holding, and the error is not constant between surfaces - it is
+worse over the bright ones - but the signal grows far faster than the error does:
 
-| surface | reflectance at 490 nm | 0.030 absolute becomes |
-|---|---:|---:|
-| clear open ocean | 0.004 | **800 %** |
-| turbid coastal water | 0.03 | 100 % |
-| melting / wet sea ice | 0.4 | 7.5 % |
-| dry snow-covered ice | 0.8 | **3.8 %** |
+| surface | our error, 490 nm | ESA's signal | relative |
+|---|---:|---:|---:|
+| clear open water | 0.0327 | 0.0042 | **780 %** |
+| bright (sea ice, snow, cloud) | 0.0454 | 0.2900 | **16 %** |
+| land | 0.0221 | 0.0458 | 48 % |
+
+An earlier version of this section argued instead that the error is absolute and therefore roughly
+constant across surfaces. **That was inference and it was wrong** - see section 0a. The decision it
+supported is unchanged, but it now rests on a measurement.
 
 **The useful axis is bright against dark, not water against land** - and both ends of that axis are
 water. Restricting the product to land, which was the alternative considered, would have refused
@@ -486,17 +497,40 @@ Three consequences, each enforced by a test:
 - **The gas-only tier publishes nothing.** No end-to-end residual in this work excludes the Rayleigh
   term, so there is no figure to lend it.
 
-The aerosol climatology is the one place a propagated term carries a whole contribution rather than a
-correction to one: a pixel filled from the stated 0.044 borrows its surface class's measured
-`product` row and adds **0.0035** in quadrature, which is the archive's own one-sigma spread about
-that value (0.0346 in optical depth over 47 frames) times the sensitivity above.
+**The published figures, and how Phase 6 arrived at them.** The band carries the **68th percentile
+of the absolute disagreement with ESA**, indexed by surface class, measured end to end through the
+shipped correction over 55 comparisons on both platforms:
 
-**If wrong.** The figures are medians over a small and seasonally narrow sample - the water rows come
-from a single frame - so they describe a typical pixel in a late-autumn sub-polar scene and not a
-confidence interval. A user wanting a per-pixel error bar in the formal sense does not have one here.
-We would rather publish a measured typical disagreement and say what it is than a derived interval
-that is wrong by ten times in the direction that flatters us, **but if there is a standard way to
-combine the two that we have missed, this is the question to answer.**
+| surface | 490 nm | 560 nm | 665 nm | comparisons |
+|---|---:|---:|---:|---:|
+| water | 0.0486 | 0.0252 | 0.0094 | 14 |
+| bright | 0.0696 | 0.0984 | 0.0759 | 16 |
+| land | 0.0329 | 0.0419 | 0.0294 | 25 |
+
+**The check that matters is coverage** - the share of pixels whose actual disagreement falls inside
+the figure published for them - and it is the measurement we would most like a reviewer to argue
+with, because the first three versions of this band failed it badly:
+
+- filled with `median(ours - reference)`, a **bias** rather than a spread, which at 490 nm over land
+  is 0.0031 where the typical absolute error is 0.0221;
+- then with a **median** absolute residual, which is exceeded by half of all pixels by construction;
+- and with **no row for bright surfaces**, so ice borrowed a clear-surface figure and understated
+  itself tenfold at 665 nm.
+
+Measured coverage ran at **8 to 15 %** where a one-sigma band should reach 68 %. With the table
+above it is **67.6 to 68.1 % across every surface and band**.
+
+**If wrong, and the regime where it is.** These are percentiles over a seasonally narrow sample -
+autumn sub-polar, plus April Arctic frames - so they describe a typical pixel in that regime rather
+than a formal confidence interval. **One regime is known to be worse: beyond 80 degrees solar
+zenith over bright surfaces, coverage falls to 42 to 46 %**, because a single figure per surface
+cannot follow an error that grows with air mass. That is spring and autumn sea ice, which is
+precisely the regime this work exists for, and a zenith-dependent uncertainty is the obvious
+refinement we have not made. The quality band flags those pixels as outside the validated geometry.
+
+We would rather publish a measured disagreement and say exactly what it is than a derived interval
+wrong by ten times in the direction that flatters us - **but if there is a standard way to combine
+the measured and the propagated that we have missed, this is the question to answer.**
 
 ---
 
