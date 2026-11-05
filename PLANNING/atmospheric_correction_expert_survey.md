@@ -446,6 +446,12 @@ The spectral *shape* inverts: top-of-atmosphere rises towards blue, the correcte
 flat. Held at the frozen range, corrected land would use about the bottom tenth of the ramp where
 top-of-atmosphere used a fifth, rendering near 25 % grey instead of 40 %.
 
+**Accepted by the owner on 2026-11-05.** The deciding evidence was sea ice rather than the land
+tone the numbers were derived from: snow-covered ice is 0.4 to 0.9 in reflectance, so the frozen
+ramp ending at 0.6 clips **99.0 %** of a polar frame to flat white, with two patches at 0.60 and
+0.70 rendering identically. The accepted stretch clips 9.2 % and separates them by 0.044 of the
+display range.
+
 **If wrong.** Two stretches mean a picture's appearance depends on the option, so a side-by-side
 comparison shows a restyling on top of the physical change. The alternative - one stretch for both -
 is more honest as a comparison and worse as a picture. Note also that the frozen range and gamma

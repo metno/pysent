@@ -648,8 +648,18 @@ error budget is measurable. It is not ordered by difficulty.
   of it that is not a retrieval. With the top instead fixed at **1.0, a reflectance's physical
   ceiling**, gamma is determined rather than fitted: **0.33**, which puts corrected land back at the
   0.448 of full scale the frozen stretch gave it. S3A gives 0.331 and S3B **0.333 independently**,
-  and the per-frame spread is -14 % to +7 %. **These two numbers need the owner's sign-off**, per
-  rule 7 - they are new defaults on a new code path, so nothing existing moves either way.
+  and the per-frame spread is -14 % to +7 %.
+
+  **Signed off by the owner on 2026-11-05**, on the pictures rather than the numbers, and what
+  settled it was not the land tone it was designed around. Over land and open water the two
+  candidates are a matter of taste and the frozen stretch is defensible. **Over sea ice they are not
+  comparable.** Snow-covered ice sits at reflectance 0.4 to 0.9 and the frozen ramp ends at 0.6, so
+  on the April polar frame it clips **99.0 % of the scene to flat white** - displayed 5th to 95th
+  percentile 1.000 to 1.000, and two ice patches at 0.60 and 0.70 reflectance separated by
+  **exactly nothing**. The accepted stretch clips 9.2 % and separates those same patches by 0.044 of
+  the display range. The rendered pair is unmistakable: a blank page against visible floes and
+  leads, from identical pixels. **The criterion the stretch was derived from - keep clear land's
+  tone - turned out to be the second-best argument for it.**
 
   **The quality band is a 10-bit field in one `uint16`**, warped nearest whatever the values asked
   for, because a bitfield averaged with its neighbour is a different and plausible-looking bitfield.
