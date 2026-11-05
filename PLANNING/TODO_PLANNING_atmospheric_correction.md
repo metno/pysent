@@ -1140,3 +1140,39 @@ the phase that needs them.*
   *any* band being corrected cannot reach it. Every band shares the 0.05-0.4 grid today, so the two
   agree - which is what would have made it a latent under-flagging bug rather than a visible one,
   the same shape as the `_trilinear` extrapolation bug in Phase 3.
+- **2026-11-05 - the cost, measured, and a 25x fix** (risk 5). Phase 5's acceptance says to measure
+  the correction's cost. Measured on a quicklook frame, the correction is cheap and the retrieval
+  was not:
+
+  | request | before | after |
+  |---|---:|---:|
+  | `truecolor`, no correction | 4.6 s | 4.6 s |
+  | `truecolor`, `rayleigh` | 7.5 s | 7.5 s |
+  | `truecolor`, `full` + climatological | 16.8 s | 16.8 s |
+  | `truecolor`, `full` + **retrieve** | **692.3 s** | **27.2 s** |
+  | `surface_reflectance` | **644.8 s** | **28.4 s** |
+
+  So gas and Rayleigh cost 2.9 s and the aerosol tier 9.3 s, while the retrieval cost **675 s -
+  forty times the whole rest of the pipeline**. Two causes, and the profile found both rather than
+  intuition: 2204 calls to `_trilinear` taking 180 s on 100 000 pixels, from 38 calls to the blended
+  forward model.
+
+  **Half of it was computing answers in order to throw them away.** The forward model ran over every
+  pixel of the frame when about two thirds are land, cloud or ice that the refusal masks discard
+  immediately afterwards. Narrowing the arithmetic to the candidates - while still assembling the
+  masks at the frame's own shape, so a refused pixel still says why - gave **692 s to 215 s**.
+
+  **The rest was recomputing nineteen times what does not depend on the exponent.** The search tries
+  19 Angstrom exponents, and the exponent changes **only how the two aerosol models are weighted**;
+  every table interpolation underneath it, and the Rayleigh term entirely, is exponent-independent.
+  `aerosol_path_components` now returns those pieces unblended, and the retrieval interpolates once
+  and blends with arithmetic: **215 s to 27.2 s**. The azimuth interpolation moved into one
+  `_model_path` helper so the blended and unblended paths cannot drift apart.
+
+  **The answer is unchanged at every step** - retrieved fraction 0.2944 and median optical depth
+  0.044 on the same frame, identical across all three versions, and the exact round-trip inversions
+  at 0.04, 0.12, 0.2 and 0.3 still hold along with the four pinned 6SV off-grid points. The gated
+  real-frame test fell from **655 s to 29.7 s**.
+
+  **This is what makes Phase 6 possible**: 55 triples at 215 s a frame is three and a half hours; at
+  28 s it is 26 minutes.
