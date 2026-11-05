@@ -232,20 +232,51 @@ def retrieve_optical_depth(
             apparent[band] = np.asarray(toa[band], dtype=np.float64) / transmittance
 
     anchor, second = bands[-1], bands[0]
-    best_cost = np.full(shape, np.inf)
-    best_depth = np.full(shape, np.nan)
-    best_angstrom = np.full(shape, np.nan)
-    best_residual = np.full(shape, np.nan)
+
+    # **Invert only the pixels that could survive.** The forward model is
+    # evaluated once per exponent per band, and on a real frame roughly two
+    # thirds of the pixels are land, cloud or ice that the refusal masks below
+    # throw away afterwards - so running the whole frame spends most of its time
+    # computing answers in order to discard them. Measured on a quicklook frame
+    # the retrieval dominated everything else by forty to one, and this is the
+    # cheap half of that.
+    #
+    # The masks are still assembled at full shape, so a refused pixel still says
+    # why: what is narrowed is the arithmetic, not the reporting.
+    candidate = (
+        usable & np.isfinite(apparent[anchor]) & np.isfinite(apparent[second])
+    )
+    subset_shape = (int(np.count_nonzero(candidate)),)
+
+    def scatter(values):
+        """A result computed on the candidates, back at the frame's own shape."""
+        full = np.full(shape, np.nan)
+        full[candidate] = values
+        return full
+
+    best_cost = np.full(subset_shape, np.inf)
+    best_depth = np.full(subset_shape, np.nan)
+    best_angstrom = np.full(subset_shape, np.nan)
+    best_residual = np.full(subset_shape, np.nan)
     cleanest = brightest = None
+    sub_geometry = {
+        name: np.asarray(value, dtype=np.float64)[candidate]
+        if np.shape(value) == shape
+        else np.full(subset_shape, float(np.asarray(value)))
+        for name, value in geometry.items()
+    }
+    sub_apparent = {band: values[candidate] for band, values in apparent.items()}
 
     nodes = breakpoints(platform, anchor)
     for exponent in ANGSTROM_STEPS:
-        alpha = np.full(shape, float(exponent))
+        if not subset_shape[0]:
+            break
+        alpha = np.full(subset_shape, float(exponent))
         anchor_paths = _paths_at_breakpoints(
-            platform, anchor, shape=shape, angstrom=alpha, geometry=geometry
+            platform, anchor, shape=subset_shape, angstrom=alpha, geometry=sub_geometry
         )
         second_paths = _paths_at_breakpoints(
-            platform, second, shape=shape, angstrom=alpha, geometry=geometry
+            platform, second, shape=subset_shape, angstrom=alpha, geometry=sub_geometry
         )
         if cleanest is None:
             # The path of an aerosol-free atmosphere at the anchor band, kept
@@ -268,9 +299,9 @@ def retrieve_optical_depth(
         # what the second band actually measured. The exponent that reconciles
         # the two wins - and is then kept as a fit parameter, not a
         # measurement; see the module docstring.
-        depth = _invert_piecewise(nodes, anchor_paths, apparent[anchor])
+        depth = _invert_piecewise(nodes, anchor_paths, sub_apparent[anchor])
         predicted = _interpolate_at(nodes, second_paths, depth)
-        here = np.abs(predicted - apparent[second])
+        here = np.abs(predicted - sub_apparent[second])
         here = np.where(np.isfinite(here), here, np.inf)
 
         better = here < best_cost
@@ -278,6 +309,17 @@ def retrieve_optical_depth(
         best_depth = np.where(better, depth, best_depth)
         best_angstrom = np.where(better, float(exponent), best_angstrom)
         best_residual = np.where(better, here, best_residual)
+
+    # Back to the frame's shape before the masks are assembled, so every pixel
+    # is still reported on whether or not it was worth inverting. A pixel that
+    # was never a candidate carries NaN here, and NaN fails every comparison
+    # below - which is right: it is refused as not clear water or as missing
+    # input, by the masks that actually apply to it.
+    best_depth = scatter(best_depth)
+    best_angstrom = scatter(best_angstrom)
+    best_residual = scatter(best_residual)
+    cleanest = scatter(cleanest) if cleanest is not None else np.full(shape, np.nan)
+    brightest = scatter(brightest) if brightest is not None else np.full(shape, np.nan)
 
     # The top breakpoint is the table's own last node, so compare against it
     # with a tolerance: ``np.arange`` and float arithmetic put an exactly
