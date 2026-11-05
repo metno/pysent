@@ -14,6 +14,7 @@
 #   run.sh spectral         A10: the implied aerosol path across Synergy's bands
 #   run.sh aerosol          A6: what the aerosol product holds over the land frame
 #   run.sh retrieval        A11: can the loading be retrieved from Level-1 alone?
+#   run.sh stretch          Q6: what stretch a corrected picture needs, both platforms
 #                               (and the per-pixel T865/A865 reference in WFR)
 #
 # The frames are named here rather than passed in, so a finding is reproduced
@@ -107,6 +108,17 @@ retrieval)
 sweep)
   python3 -I "$here/sweep.py" --count "${2:-28}" --decimate "${3:-8}" 2>&1 |
     grep -vi "runtimewarning\|nanfunctions\|return np\|invalid value\|divide\|mean of empty"
+  ;;
+stretch)
+  # Q6: what stretch a corrected true-colour picture needs. Both platforms,
+  # because the answer has to be a single default and the two agreeing is the
+  # evidence that it can be - S3A gives gamma 0.331, S3B 0.333.
+  for platform in S3A S3B; do
+    echo "--- $platform"
+    python3 -I "$here/stretch.py" --platform "$platform" --months "${2:-2026/11}" \
+      --decimate "${3:-8}" --limit "${4:-8}" 2>&1 |
+      grep -vi "runtimewarning\|nanfunctions\|return np\|invalid value\|divide\|mean of empty"
+  done
   ;;
 tooling)
   python3 - <<'PY'

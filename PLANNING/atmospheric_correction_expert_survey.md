@@ -453,6 +453,45 @@ were themselves chosen on pictures **2.1x too blue** (the solar-flux fix), so th
 independently; this decision deliberately leaves that question where it is rather than compounding
 it.
 
+### C19. The uncertainty band is an agreement with ESA, not a propagated error budget
+
+**Chosen.** The per-pixel uncertainty is the **measured** median absolute residual against ESA's own
+Level-2, looked up by band, surface class and which tier supplied that pixel's aerosol loading. The
+provenance tags say "empirical agreement with ESA Level-2 on matched pixels, not a propagated error
+budget" in those words. A propagated loading term is added in quadrature where a loading uncertainty
+exists, but it never stands in for the measured figure.
+
+**Evidence, and this is the decision we would most like checked.** The conventional construction is
+to propagate the loading's uncertainty through the forward model. Measured at the validation frame's
+geometry, the sensitivity of surface reflectance to optical depth is **-0.10 per unit depth, flat to
+within 10 % across 490, 560 and 665 nm**. So a 0.03 error in the loading - four times the
+retrieval's measured bias - moves the answer by **0.0032 at 490 nm**, against a residual measured
+there of **0.0300**. A propagated uncertainty would report about a tenth of the error we actually
+observe, with the authority of a derivation behind it.
+
+Three consequences, each enforced by a test:
+
+- **A band the retrieval fits does not report its own residual.** 665 nm agrees with WFR to 0.0037,
+  but the retrieval drives 665 and 865 to consistency with a black surface and WFR's reference there
+  is also near zero, so that figure is close to a tautology. It takes 560 nm's and is flagged.
+- **The tables' own interpolation error is not added on top**, because every residual above was
+  measured *through those same tables* and already contains it. The same argument excludes the
+  scalar-Rayleigh and gas-coefficient errors.
+- **The gas-only tier publishes nothing.** No end-to-end residual in this work excludes the Rayleigh
+  term, so there is no figure to lend it.
+
+The aerosol climatology is the one place a propagated term carries a whole contribution rather than a
+correction to one: a pixel filled from the stated 0.044 borrows its surface class's measured
+`product` row and adds **0.0035** in quadrature, which is the archive's own one-sigma spread about
+that value (0.0346 in optical depth over 47 frames) times the sensitivity above.
+
+**If wrong.** The figures are medians over a small and seasonally narrow sample - the water rows come
+from a single frame - so they describe a typical pixel in a late-autumn sub-polar scene and not a
+confidence interval. A user wanting a per-pixel error bar in the formal sense does not have one here.
+We would rather publish a measured typical disagreement and say what it is than a derived interval
+that is wrong by ten times in the direction that flatters us, **but if there is a standard way to
+combine the two that we have missed, this is the question to answer.**
+
 ---
 
 ## 6. Questions for the expert

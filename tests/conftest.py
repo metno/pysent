@@ -91,6 +91,31 @@ def s5p_archive() -> Path:
 
 
 @pytest.fixture(scope="session")
+def olci_l1_archive() -> Path:
+    """A directory of real OLCI Level-1 EFR products.
+
+    The atmospheric correction needs a whole frame to exercise: six tie-point
+    grids expanded onto the image, the altitude raster, and enough clear water
+    for the aerosol retrieval to have something to invert. None of that can be
+    synthesised usefully, and an EFR product is 700-850 MB, so the tests that
+    need one skip unless ``PYSENT_OLCI_ARCHIVE`` points at a directory of them.
+
+    Separate from ``s5p_archive`` on purpose: that fixture gates on ``S5P_*.nc``
+    being present, so a directory holding only OLCI products would skip the OLCI
+    tests for the wrong reason.
+    """
+    import os
+
+    location = os.environ.get("PYSENT_OLCI_ARCHIVE")
+    if not location:
+        pytest.skip("set PYSENT_OLCI_ARCHIVE to a directory of real OLCI Level-1 products")
+    path = Path(location)
+    if not path.is_dir() or not any(path.glob("*OL_1_E*R*.zip")):
+        pytest.skip(f"{path} holds no OL_1_EFR or OL_1_ERR products")
+    return path
+
+
+@pytest.fixture(scope="session")
 def s3_synergy_window() -> Path:
     """A 384x384 window of a real Synergy VG1 tile, as a small STORED zip.
 

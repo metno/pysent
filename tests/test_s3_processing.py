@@ -497,8 +497,19 @@ def test_every_ready_type_has_products_and_every_product_has_a_type():
         if family == "S3" and status == "ready"
     }
     assert ready == set(S3_TYPE_PRODUCTS)
+    # Every product has to be reachable from some type, but not every product is
+    # a default: `surface_reflectance` costs a full atmospheric correction and an
+    # aerosol retrieval, so it is opt-in and lives in its own table. Both tables
+    # together must cover the product list, or a product exists that nothing can
+    # route to - which is what this caught.
+    from pysent.s3 import S3_OPT_IN_PRODUCTS
+
     named = {name for names in S3_TYPE_PRODUCTS.values() for name in names}
-    assert named == set(S3_PRODUCTS)
+    opt_in = {name for names in S3_OPT_IN_PRODUCTS.values() for name in names}
+    assert named | opt_in == set(S3_PRODUCTS)
+    # An opt-in product must not also be a default, or it is not opt-in.
+    assert not (named & opt_in)
+    assert set(S3_OPT_IN_PRODUCTS) <= set(S3_TYPE_PRODUCTS)
 
 
 def test_the_provenance_records_the_mask_and_the_baseline(s3_synergy_window, tmp_path):

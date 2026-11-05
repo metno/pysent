@@ -80,12 +80,14 @@ from ._swath import (
     value_statistics,
     warp_swath,
 )
+from ._olci_correction import CORRECTION_TIERS
 from .errors import EmptySceneError
 
 __all__ = [
     "S3_PRESETS",
     "S3_PRODUCTS",
     "S3_TYPE_PRODUCTS",
+    "S3_OPT_IN_PRODUCTS",
     "BROWSE_HIDDEN_REASONS",
     "REJECT_REASONS",
     "build_sentinel_s3_output_filename",
@@ -391,6 +393,35 @@ S3_PRODUCTS.update({
         # Below one, to lift the dark end: without it the sea is black and the
         # land is nearly black under white cloud.
         "gamma": 0.6,
+        # This product is derived from Level-1 radiance, so it has an atmosphere
+        # to take out. The option defaults to "none", which leaves every byte of
+        # the frozen behaviour above untouched (the plan's Q2).
+        "correctable": True,
+        "atmospheric_correction": "none",
+        "aerosol": None,
+        # The corrected picture's own stretch - the plan's Q6, answered
+        # "separate stretch per mode" on 2026-11-05 - measured by
+        # PLANNING/atmospheric_correction_audit/stretch.py over six S3A frames.
+        #
+        # Correction does not scale the bands together: it takes about 27 % off
+        # 665 nm and 67 % off 490 nm, so the clear-land composite median falls
+        # 44 %, from 0.157 to 0.088. Held at the frozen stretch that land would
+        # render 29 % darker, which reads as a broken correction rather than a
+        # correct one.
+        #
+        # The top is 1.0 because that is a reflectance's physical ceiling, not
+        # because anything was fitted to it. The first attempt anchored it on
+        # the corrected cloud p99 and got 1.18 - but corrected cloud measures
+        # 0.92 to 1.10 across frames, *above* one, because the correction places
+        # the surface at ground level under the whole atmosphere and a cloud top
+        # is neither. Anchoring there sets the whole picture's tone from the one
+        # part of it that is not a retrieval.
+        #
+        # With the top fixed, gamma is determined rather than chosen: 0.33 is
+        # what puts the corrected clear-land median back at the 0.448 of full
+        # scale the frozen stretch gave it. Per-frame spread -14 % to +7 %.
+        "corrected_value_range": (0.0, 1.0),
+        "corrected_gamma": 0.33,
         "log_scale": False,
         "colormap": "grey",            # unused for an RGB composite
         "label": "True colour (top-of-atmosphere reflectance)",
@@ -399,6 +430,42 @@ S3_PRODUCTS.update({
         "browse_reject_flags": (),
         "flag_member": "qualityFlags.nc",
         "flag_variable": "quality_flags",
+    },
+    # The physical quantity, as opposed to the picture - the other half of the
+    # plan's Q2. Unlike `truecolor` this product exists *in order* to be
+    # corrected, so its tier defaults to the full one rather than to "none";
+    # there is no frozen behaviour here to protect, because the product is new.
+    #
+    # It is deliberately **not** added to S3_TYPE_PRODUCTS, so an OL_1_EFR
+    # request that names no products still yields `truecolor` alone and nothing
+    # about the existing defaults moves. This has to be asked for by name.
+    "surface_reflectance": {
+        "kind": "surface",
+        "bands": (8, 6, 4),
+        "geolocation": OLCI_GEOLOCATION,
+        "units": "1",
+        "unit": "native",
+        # A reflectance, so zero to one. Nothing is clipped to it - a negative
+        # surface reflectance is a retrieval outcome and is kept (the plan's
+        # C14) - this only says how the browse image is stretched.
+        "value_range": (0.0, 1.0),
+        "gamma": 1.0,
+        "log_scale": False,
+        "colormap": "grey",
+        # Named for what it is. The phrase "water-leaving reflectance" appears
+        # nowhere in this product, because over clear open ocean our error is
+        # about nine times that signal and the nearest wrong word would make
+        # this look like a substitute for OL_2_WFR. See the owner's answer to
+        # Q5 and src/pysent/_olci_uncertainty.py.
+        "label": "Surface reflectance (atmospherically corrected)",
+        "mask_flags": (),
+        "reject_flags": ("invalid", "saturated"),
+        "browse_reject_flags": (),
+        "flag_member": "qualityFlags.nc",
+        "flag_variable": "quality_flags",
+        "correctable": True,
+        "atmospheric_correction": "full",
+        "aerosol": "retrieve",
     },
 })
 
@@ -414,6 +481,21 @@ S3_TYPE_PRODUCTS: dict[str, tuple[str, ...]] = {
     "SL_2_WST": ("sst",),
     "OL_1_EFR": ("truecolor",),
     "OL_1_ERR": ("truecolor",),
+}
+
+# Products a type can yield but does not yield unless asked for by name.
+#
+# ``surface_reflectance`` is here rather than in ``S3_TYPE_PRODUCTS`` on
+# purpose. It is derivable from exactly the same Level-1 input as `truecolor`,
+# but it costs a full atmospheric correction and an aerosol retrieval, and the
+# plan's C16 commits to nothing being on by default - so an OL_1_EFR request
+# that names no products still yields the picture alone, exactly as before.
+# Keeping it in its own table rather than omitting it means the completeness
+# check over the product tables still covers it, which is what caught this
+# being silently unroutable.
+S3_OPT_IN_PRODUCTS: dict[str, tuple[str, ...]] = {
+    "OL_1_EFR": ("surface_reflectance",),
+    "OL_1_ERR": ("surface_reflectance",),
 }
 
 S3_DEFAULT_PRODUCTS = ("ndvi",)
@@ -519,7 +601,8 @@ def default_sentinel_s3_products(input_dataset: str) -> tuple[str, ...]:
 # --------------------------------------------------------------------------- #
 _PRODUCT_OPTIONS = {"variable", "mask_flags", "reject_flags", "browse_reject_flags",
                     "value_range", "colormap", "decimate", "unit", "geoloc_step",
-                    "log_scale", "extra_masks", "gamma", "bands", "view"}
+                    "log_scale", "extra_masks", "gamma", "bands", "view",
+                    "atmospheric_correction", "aerosol"}
 
 
 def normalize_sentinel_s3_product_map(
@@ -642,7 +725,55 @@ def normalize_sentinel_s3_product_map(
         else:
             geoloc_step = None
 
-        value_range = requested.get("value_range") or defaults["value_range"]
+        # The atmospheric correction (the plan's Q2 and Q4): the caller names
+        # the tier, and names the aerosol source when it asks for one. Nothing
+        # is on by default and nothing is fetched because it happens to be on
+        # disk, so two runs of the same command cannot differ.
+        correction = str(
+            requested.get(
+                "atmospheric_correction", defaults.get("atmospheric_correction", "none")
+            )
+        ).strip().lower()
+        if correction not in CORRECTION_TIERS:
+            raise ValueError(
+                f"product {key!r}: atmospheric_correction must be one of "
+                f"{', '.join(CORRECTION_TIERS)}, not {correction!r}"
+            )
+        if correction != "none" and not defaults.get("correctable"):
+            raise ValueError(
+                f"product {key!r} is not derived from Level-1 radiance, so there is no "
+                "atmosphere to correct; it arrives from ESA with their own correction "
+                "already applied"
+            )
+        aerosol = requested.get("aerosol", defaults.get("aerosol"))
+        if correction == "full" and aerosol in (None, ""):
+            raise ValueError(
+                f"product {key!r}: the 'full' tier needs an aerosol source, so pass "
+                "aerosol= a number, a (depth, angstrom) pair, 'retrieve' or "
+                "'climatological'; it is never chosen for you"
+            )
+        if correction != "full" and requested.get("aerosol") not in (None, ""):
+            # Only the *caller's* aerosol is a mistake worth refusing. The
+            # product table's own default travels with a product whose tier the
+            # caller may legitimately lower, and erroring on that would make
+            # `atmospheric_correction: "rayleigh"` unaskable for a product whose
+            # table names a loading.
+            raise ValueError(
+                f"product {key!r}: aerosol only applies to the 'full' tier, and this "
+                f"request asks for {correction!r} - so the loading would be read and "
+                "then ignored"
+            )
+        if correction != "full":
+            aerosol = None
+
+        # Q6: a corrected picture gets its own stretch, and the frozen
+        # top-of-atmosphere one is left exactly as it is. An explicitly
+        # requested range or gamma still wins over both.
+        asked_for_range = bool(requested.get("value_range"))
+        if correction != "none" and not asked_for_range and defaults.get("corrected_value_range"):
+            value_range = defaults["corrected_value_range"]
+        else:
+            value_range = requested.get("value_range") or defaults["value_range"]
         try:
             low, high = (float(item) for item in value_range)
         except (TypeError, ValueError):
@@ -703,7 +834,16 @@ def normalize_sentinel_s3_product_map(
             "geoloc_step": geoloc_step,
             "log_scale": log_scale,
             "unit": unit,
-            "gamma": float(requested.get("gamma", defaults.get("gamma", 1.0))),
+            "gamma": float(
+                requested["gamma"] if "gamma" in requested
+                else (
+                    defaults["corrected_gamma"]
+                    if correction != "none" and defaults.get("corrected_gamma") is not None
+                    else defaults.get("gamma", 1.0)
+                )
+            ),
+            "atmospheric_correction": correction,
+            "aerosol": aerosol,
             "bands": tuple(requested.get("bands", defaults.get("bands", ()))),
             # Log *packing* is detected from the file's units; this is only the
             # override, and it is a different thing from the log colour scale.
@@ -1051,7 +1191,10 @@ def _process_one_product(
     scratch: Path,
     manifest: dict[str, Any],
 ) -> dict[str, Any]:
-    if options["kind"] == "rgb":
+    if options["kind"] in ("rgb", "surface"):
+        # One function for both: a corrected `surface_reflectance` and a
+        # true-colour composite read the same Level-1 bands onto the same grid
+        # and differ only in what else travels with them.
         return _process_rgb_product(
             product=product, options=options, input_dataset=input_dataset, root=root,
             output_path=output_path, settings=settings, scratch=scratch, manifest=manifest,
@@ -1324,6 +1467,26 @@ def _process_rgb_product(
             )
         reflectances.append(np.where(rejected, np.nan, values).astype(np.float32))
 
+    # The atmospheric correction, when one was asked for. It replaces the
+    # top-of-atmosphere values rather than adding bands beside them: a product
+    # that carried both would invite a reader to difference them and call the
+    # difference an atmosphere, which is only true in the one tier that has no
+    # transmittance division.
+    tier = options.get("atmospheric_correction", "none")
+    correction = None
+    if tier != "none":
+        from ._olci_correction import correct_frame
+
+        land, _, _ = quality_mask(root, scratch, lat.shape, ["land"])
+        correction = correct_frame(
+            input_dataset, root, scratch,
+            bands=bands, shape=lat.shape, decimate=decimate,
+            solar_zenith_for_toa=zenith,
+            land=land, bright=bright, rejected=rejected,
+            tier=tier, aerosol=options.get("aerosol"),
+        )
+        reflectances = [correction["surfaces"][band] for band in bands]
+
     kept = np.isfinite(reflectances[0])
     kept_count = int(np.count_nonzero(kept))
     if kept_count == 0 and settings["on_empty"] == "raise":
@@ -1341,10 +1504,16 @@ def _process_rgb_product(
     )
     bounds = grid_bounds(lat, lon, epsg, resolution)
     cells = ((bounds[2] - bounds[0]) / resolution) * ((bounds[3] - bounds[1]) / resolution)
-    if cells * len(bands) > settings["max_output_pixels"]:
+    # Count the layers the file will actually hold, not the spectral bands: a
+    # corrected `surface_reflectance` writes an uncertainty band per band and a
+    # quality band on top, so three bands become seven and the size cap has to
+    # know that before the warp rather than after it.
+    carries_quality = options["kind"] == "surface" and tier != "none"
+    layer_count = len(bands) * (2 if carries_quality else 1) + (1 if carries_quality else 0)
+    if cells * layer_count > settings["max_output_pixels"]:
         raise ValueError(
-            f"{product}: three bands on a {epsg} grid at {resolution:g} would be "
-            f"{cells * len(bands):,.0f} cells, over the {settings['max_output_pixels']:,} limit for a "
+            f"{product}: {layer_count} bands on a {epsg} grid at {resolution:g} would be "
+            f"{cells * layer_count:,.0f} cells, over the {settings['max_output_pixels']:,} limit for a "
             f"{settings['context']} request; ask for a coarser resolution or run it as a bulk job"
         )
 
@@ -1356,18 +1525,54 @@ def _process_rgb_product(
         product=product, options=options, input_dataset=input_dataset, manifest=manifest,
         decimate=decimate, resolution=resolution, epsg=epsg,
         member="Oa{:02d}/Oa{:02d}/Oa{:02d}_radiance.nc".format(*bands),
-        variable="top-of-atmosphere reflectance (derived)", geoloc_step=step,
+        variable=(
+            "surface reflectance (derived)" if tier != "none"
+            else "top-of-atmosphere reflectance (derived)"
+        ),
+        geoloc_step=step,
     )
+    if correction is not None:
+        metadata.update(
+            {f"PYSENT_{key.upper()}": value for key, value in correction["provenance"].items()}
+        )
+
+    # What goes in the file, in order. A corrected `surface_reflectance` carries
+    # its uncertainty band for band and one shared quality band; the picture
+    # products carry the reflectance alone, because a browse image has nowhere
+    # to show a second number.
+    layers: list[tuple[str, np.ndarray, str]] = [
+        (
+            f"Oa{band:02d}_{BAND_LABEL[band]}nm_"
+            + ("surface_reflectance" if tier != "none" else "toa_reflectance"),
+            values,
+            "value",
+        )
+        for band, values in zip(bands, reflectances)
+    ]
+    if carries_quality:
+        layers += [
+            (
+                f"Oa{band:02d}_{BAND_LABEL[band]}nm_uncertainty",
+                correction["uncertainties"][band],
+                "value",
+            )
+            for band in bands
+        ]
+        # Categorical, so it is warped nearest whatever the values asked for -
+        # the same rule the reject-reason band follows. A bitfield averaged with
+        # its neighbour is a different bitfield, and a plausible-looking one.
+        layers.append(("quality_flags", correction["quality"].astype(np.float32), "code"))
 
     # Each band is warped on its own, onto the same grid, then stacked.
     warped: list[np.ndarray] = []
     transform = projection = None
-    for band, values in zip(bands, reflectances):
-        single = scratch / f"{product}_Oa{band:02d}.tif"
+    for name, values, role in layers:
+        single = scratch / f"{product}_{name}.tif"
         warp_swath(
             values=values, lat=lat, lon=lon, output_path=str(single),
             epsg=epsg, resolution=resolution, bounds=bounds,
-            resampling=_resampling_for(options, settings), scratch=scratch,
+            resampling="near" if role == "code" else _resampling_for(options, settings),
+            scratch=scratch,
             creation_options=["TILED=YES", "COMPRESS=NONE"],
             num_threads=settings["gdal_num_threads"], geoloc_step=step,
             # With nothing kept there is nothing to check: this guard asks
@@ -1387,7 +1592,7 @@ def _process_rgb_product(
         write_rgb_product(
             path=str(temporary), bands=warped, transform=transform, projection=projection,
             settings=settings, metadata=metadata,
-            descriptions=[f"Oa{band:02d}_{BAND_LABEL[band]}nm_toa_reflectance" for band in bands],
+            descriptions=[name for name, _values, _role in layers],
         )
         finish_float_product(path=str(temporary), settings=settings, metadata=metadata)
 
@@ -1417,6 +1622,7 @@ def _process_rgb_product(
         "available_flags": [],
         "baseline": manifest.get("baseline", ""),
         "bright_fraction": float(np.mean(bright[kept])) if kept_count else 0.0,
+        "atmospheric_correction": tier,
         "style_hint": {
             "value_range": list(options["value_range"]),
             "gamma": options["gamma"],
@@ -1432,6 +1638,55 @@ def _process_rgb_product(
         "time": manifest.get("time", {}),
         "provenance": metadata,
     }
+    if correction is not None:
+        from ._olci_correction import quality_bit_names
+        from ._olci_uncertainty import uncertainty_note
+
+        result["aerosol_source"] = options.get("aerosol")
+        # Which band holds what, so a caller does not have to count. The
+        # uncertainty is named rather than merely indexed, because its meaning -
+        # an agreement with ESA's Level-2, not a propagated budget - is the part
+        # a reader has to have.
+        result["layers"] = [
+            {"band": index + 1, "name": name, "role": role}
+            for index, (name, _values, role) in enumerate(layers)
+        ]
+        result["uncertainty_meaning"] = uncertainty_note(tier)
+        if carries_quality:
+            result["quality_band"] = len(layers)
+            result["quality_bits"] = quality_bit_names()
+            quality = warped[-1]
+            finite = np.isfinite(quality)
+            codes = quality[finite].astype(np.uint16) if finite.any() else np.zeros(0, np.uint16)
+            result["quality_fractions"] = {
+                name: float(np.mean((codes & (1 << bit)) != 0)) if codes.size else 0.0
+                for bit, name in sorted(quality_bit_names().items())
+            }
+            # The share of pixels carrying a value but no measured error. It is
+            # reported next to the value fractions because it is the one number
+            # that says how much of this frame the uncertainty band cannot speak
+            # for - and under the owner's Q5 answer that band is what makes
+            # shipping a dark-water value honest.
+            result["uncertainty_unmeasured_fraction"] = result["quality_fractions"][
+                "uncertainty_unmeasured"
+            ]
+        if correction["loading"] is not None:
+            loading = correction["loading"]
+            depth = loading["optical_depth_550"]
+            result["aerosol"] = {
+                "optical_depth_550_median": (
+                    float(np.nanmedian(depth)) if np.isfinite(depth).any() else None
+                ),
+                "source_fractions": {
+                    name: float(np.mean(loading["source"] == code))
+                    for code, name in loading["source_names"].items()
+                },
+                "refused_fractions": {
+                    name: float(np.mean(values))
+                    for name, values in (loading["refused"] or {}).items()
+                },
+                "table_ceiling": loading["table_ceiling"],
+            }
 
     if settings["styled"]:
         styled_path = float_path.with_name(f"{float_path.stem}_styled.tif")
@@ -1636,10 +1891,14 @@ def _product_metadata(
         style_range=f"{options['value_range'][0]:g},{options['value_range'][1]:g}",
         style_scale="log10" if options["log_scale"] else "linear",
         colormap=options["colormap"],
-        # Only a picture product has a gamma, and only it needs one recorded:
-        # without it a restyle of a true-colour float cannot reproduce the
-        # rendering the pipeline produced.
-        style_gamma=f"{options['gamma']:g}" if options.get("kind") == "rgb" else None,
+        # Only a composite product has a gamma, and only it needs one recorded:
+        # without it a restyle cannot reproduce the rendering the pipeline
+        # produced. `surface_reflectance` counts - its first three bands are a
+        # composite, and its gamma is the corrected-mode one, which differs from
+        # the frozen top-of-atmosphere value a restyle would otherwise guess.
+        style_gamma=(
+            f"{options['gamma']:g}" if options.get("kind") in ("rgb", "surface") else None
+        ),
     )
 
 
@@ -1839,9 +2098,14 @@ def restyle_sentinel_s3_product(
     # picture product and a value-plus-reason product can both have more than
     # one band. Only the grid path names its reason band, so the reason band
     # stays a count test - it is the picture that has to be recognised.
-    is_rgb = S3_PRODUCTS.get(tags.get("PYSENT_PRODUCT", ""), {}).get("kind") == "rgb" or (
-        band_count == 3 and all("reflectance" in name for name in band_descriptions)
-    )
+    # `surface_reflectance` is included: its first three bands are a composite
+    # and `write_rgb_styled` reads only those, so it restyles like a picture even
+    # though the file also carries uncertainty and quality bands. Without this it
+    # fell through to the single-band colour-ramp path and came out as a greyscale
+    # map of 665 nm.
+    is_rgb = S3_PRODUCTS.get(tags.get("PYSENT_PRODUCT", ""), {}).get("kind") in (
+        "rgb", "surface"
+    ) or (band_count == 3 and all("reflectance" in name for name in band_descriptions))
 
     stored_range = tags.get("PYSENT_STYLE_RANGE", "")
     if value_range is None:
@@ -1861,7 +2125,7 @@ def restyle_sentinel_s3_product(
         for name, value in (("colormap", colormap), ("log_scale", log_scale)):
             if value is not None:
                 raise ValueError(
-                    f"{float_path.name} is a three-band picture product, so {name!r} does not "
+                    f"{float_path.name} is a composite picture product, so {name!r} does not "
                     "apply to it; pass gamma and value_range instead"
                 )
         # The pipeline's own gamma, so a restyle that changes only the range
