@@ -234,12 +234,19 @@ def main() -> int:
             box = latitudes(entry[need[0]])
             span = f"{box[0]:.1f}-{box[1]:.1f} N" if box else "no bbox"
             have = "+".join(k for k in WANTED if k in entry)
-            # The span below is built from a bounding box, and CodeQL
-            # classifies latitude and longitude as private location data.
-            # These are the corners of a satellite frame's footprint from a
-            # public catalogue, with no person at either end. The suppression
-            # goes on the print itself because CodeQL only reads one on the
-            # line it reported.
+            # CodeQL reports this line as "clear-text logging of sensitive
+            # information": it classifies latitude and longitude as private
+            # location data, and the span is built from a bounding box. These
+            # are the corners of a satellite frame's footprint from a public
+            # catalogue, with no person at either end, so the finding is a
+            # misclassification rather than a defect.
+            #
+            # **The inline marker below does not suppress it** - this
+            # repository's code scanning does not honour inline suppressions -
+            # and it is left only to name the rule. Clearing the check needs
+            # the alert dismissed as a false positive in the repository's
+            # security tab, which is the owner's call rather than something to
+            # work around by not printing a footprint.
             print(f"{platform} {start}  orbit {orbit}  {span:>14}  {have}")  # codeql[py/clear-text-logging-sensitive-data]
             for kind in need:
                 if entry[kind]["url"]:
@@ -272,12 +279,19 @@ def main() -> int:
                 continue
             seen += 1
             span = f"{box[0]:.1f} to {box[1]:.1f} N" if box else "no bbox"
-            # The span below is built from a bounding box, and CodeQL
-            # classifies latitude and longitude as private location data.
-            # These are the corners of a satellite frame's footprint from a
-            # public catalogue, with no person at either end. The suppression
-            # goes on the print itself because CodeQL only reads one on the
-            # line it reported.
+            # CodeQL reports this line as "clear-text logging of sensitive
+            # information": it classifies latitude and longitude as private
+            # location data, and the span is built from a bounding box. These
+            # are the corners of a satellite frame's footprint from a public
+            # catalogue, with no person at either end, so the finding is a
+            # misclassification rather than a defect.
+            #
+            # **The inline marker below does not suppress it** - this
+            # repository's code scanning does not honour inline suppressions -
+            # and it is left only to name the rule. Clearing the check needs
+            # the alert dismissed as a false positive in the repository's
+            # security tab, which is the owner's call rather than something to
+            # work around by not printing a footprint.
             print(f"{row['title'][:62]:<62} {span:>18}")  # codeql[py/clear-text-logging-sensitive-data]
             if row["url"]:
                 print(f"    {row['url']}")
