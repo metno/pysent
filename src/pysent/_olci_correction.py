@@ -198,7 +198,12 @@ def resolve_loading(
     # which is the right behaviour - the value beyond is unknown - but a clamped
     # pixel has to say so, or a smoke plume comes back looking like ordinary
     # haze. This is what ``aerosol_grid_limits`` was added for.
-    ceiling = max(
+    # The *lowest* top across the bands in play, not the highest: a loading is
+    # beyond the table if any band being corrected cannot reach it. Every band
+    # shares the same depth grid today - 0.05 to 0.4 on both platforms - so the
+    # two agree, which is exactly why taking the generous one would have been a
+    # latent under-flagging bug rather than a visible one.
+    ceiling = min(
         aerosol_grid_limits(platform, band)["optical_depth_550"][1] for band in toa
     )
     beyond = filled["optical_depth_550"] > ceiling
@@ -303,6 +308,16 @@ def correct_frame(
     quality = np.zeros(shape, dtype=np.uint16)
 
     def mark(name: str, where: np.ndarray) -> None:
+        """Set a bit, additively.
+
+        The three bits set inside the per-band loop below -
+        ``negative_reflectance``, ``uncertainty_inferred`` and
+        ``uncertainty_unmeasured`` - therefore mean "in **any** band", because
+        there is one quality band for the whole product rather than one per
+        band. That is the useful reading for a caller deciding whether to trust
+        a pixel at all, but it is not "in every band", and a reader who wants
+        per-band detail has the uncertainty bands themselves.
+        """
         quality[np.asarray(where, dtype=bool)] |= np.uint16(1 << QUALITY_BITS[name])
 
     mark("corrected", ~rejected)

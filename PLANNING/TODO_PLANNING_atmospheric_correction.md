@@ -1130,3 +1130,13 @@ the phase that needs them.*
   `OL_1_EFR` request. `S3_OPT_IN_PRODUCTS` keeps the completeness check honest while
   `default_sentinel_s3_products` still returns `("truecolor",)` alone. That near-miss is a better
   argument for the invariant than anything written when it was added.
+  **Two more found by reviewing my own diff after committing it, both honesty bugs rather than
+  crashes.** `surface_reflectance` with `atmospheric_correction: "none"` returned
+  **top-of-atmosphere reflectance, with no uncertainty band, under the label "Surface reflectance
+  (atmospherically corrected)"** - the precise silent mislabelling Q5's answer exists to prevent,
+  reached by passing one option. It is now refused, pointing the caller at `truecolor`, which is
+  what the uncorrected quantity is already called. And the table-edge ceiling took the **highest**
+  top across the bands in play where it should take the lowest: a loading is beyond the table if
+  *any* band being corrected cannot reach it. Every band shares the 0.05-0.4 grid today, so the two
+  agree - which is what would have made it a latent under-flagging bug rather than a visible one,
+  the same shape as the `_trilinear` extrapolation bug in Phase 3.

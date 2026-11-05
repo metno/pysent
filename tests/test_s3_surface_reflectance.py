@@ -168,6 +168,21 @@ def test_the_product_never_calls_itself_water_leaving_reflectance():
         assert not any(phrase in note for phrase in banned), note
 
 
+def test_the_corrected_product_refuses_to_be_asked_for_uncorrected():
+    # Otherwise it hands back top-of-atmosphere reflectance, with no uncertainty
+    # band, under a label reading "Surface reflectance (atmospherically
+    # corrected)" - the exact silent mislabelling Q5's answer exists to prevent.
+    # The uncorrected quantity already has a product and it is `truecolor`.
+    with pytest.raises(ValueError, match="would label a top-of-atmosphere"):
+        normalize_sentinel_s3_product_map(
+            {"surface_reflectance": {"atmospheric_correction": "none"}}
+        )
+    # And the suggestion in the message has to actually work.
+    assert normalize_sentinel_s3_product_map({"truecolor": {}})["truecolor"][
+        "atmospheric_correction"
+    ] == "none"
+
+
 def test_the_label_says_it_is_corrected_rather_than_validated():
     label = S3_PRODUCTS["surface_reflectance"]["label"]
     assert "corrected" in label.lower()

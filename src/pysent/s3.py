@@ -745,6 +745,17 @@ def normalize_sentinel_s3_product_map(
                 "atmosphere to correct; it arrives from ESA with their own correction "
                 "already applied"
             )
+        if correction == "none" and defaults.get("kind") == "surface":
+            # Otherwise this product hands back top-of-atmosphere reflectance,
+            # with no uncertainty band, under a label that says "surface
+            # reflectance (atmospherically corrected)" - the precise kind of
+            # silent mislabelling the owner's Q5 answer exists to prevent. The
+            # uncorrected quantity already has a product, and it is `truecolor`.
+            raise ValueError(
+                f"product {key!r} is the corrected quantity, so "
+                "atmospheric_correction='none' would label a top-of-atmosphere "
+                "reflectance as a surface one; ask for the 'truecolor' product instead"
+            )
         aerosol = requested.get("aerosol", defaults.get("aerosol"))
         if correction == "full" and aerosol in (None, ""):
             raise ValueError(
