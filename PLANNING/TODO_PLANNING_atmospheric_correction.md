@@ -587,7 +587,7 @@ error budget is measurable. It is not ordered by difficulty.
   **The fitted exponent is a nuisance parameter and is not published as an aerosol property** -
   see A13. The fill order is retrieval, then product, then `CLIMATOLOGICAL_DEPTH_550` = 0.044,
   this archive's own median, with a `source` array recording which tier answered each pixel.
-- [ ] **Phase 5 - the product surface.** A `surface_reflectance` product and an
+- [x] **Phase 5 - the product surface.** A `surface_reflectance` product and an
   `atmospheric_correction` option on `truecolor` (Q2), defaulting off until the owner says
   otherwise. Provenance tags recording the tier, the aerosol source and every optical depth used; a
   per-pixel quality band carrying the high-air-mass ceiling (Q3); and an uncertainty derived from
@@ -600,12 +600,83 @@ error budget is measurable. It is not ordered by difficulty.
     beside it** (Q5). The uncertainty band is not optional decoration here - it is the only thing
     that makes shipping a 490 nm number whose error is nine times the open-ocean signal an honest
     act. A test must fail if the product can be written without it.
+
+    **The uncertainty must be empirical, and the obvious construction is a tenfold lie.** The
+    textbook route is to propagate the aerosol loading's uncertainty through the forward model.
+    Measured, at the water frame's own geometry, the sensitivity is **about -0.10 of surface
+    reflectance per unit optical depth at all three bands**, so even a generous 0.03 error in the
+    loading - four times the retrieval's measured bias - moves the answer by only **0.0032 at
+    490 nm**. The residual actually measured there against `OL_2_WFR` is **0.0300**. A propagated
+    uncertainty would therefore stamp every open-ocean pixel with +-0.003 where the real error is
+    ten times that, and it would do so with the full authority of a derivation.
+
+    So the band carries a **measured** uncertainty: the validation residual for that band, surface
+    class and aerosol tier, with the propagated loading term added in quadrature rather than
+    standing in for it. That is less elegant and it is the only version that is not a lie. Two
+    consequences: the uncertainty is explicitly *an empirical agreement with ESA's Level-2*, named
+    as such in the tags and the documentation rather than implied to be a theoretical error budget;
+    and **Phase 6 is what populates the table**, so Phase 5 ships it with the Phase 3/4 numbers and
+    Phase 6 refines them. Where no validation figure covers a pixel's combination the band reports
+    NaN rather than a propagated number, because "unmeasured" and "small" are different claims -
+    though the climatological tier turned out to be measurable after all, and the Phase 5 note below
+    records why leaving it NaN was wasteful rather than honest.
+
+    This is also the sharpest instance of risk 6 in this plan: the quantity whose job is to stop a
+    user over-trusting the product was itself about to be computed in the way that most understates
+    it, and the derivation would have looked impeccable.
   - **The phrase "water-leaving reflectance" appears nowhere** in the label, the tags, the
     docstrings or the documentation (Q5).
   - **A second true-colour stretch for corrected mode, measured here and reported for sign-off**
     (Q6), selected when `atmospheric_correction` is not `"none"`.
   - **The frozen top-of-atmosphere style stays byte-identical** - `(0.0, 0.6)`, `gamma 0.6` (Q6).
     A regression test should pin that, because this phase is the one that could break it.
+
+  **Shipped, and all four conditions are met.** `_olci_uncertainty.py`, `_olci_correction.py`, a
+  `surface_reflectance` product and an `atmospheric_correction` option on `truecolor`. Suite **545
+  passed / 18 skipped**, 549/14 with numba, against `main`'s 440/13.
+
+  **Q6's stretch is measured, not chosen** - `atmospheric_correction_audit/stretch.py`, six S3A and
+  six S3B frames. The criterion was stated before the numbers: clear land keeps the tone the frozen
+  stretch gave it, and the top of the ramp does not clip. The corrected clear-land composite median
+  is **0.088 against 0.157** at top of atmosphere, a 44 % drop, which at the frozen stretch would
+  render **29 % darker**.
+
+  **The first criterion was wrong and the measurement is what said so.** Anchoring the ramp's top on
+  the corrected cloud p99 at 0.95 gave `(0.0, 1.18)` and gamma 0.31 - but corrected cloud measures
+  **0.92 to 1.10, above one**, because the correction places the surface at ground level under the
+  whole atmosphere and a cloud top is neither. That anchors the whole picture's tone on the one part
+  of it that is not a retrieval. With the top instead fixed at **1.0, a reflectance's physical
+  ceiling**, gamma is determined rather than fitted: **0.33**, which puts corrected land back at the
+  0.448 of full scale the frozen stretch gave it. S3A gives 0.331 and S3B **0.333 independently**,
+  and the per-frame spread is -14 % to +7 %. **These two numbers need the owner's sign-off**, per
+  rule 7 - they are new defaults on a new code path, so nothing existing moves either way.
+
+  **The quality band is a 10-bit field in one `uint16`**, warped nearest whatever the values asked
+  for, because a bitfield averaged with its neighbour is a different and plausible-looking bitfield.
+  It records: corrected, the aerosol tier that answered (retrieved / product / climatological), haze
+  beyond the table's edge via `aerosol_grid_limits`, bright surface, negative reflectance, the
+  uncertainty being inferred or unmeasured, and **geometry outside the validated 63-80 degrees** -
+  flagged, not refused, because A9 killed the ceiling but "no evidence of degradation inside 63-80"
+  is not "accurate at 85".
+
+  **The first real frame changed the design.** On `20261105T095140`, 67 % of the output came back
+  with **no measured uncertainty**, because the retrieval is water-only and everything else fell to
+  the climatological loading - which was in `UNMEASURED_TIERS`. Over a land frame that is most of
+  what the product is for, so leaving it NaN was wasteful rather than honest. It turns out to be
+  measurable: across the **47 frames of the holding with a reported `AOD_550`**, the stated 0.044 is
+  off by **0.0346 at one sigma** (median 0.018, p95 0.131, range 0.012-0.288), and at the measured
+  0.10-per-unit-depth sensitivity that costs **0.0035** of reflectance. So a climatological pixel
+  borrows its surface class's measured `product` row and adds 0.0035 in quadrature. This is the one
+  place a propagated term is the whole of a contribution rather than a tenth of it, because here the
+  loading error *is* what is being described. **Unmeasured fell from 67 % to the `gas` tier alone.**
+
+  **Two defects of my own, both caught by the suite rather than by reading.** The size cap counted
+  spectral bands where the file now holds seven layers, so a `surface_reflectance` request could
+  have passed the check and then written over the limit. And `surface_reflectance` was unroutable:
+  an invariant test asserts every product in `S3_PRODUCTS` is reachable from a type, and adding the
+  product to `S3_TYPE_PRODUCTS` would have made it a *default* for every `OL_1_EFR` request - an
+  aerosol retrieval nobody asked for. Fixed with an `S3_OPT_IN_PRODUCTS` table, so the completeness
+  check still covers it while `default_sentinel_s3_products` still returns `("truecolor",)` alone.
 - [ ] **Phase 6 - validation across the holding, not one frame.** Run the accepted correction over a
   sample of A1's 58 triples, both platforms, and report the residual distribution by band, by
   land/water and by solar zenith. *Acceptance: a table the next reviewer can argue with, and a
@@ -1015,3 +1086,47 @@ the phase that needs them.*
   solar-flux fix, and a third time for a style compromise - decided before the review study has seen
   a single corrected picture - would have been the worst trade available. The corrected-mode numbers
   are new defaults on a new code path, reported for sign-off before that path is reachable.
+- **2026-11-05 - Phase 5, the product surface.** The owner also lifted the real-data constraint:
+  scenes may be copied from the read-only NFS archive onto `/mnt/data` so the CI container can see
+  them. Two frames copied, 1.6 GB, 243 GB still free; the root volume was not touched.
+  **The uncertainty band nearly shipped a tenfold understatement, and the derivation looked
+  impeccable.** Propagating the loading's uncertainty through the forward model is the textbook
+  route and it is wrong here by an order of magnitude: the measured sensitivity is **-0.10 of
+  reflectance per unit optical depth**, so a 0.03 depth error - four times the retrieval's measured
+  bias - moves 490 nm by **0.0032** against a residual measured at **0.0300**. Under Q5 the product
+  ships a value on every clear pixel including dark open ocean, which makes this band the only thing
+  between a user and a misreading, so it carries the empirical agreement with ESA's Level-2 indexed
+  by band, surface class and loading tier, and the tags say "not a propagated error budget" in those
+  words. Three refusals follow, each a test: 665 nm never reports its own residual when the loading
+  was retrieved (the retrieval fits that band to a near-zero reference, so its 0.0037 is a
+  tautology - it takes 560 nm's figure and is flagged as inferred); the table's own interpolation
+  error is **not** added, because the residuals were measured *through those same tables* and adding
+  it would double-count; and the `gas` tier claims nothing at all. That last one was my own error
+  first - I had it inheriting the gas+Rayleigh row, which would have understated it by most of the
+  Rayleigh path reflectance, 0.10 at 490 nm, a larger lie than the one the module exists to avoid.
+  **The first real frame overturned a second decision of mine.** 67 % of the output came back with
+  no measured uncertainty, because the retrieval is water-only and the rest fell to the
+  climatological loading, which I had put in `UNMEASURED_TIERS` on the reasoning that borrowing the
+  product row would claim a measurement's accuracy for a guess. Over a land frame that is most of
+  what the product is for, and the reasoning was lazy rather than careful: **the cost of guessing is
+  measurable, and both halves of it were already in hand.** Across the 47 frames with a reported
+  `AOD_550` the stated 0.044 is off by **0.0346 at one sigma**, and at 0.10 per unit depth that is
+  **0.0035** of reflectance. So the tier borrows the `product` row and pays 0.0035 in quadrature,
+  and "unmeasured" shrank to the `gas` tier alone. The shape of the mistake is worth keeping:
+  **"we never measured that" is a claim to check, not a conclusion** - twice in this phase the
+  ingredients for the measurement were already committed to the repository.
+  **Q6's first criterion was wrong, and the measurement said so.** Anchoring the corrected ramp's
+  top on cloud at 0.95 gave `(0.0, 1.18)`, gamma 0.31 - but corrected cloud measures **0.92 to 1.10,
+  above one**, because the correction places the surface at ground level under the whole atmosphere
+  and a cloud top is neither, so that anchors the picture's tone on the one part of it that is not a
+  retrieval. Fixing the top at **1.0**, a reflectance's physical ceiling, leaves gamma determined
+  rather than fitted: **0.33**, and S3A and S3B agree to the third decimal independently (0.331,
+  0.333), neither having been compared with the other until after both were measured.
+  **Two defects caught by the suite rather than by reading.** The output size cap counted spectral
+  bands where a corrected `surface_reflectance` writes seven layers, so a request could pass the
+  check and then write over the limit. And the product was unroutable: the invariant that every
+  entry in `S3_PRODUCTS` is reachable from a type failed, and the obvious fix - adding it to
+  `S3_TYPE_PRODUCTS` - would have made a full aerosol retrieval the **default** for every
+  `OL_1_EFR` request. `S3_OPT_IN_PRODUCTS` keeps the completeness check honest while
+  `default_sentinel_s3_products` still returns `("truecolor",)` alone. That near-miss is a better
+  argument for the invariant than anything written when it was added.

@@ -359,3 +359,74 @@ def test_gamma_is_refused_for_a_ramped_product(s3_synergy_window, tmp_path):
     )[0]
     with pytest.raises(ValueError, match="gamma"):
         restyle_sentinel_s3_product(product_path=product["path"], gamma=0.5)
+
+
+def _surface_float_product(path, gamma="0.33"):
+    """A seven-band `surface_reflectance` float product: 3 values, 3 errors, 1 quality."""
+    from osgeo import osr
+
+    rows, columns = 8, 10
+    values = [
+        np.linspace(0.0, 0.5, rows * columns, dtype=np.float32).reshape(rows, columns),
+        np.linspace(0.1, 0.6, rows * columns, dtype=np.float32).reshape(rows, columns),
+        np.linspace(0.2, 0.7, rows * columns, dtype=np.float32).reshape(rows, columns),
+    ]
+    errors = [np.full((rows, columns), fill, dtype=np.float32) for fill in (0.0034, 0.0175, 0.0031)]
+    quality = np.full((rows, columns), 3.0, dtype=np.float32)
+    labels = [
+        "Oa08_665nm_surface_reflectance", "Oa06_560nm_surface_reflectance",
+        "Oa04_490nm_surface_reflectance", "Oa08_665nm_uncertainty",
+        "Oa06_560nm_uncertainty", "Oa04_490nm_uncertainty", "quality_flags",
+    ]
+    dataset = gdal.GetDriverByName("GTiff").Create(str(path), columns, rows, 7, gdal.GDT_Float32)
+    reference = osr.SpatialReference()
+    reference.ImportFromEPSG(4326)
+    dataset.SetProjection(reference.ExportToWkt())
+    dataset.SetGeoTransform((10.0, 0.01, 0.0, 60.0, 0.0, -0.01))
+    for index, (band, label) in enumerate(zip(values + errors + [quality], labels)):
+        raster = dataset.GetRasterBand(index + 1)
+        raster.SetNoDataValue(float("nan"))
+        raster.WriteArray(band)
+        raster.SetDescription(label)
+    dataset.SetMetadata({
+        "PYSENT_PRODUCT": "surface_reflectance",
+        "PYSENT_STYLE_RANGE": "0,1",
+        "PYSENT_STYLE_GAMMA": gamma,
+        "PYSENT_STYLE_SCALE": "linear",
+        "PYSENT_ATMOSPHERIC_CORRECTION": "full",
+    })
+    dataset.FlushCache()
+    dataset = None
+    return path
+
+
+def test_a_surface_reflectance_float_is_restyled_as_rgb(tmp_path):
+    """Seven bands, and the first three are still a picture.
+
+    The `band_count == 3` test that recognises a composite cannot see this one,
+    so without the product kind being checked it fell through to the single-band
+    colour-ramp path and came out as a greyscale map of 665 nm - the same shape
+    of defect as the reason-band bug above, one product later.
+    """
+    product = _surface_float_product(tmp_path / "surface_reflectance.tif")
+    result = restyle_sentinel_s3_product(product_path=str(product), output_dir=tmp_path / "out")
+
+    styled = gdal.Open(result["styled_path"])
+    assert styled.RasterCount == 4
+    assert styled.GetRasterBand(1).GetRasterColorTable() is None
+    tags = styled.GetMetadata()
+    styled = None
+
+    assert result["rgb"] is True
+    # The corrected-mode gamma, read back from the product rather than guessed
+    # from the frozen top-of-atmosphere default - which is the whole reason the
+    # tag is written for this kind as well.
+    assert tags["PYSENT_STYLE_GAMMA"] == "0.33"
+
+
+def test_restyling_a_surface_product_refuses_a_colormap(tmp_path):
+    product = _surface_float_product(tmp_path / "surface_reflectance.tif")
+    with pytest.raises(ValueError, match="composite picture product"):
+        restyle_sentinel_s3_product(
+            product_path=str(product), output_dir=tmp_path / "out", colormap="viridis"
+        )
