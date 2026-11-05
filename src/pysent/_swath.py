@@ -231,6 +231,73 @@ def _resolution_for(epsg: int, resolution: float | None, ground_sampling_m: floa
     return DEFAULT_LATLON_RESOLUTION if int(epsg) == EPSG_LATLON else DEFAULT_POLAR_RESOLUTION
 
 
+#: How many output cells the narrow side of a swath has to span before GDAL's
+#: geolocation-array warper can place it. Measured on a zero-duration OLCI stub
+#: ten rows tall: the warp succeeds at 10.0, 5.0 and 3.3 cells and fails at 2.5,
+#: 1.7 and 1.2, so the boundary is between 2.5 and 3.3. Four leaves a margin
+#: without demanding a grid finer than the data itself.
+MINIMUM_SWATH_CELLS = 4.0
+
+
+#: The fewest rows a swath may be decimated down to. Below this there is not
+#: enough of a geolocation array left to warp with, whatever grid it goes on:
+#: the zero-duration stub that prompted this is ten rows tall, and the quicklook
+#: decimation of eight turned it into one. Ordinary granules are thousands of
+#: rows and never reach this.
+MINIMUM_SWATH_ROWS = 8
+
+
+def decimation_for(shape: tuple[int, int], decimate: int,
+                   *, minimum_rows: int = MINIMUM_SWATH_ROWS) -> int:
+    """``decimate``, reduced so the read keeps at least ``minimum_rows`` rows.
+
+    Decimation is a cost control, and on a frame small enough it costs the
+    frame instead. Returns the request unchanged for any granule with room for
+    it, which is every ordinary one.
+    """
+    rows = int(shape[0])
+    if rows <= 0 or decimate <= 1:
+        return max(1, int(decimate))
+    return max(1, min(int(decimate), rows // minimum_rows or 1))
+
+
+def refine_for_thin_swath(
+    shape: tuple[int, int],
+    epsg: int,
+    resolution: float,
+    *,
+    ground_sampling_m: float,
+    minimum_cells: float = MINIMUM_SWATH_CELLS,
+) -> float:
+    """A resolution fine enough that a narrow swath still lands on the grid.
+
+    A product can be far smaller in one direction than the grid it is being put
+    on. The case that prompted this is a **zero-duration OLCI stub** - start
+    time equal to stop time, a duration field of ``0000`` - which is ten rows
+    tall and 4865 wide: about 3 km along-track against 1270 km across. On the
+    quicklook grid those ten rows span barely one output cell, GDAL's
+    geolocation transformer reports "Too many points failed to transform", and
+    the warp returns a correctly sized raster containing nothing.
+
+    **The failure belongs to the frame and the grid together, not to the
+    frame**, which processes perfectly well on a finer grid. So the grid is what
+    gives way: the resolution is refined until the narrow side spans
+    ``minimum_cells``. A frame this thin is tiny, so the finer grid costs
+    nothing, and the caller is told it happened rather than left wondering why a
+    quicklook came back sharper than it asked for.
+
+    Returns the resolution unchanged when the swath is already wide enough,
+    which is every ordinary granule.
+    """
+    narrow = min(int(shape[0]), int(shape[1]))
+    if narrow <= 0 or resolution <= 0 or ground_sampling_m <= 0:
+        return float(resolution)
+    extent = narrow * _ground_sampling_in(int(epsg), float(ground_sampling_m))
+    if extent / float(resolution) >= minimum_cells:
+        return float(resolution)
+    return extent / minimum_cells
+
+
 def _spatial_reference(epsg: int) -> osr.SpatialReference:
     reference = osr.SpatialReference()
     reference.ImportFromEPSG(int(epsg))

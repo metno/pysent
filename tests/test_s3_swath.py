@@ -581,3 +581,91 @@ def test_a_reason_band_still_lands_on_the_values_grid(tmp_path):
     # Where the values are present the reasons are too: the two warps cover the
     # same cells, which is what makes the reason band able to explain a pixel.
     assert np.isfinite(second[np.isfinite(first)]).all()
+
+
+# --------------------------------------------------------------------------- #
+# A swath too thin for the grid it is going on
+# --------------------------------------------------------------------------- #
+# The case: a zero-duration OLCI stub, start time equal to stop time and a
+# duration field of 0000, ten rows tall and 4865 wide - about 3 km along-track
+# against 1270 km across. On main it cannot be processed at all: the quicklook
+# decimation of eight leaves one row, GDAL's geolocation transformer reports
+# "Too many points failed to transform", and the warp returns a correctly sized
+# raster holding nothing. The frame is not the problem - it maps perfectly well
+# on a finer grid - so the grid and the decimation give way instead.
+from pysent._swath import (  # noqa: E402
+    MINIMUM_SWATH_CELLS,
+    MINIMUM_SWATH_ROWS,
+    decimation_for,
+    refine_for_thin_swath,
+)
+
+OLCI_SAMPLING_M = 300.0
+DEGREE_M = 111_320.0
+
+
+def test_an_ordinary_granule_keeps_the_decimation_it_asked_for():
+    # The guard must be invisible to everything that is not pathological.
+    assert decimation_for((4865, 4865), 8) == 8
+    assert decimation_for((2000, 4865), 8) == 8
+    assert decimation_for((64, 4865), 8) == 8
+    assert decimation_for((4865, 4865), 1) == 1
+
+
+def test_a_stub_frame_is_not_decimated_into_a_single_row():
+    # Ten rows decimated by eight is one row, and one row cannot be warped on
+    # any grid. This is the step that actually rescues the frame.
+    assert decimation_for((10, 4865), 8) == 1
+    assert decimation_for((10, 4865), 2) == 1
+    # Just above the floor the request still stands.
+    assert decimation_for((16, 4865), 2) == 2
+
+
+def test_the_decimation_floor_keeps_enough_rows_to_warp():
+    for rows in (8, 10, 24, 100):
+        for asked in (1, 2, 8, 16):
+            kept = decimation_for((rows, 4865), asked)
+            assert rows // kept >= min(rows, MINIMUM_SWATH_ROWS)
+
+
+def test_an_ordinary_granule_keeps_the_resolution_it_asked_for():
+    # A full OLCI frame is thousands of rows; nothing is refined.
+    native = OLCI_SAMPLING_M / DEGREE_M
+    for shape in ((4865, 4865), (2000, 4865), (400, 4865)):
+        assert refine_for_thin_swath(
+            shape, 4326, native * 8, ground_sampling_m=OLCI_SAMPLING_M
+        ) == native * 8
+
+
+def test_a_thin_swath_gets_a_grid_it_can_actually_land_on():
+    # Ten rows at 300 m is 3 km, which on the quicklook grid spans about one
+    # cell. Measured on the real stub, the warp succeeds at 10.0, 5.0 and 3.3
+    # cells across and fails at 2.5, 1.7 and 1.2.
+    native = OLCI_SAMPLING_M / DEGREE_M
+    refined = refine_for_thin_swath(
+        (10, 4865), 4326, native * 8, ground_sampling_m=OLCI_SAMPLING_M
+    )
+    assert refined < native * 8
+    spanned = (10 * native) / refined
+    assert spanned == pytest.approx(MINIMUM_SWATH_CELLS)
+    assert spanned > 3.3, "below the measured failure boundary"
+
+
+def test_the_refinement_is_in_the_units_of_the_grid_it_is_given():
+    # Degrees on EPSG:4326 and metres on a polar grid. Mixing them up would
+    # refine by a factor of 111 320 and blow past the output size cap.
+    degrees = refine_for_thin_swath(
+        (10, 4865), 4326, 1.0, ground_sampling_m=OLCI_SAMPLING_M
+    )
+    metres = refine_for_thin_swath(
+        (10, 4865), 32661, 100_000.0, ground_sampling_m=OLCI_SAMPLING_M
+    )
+    assert degrees == pytest.approx(10 * OLCI_SAMPLING_M / DEGREE_M / MINIMUM_SWATH_CELLS)
+    assert metres == pytest.approx(10 * OLCI_SAMPLING_M / MINIMUM_SWATH_CELLS)
+
+
+def test_a_degenerate_shape_is_left_alone_rather_than_dividing_by_zero():
+    assert refine_for_thin_swath((0, 0), 4326, 0.01, ground_sampling_m=300.0) == 0.01
+    assert refine_for_thin_swath((10, 10), 4326, 0.0, ground_sampling_m=300.0) == 0.0
+    assert refine_for_thin_swath((10, 10), 4326, 0.01, ground_sampling_m=0.0) == 0.01
+    assert decimation_for((0, 0), 8) == 8
