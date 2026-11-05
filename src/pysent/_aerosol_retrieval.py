@@ -47,10 +47,12 @@ import numpy as np
 
 from ._atmosphere import (
     _aerosol_grids,
+    _model_weights,
     aerosol_grid_limits,
     aerosol_models,
-    atmosphere_terms,
+    aerosol_path_components,
     gas_transmittance,
+    rayleigh_terms,
 )
 
 #: The two bands the inversion uses: 665 and 865 nm. Both are nearly black over
@@ -97,11 +99,19 @@ def breakpoints(platform="S3A", band=RETRIEVAL_BANDS[-1]):
     return _BREAKPOINTS
 
 
-def _paths_at_breakpoints(platform, band, *, shape, angstrom, geometry):
-    """Path reflectance at each breakpoint, as ``(breakpoint, *shape)``.
+def _path_pieces(platform, band, *, shape, geometry):
+    """Everything needed to build the breakpoint paths at **any** exponent.
 
-    One call to the forward model for the whole set, by broadcasting the depth
-    over a leading axis, rather than one call per depth.
+    The exponent search is the whole cost of this module, and the exponent
+    changes only how the two aerosol models are weighted - every table
+    interpolation underneath is exponent-independent. So the expensive part is
+    done once here, and :func:`_blend_paths` assembles a given exponent's paths
+    from it with arithmetic alone.
+
+    Measured before this split: 38 calls to the blended forward model, 2204
+    calls to the trilinear interpolator, 180 s for 100 000 pixels. The pieces
+    below are 2 interpolations per band instead of 19, plus the molecular term
+    twice instead of 38 times.
     """
     nodes = breakpoints(platform, band)
     depth = nodes.reshape((-1,) + (1,) * len(shape)) * np.ones((1, *shape))
@@ -109,13 +119,46 @@ def _paths_at_breakpoints(platform, band, *, shape, angstrom, geometry):
         name: np.broadcast_to(np.asarray(value, dtype=np.float64), (nodes.size, *shape))
         for name, value in geometry.items()
     }
-    return atmosphere_terms(
-        platform,
-        band,
+    components = aerosol_path_components(
+        platform, band,
         optical_depth_550=depth,
-        angstrom=np.broadcast_to(np.asarray(angstrom, dtype=np.float64), depth.shape),
-        **broadcast,
+        solar_zenith_deg=broadcast["solar_zenith_deg"],
+        view_zenith_deg=broadcast["view_zenith_deg"],
+        relative_azimuth_deg=broadcast["relative_azimuth_deg"],
+    )
+    # The molecular path at the pixel's own pressure, which is what the
+    # aerosol increment is added to. Distinct from the sea-level molecular path
+    # the table carries, which is what the increment has subtracted from it.
+    molecular_at_pressure = rayleigh_terms(
+        platform, band,
+        pressure_hpa=broadcast["pressure_hpa"],
+        solar_zenith_deg=broadcast["solar_zenith_deg"],
+        view_zenith_deg=broadcast["view_zenith_deg"],
+        relative_azimuth_deg=broadcast["relative_azimuth_deg"],
     )["path_reflectance"]
+    return {
+        "platform": platform,
+        "model_path": components["model_path"],
+        "molecular_sea_level": components["molecular_path"],
+        "molecular_at_pressure": molecular_at_pressure,
+        "scale": components["scale"],
+    }
+
+
+def _blend_paths(pieces, angstrom):
+    """One exponent's breakpoint paths, from the pre-computed pieces.
+
+    Identical arithmetic to :func:`pysent._atmosphere.atmosphere_terms` over the
+    same inputs - the models blended on the exponent, the sea-level molecular
+    part removed, the below-floor ramp applied, and the result added to the
+    molecular path at the pixel's own pressure.
+    """
+    weights = _model_weights(pieces["platform"], angstrom)
+    blended = 0.0
+    for model, weight in weights.items():
+        blended = blended + weight * pieces["model_path"][model]
+    increment = pieces["scale"] * (blended - pieces["molecular_sea_level"])
+    return pieces["molecular_at_pressure"] + increment
 
 
 def _interpolate_at(nodes, paths, depth):
@@ -268,16 +311,22 @@ def retrieve_optical_depth(
     sub_apparent = {band: values[candidate] for band, values in apparent.items()}
 
     nodes = breakpoints(platform, anchor)
+    # The tables, interpolated once. Everything the exponent search does from
+    # here is arithmetic over these.
+    pieces = (
+        {
+            band: _path_pieces(platform, band, shape=subset_shape, geometry=sub_geometry)
+            for band in (anchor, second)
+        }
+        if subset_shape[0]
+        else {}
+    )
     for exponent in ANGSTROM_STEPS:
         if not subset_shape[0]:
             break
         alpha = np.full(subset_shape, float(exponent))
-        anchor_paths = _paths_at_breakpoints(
-            platform, anchor, shape=subset_shape, angstrom=alpha, geometry=sub_geometry
-        )
-        second_paths = _paths_at_breakpoints(
-            platform, second, shape=subset_shape, angstrom=alpha, geometry=sub_geometry
-        )
+        anchor_paths = _blend_paths(pieces[anchor], alpha)
+        second_paths = _blend_paths(pieces[second], alpha)
         if cleanest is None:
             # The path of an aerosol-free atmosphere at the anchor band, kept
             # to tell "no aerosol" from "darker than air", below. The first

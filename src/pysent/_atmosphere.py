@@ -629,6 +629,98 @@ def _model_weights(platform, alpha):
     return {low: 1.0 - weight, high: weight}
 
 
+def _model_path(grids, key, coordinates, azimuth):
+    """One model's total path reflectance at sea level, at this geometry.
+
+    Interpolate the three grid axes first, which leaves one azimuth curve per
+    pixel, then interpolate along it. Doing it this way round means the azimuth
+    step is linear between stored samples rather than through a fitted form that
+    cannot hold the forward-scattering peak - three Fourier terms are lossless
+    for Rayleigh and wrong by up to 0.18 for aerosol.
+    """
+    axes, cubes, azimuths = grids[key]
+    curve = np.stack(
+        [
+            _trilinear(cubes[f"azimuth_{int(a):03d}"], axes, coordinates, AEROSOL_AXES)
+            for a in azimuths
+        ],
+        axis=-1,
+    )
+    lower, upper, fraction = _axis_weights(azimuths, azimuth)
+    return np.take_along_axis(
+        curve, np.expand_dims(lower, -1), axis=-1
+    )[..., 0] * (1.0 - fraction) + np.take_along_axis(
+        curve, np.expand_dims(upper, -1), axis=-1
+    )[..., 0] * fraction
+
+
+def aerosol_path_components(
+    platform: str,
+    band: int,
+    *,
+    optical_depth_550,
+    solar_zenith_deg,
+    view_zenith_deg,
+    relative_azimuth_deg,
+):
+    """The path reflectance's pieces, *before* the models are blended.
+
+    :func:`atmosphere_terms` blends the two aerosol models on the Angstrom
+    exponent and hands back one number, which is what almost every caller
+    wants. The aerosol retrieval is the exception: it searches over the
+    exponent at fixed geometry, and the exponent changes **only the blend
+    weights** - the table interpolation underneath it, which is the whole cost,
+    does not depend on the exponent at all.
+
+    Calling the blended form once per exponent therefore repeats the expensive
+    part nineteen times over. Measured: the retrieval spent 180 s of its 180 s
+    on 100 000 pixels inside 2204 calls to :func:`_trilinear`, from 38 calls to
+    the blended forward model. This returns the exponent-independent pieces so
+    that caller can interpolate once and blend as often as it likes:
+
+    - ``model_path``: each model's own total path reflectance at sea level;
+    - ``molecular_path``: the sea-level molecular path the table includes, which
+      has to come back off before the increment is applied at pixel pressure;
+    - ``scale``: the below-the-floor ramp towards the exact zero at tau = 0.
+
+    A caller reassembles the blended path as
+    ``sum(weight * model_path[model])`` over
+    :func:`_model_weights`, and the increment as
+    ``scale * (blended - molecular_path)``.
+    """
+    grids = _aerosol_grids()
+    if not grids:
+        raise ValueError(
+            f"{DATA_DIR / AEROSOL_TABLE} is absent, so no aerosol correction is available; "
+            "generate it with tools/rt6s/generate_tables.py --tables aerosol"
+        )
+    molecular = rayleigh_terms(
+        platform, band,
+        pressure_hpa=STANDARD_PRESSURE_HPA,
+        solar_zenith_deg=solar_zenith_deg,
+        view_zenith_deg=view_zenith_deg,
+        relative_azimuth_deg=relative_azimuth_deg,
+    )
+    azimuth = np.asarray(relative_azimuth_deg, dtype=np.float64)
+    coordinates = (optical_depth_550, solar_zenith_deg, view_zenith_deg)
+    floor = float(min(grids[key][0][0][0] for key in grids if key[0] == platform))
+    paths = {}
+    for model in aerosol_models(platform):
+        key = (platform, int(band), model)
+        if key not in grids:
+            raise ValueError(
+                f"the aerosol table has no {model} rows for {platform} band {band}"
+            )
+        paths[model] = _model_path(grids, key, coordinates, azimuth)
+    return {
+        "model_path": paths,
+        "molecular_path": molecular["path_reflectance"],
+        "scale": np.clip(
+            np.asarray(optical_depth_550, dtype=np.float64) / floor, 0.0, 1.0
+        ),
+    }
+
+
 def aerosol_terms(
     platform: str,
     band: int,
@@ -677,25 +769,8 @@ def aerosol_terms(
             raise ValueError(
                 f"the aerosol table has no {model} rows for {platform} band {band}"
             )
-        axes, cubes, azimuths = grids[key]
-        # Interpolate the three grid axes first, which leaves one azimuth curve
-        # per pixel, then interpolate along it. Doing it this way round means
-        # the azimuth step is linear between stored samples rather than through
-        # a fitted form that cannot hold the forward-scattering peak.
-        curve = np.stack(
-            [
-                _trilinear(cubes[f"azimuth_{int(a):03d}"], axes, coordinates, AEROSOL_AXES)
-                for a in azimuths
-            ],
-            axis=-1,
-        )
-        lower, upper, fraction = _axis_weights(azimuths, azimuth)
-        picked = np.take_along_axis(
-            curve, np.expand_dims(lower, -1), axis=-1
-        )[..., 0] * (1.0 - fraction) + np.take_along_axis(
-            curve, np.expand_dims(upper, -1), axis=-1
-        )[..., 0] * fraction
-
+        axes, cubes, _azimuths = grids[key]
+        picked = _model_path(grids, key, coordinates, azimuth)
         blended["path"] = blended["path"] + weight * picked
         for name, field in (
             ("down", "transmittance_down"),
