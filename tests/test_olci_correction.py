@@ -149,6 +149,22 @@ def test_a_loading_past_the_table_is_flagged_as_well_as_clamped():
     assert out["haze_beyond_table"].all()
 
 
+def test_the_table_ceiling_is_the_lowest_top_not_the_highest():
+    # A loading is beyond the table if *any* band being corrected cannot reach
+    # it. Every band shares the same depth grid today, so the generous reading
+    # agrees with the strict one - which is why taking the generous one would
+    # have been a latent under-flagging bug rather than a visible one.
+    from pysent._atmosphere import aerosol_grid_limits
+
+    toa, geo = black_water_toa()
+    out = resolve_loading(
+        "S3A", aerosol=0.1, atmosphere=geo, toa=toa,
+        water=np.ones(SHAPE, bool), shape=SHAPE,
+    )
+    tops = [aerosol_grid_limits("S3A", band)["optical_depth_550"][1] for band in toa]
+    assert out["table_ceiling"] == pytest.approx(min(tops))
+
+
 def test_a_loading_inside_the_table_is_not_flagged():
     toa, geo = black_water_toa()
     out = resolve_loading(
