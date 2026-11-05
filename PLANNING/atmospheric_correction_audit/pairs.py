@@ -25,6 +25,11 @@ import sys
 
 import numpy as np
 
+# Both this directory and the library, because run.sh uses `python3 -I`,
+# which drops the script's own directory from sys.path - so the sibling
+# import below fails without it. sweep.py already does this; pairs.py did
+# not, which quietly broke `run.sh pairs`.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 from osgeo import gdal  # noqa: E402

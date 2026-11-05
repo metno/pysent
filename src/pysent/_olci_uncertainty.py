@@ -68,97 +68,81 @@ FITTED_BANDS = frozenset(RETRIEVAL_BANDS)
 # estimate available for 665 nm. It is an inference and is flagged as one.
 INFERRED_FROM = 6
 
-# Measured median absolute residual against ESA's own Level-2, by surface class,
-# aerosol tier and band. **These are agreements with a reference on matched
-# pixels, not propagated error budgets.** Each row names the reference, the
-# sample and where the number comes from, because a figure this load-bearing has
-# to be traceable to the run that produced it.
+# **The 68th percentile of the absolute disagreement with ESA's own Level-2**,
+# by surface class and band, measured end to end through the shipped
+# ``correct_frame`` across the holding (Phase 6): 25 land, 16 bright and 14
+# water comparisons over both platforms, including Arctic frames, on the
+# instrument grid so no warp enters the comparison.
 #
-# Water is against ``OL_2_WFR`` water-leaving reflectance over clear water;
-# land is against ``SY_2_SYN`` ``SDR_Oa**`` over clear land. The two references
-# are independent of each other and of anything this library produces.
+# Water and bright are against ``OL_2_WFR``, land against ``SY_2_SYN``
+# ``SDR_Oa**``. Both references are independently produced by ESA from the same
+# Level-1 radiance; neither is derived from anything this library computes.
 #
-# Phase 6 of the plan re-measures all of these across the whole holding and by
-# solar zenith; until it does, the land rows are the 55-triple sweep and the
-# water rows are the single repinned water frame, which is why the sample size
-# travels with the number.
-VALIDATION_RESIDUAL: dict[tuple[str, str], dict[int, float]] = {
-    # Gas and Rayleigh, no aerosol tier. This is the ``"rayleigh"`` correction
-    # tier, and it is deliberately *not* reused for the ``"gas"`` tier below.
-    ("water", "rayleigh"): {4: 0.0592, 6: 0.0439, 8: 0.0304},
-    # The loading from an ESA product - the coarse SY_2_AOD frame value, or
-    # OL_2_WFR's per-pixel w_aer.
-    ("water", "product"): {4: 0.0391, 6: 0.0239, 8: 0.0124},
-    # The loading retrieved from this frame's own near-infrared.
-    ("water", "retrieved"): {4: 0.0300, 6: 0.0142, 8: 0.0037},
-    ("land", "rayleigh"): {4: 0.0107, 6: 0.0117, 8: 0.0035},
-    ("land", "product"): {4: 0.0031, 6: 0.0175, 8: 0.0034},
+# **p68, not a median, and the distinction is the whole point.** A median
+# absolute residual is exceeded by half of all pixels by construction, so
+# publishing one as an uncertainty guarantees it is wrong half the time. The
+# first version of this table did worse still: it was filled with
+# ``median(ours - reference)``, a *bias*, which at 490 nm over land is 0.0031
+# where the typical absolute error is 0.0221 - seven times larger. Measured
+# coverage then ran at 8 to 15 % where a one-sigma band should reach 68 %.
+#
+# These figures already include every term the chain commits, the climatological
+# aerosol fill included, because they were measured through the shipped path
+# with that fill in place. Nothing may be added on top of them: see the note at
+# the end of ``uncertainty`` about double-counting.
+VALIDATION_RESIDUAL: dict[str, dict[int, float]] = {
+    # Open water, where the correction is worth least relative to the signal:
+    # ESA reads 0.004 at 490 nm and we disagree by ten times that.
+    "water": {4: 0.0486, 6: 0.0252, 8: 0.0094},
+    # Bright: sea ice, snow and cloud. **These are the rows that did not exist
+    # before Phase 6**, and their absence is why an ice pixel was previously
+    # handed the land figure and under-stated by a factor of ten.
+    "bright": {4: 0.0696, 6: 0.0984, 8: 0.0759},
+    "land": {4: 0.0329, 6: 0.0419, 8: 0.0294},
 }
 
-# Where each row above was measured, for the provenance tags.
-VALIDATION_SOURCE: dict[tuple[str, str], str] = {
-    ("water", "rayleigh"): "OL_2_WFR, 1 frame, gas+Rayleigh",
-    ("water", "product"): "OL_2_WFR w_aer per pixel, 1 frame",
-    ("water", "retrieved"): "OL_2_WFR, 1 frame, loading retrieved from the frame",
-    ("land", "rayleigh"): "SY_2_SYN SDR, 55 triples, gas+Rayleigh",
-    ("land", "product"): "SY_2_SYN SDR, 55 triples, SY_2_AOD loading",
+#: Where each row was measured, for the provenance tags.
+VALIDATION_SOURCE: dict[str, str] = {
+    # Named by its product type rather than by the quantity it carries: the
+    # phrase that quantity goes by must not appear in this product's tags, and
+    # OL_2_WFR identifies it without ambiguity anyway.
+    "water": "OL_2_WFR over clear water, 14 comparisons, p68",
+    "bright": "OL_2_WFR over bright pixels, 16 comparisons, p68",
+    "land": "SY_2_SYN SDR, 25 comparisons, p68",
 }
 
-# ``gas`` has no validation row and reports NaN. It is a correction tier nothing
-# was ever validated as a *product*: every end-to-end residual in the plan
-# includes the Rayleigh term, which over water is the largest single term there
-# is. Lending it the gas+Rayleigh row would understate it by most of the
-# Rayleigh path reflectance - 0.10 at 490 nm - and that is a far bigger lie than
-# the propagation trap this module exists to avoid. The tier stays available
-# because it isolates one term for diagnosis; it simply does not get to claim an
+# ``gas`` has no validation row and reports NaN. Every end-to-end residual in
+# this work includes the Rayleigh term, which over water is the largest single
+# term there is, so lending that tier these figures would understate it by most
+# of the Rayleigh path reflectance - 0.10 at 490 nm. The tier stays available
+# because it isolates one term for diagnosis; it does not get to claim an
 # accuracy.
 UNMEASURED_TIERS = frozenset({"gas"})
 
-# The climatological fallback has no validation row of its own either - no frame
-# in the holding was corrected with a stated assumption standing in for its own
-# measured loading. But unlike the gas tier it is **not** unmeasurable, and
-# leaving it NaN was wasteful rather than honest: on the first real frame it put
-# 67 % of the output beyond the uncertainty band's reach, which over land is
-# most of what the product is for.
-#
-# What it costs is the difference between a measured loading and the stated one,
-# and both halves of that are measured:
-#
-# - Across the 47 frames of the holding with a reported ``AOD_550``, the
-#   absolute distance from the stated 0.044 has a 68th percentile of **0.0346**
-#   in optical depth. (Median 0.018, p95 0.131, full range 0.012 to 0.288.)
-# - The sensitivity of surface reflectance to optical depth is **0.10 per unit
-#   depth**, flat to within 10 % across the three visible bands.
-#
-# So the stand-in costs about **0.0035** of reflectance, one sigma, and a
-# climatological pixel reports its surface class's measured ``product`` row with
-# that added in quadrature. This is the one place a propagated term is the whole
-# of a contribution rather than a tenth of it, because here the loading error
-# *is* the thing being described rather than an afterthought beside a reference
-# disagreement.
-CLIMATOLOGICAL_DEPTH_SPREAD = 0.0346
-DEPTH_SENSITIVITY = 0.10
-CLIMATOLOGICAL_EXTRA = CLIMATOLOGICAL_DEPTH_SPREAD * DEPTH_SENSITIVITY
 
-# Which measured row a tier without one of its own borrows, and what it must add
-# in quadrature for the borrowing to be honest.
-BORROWED_ROWS: dict[str, tuple[str, float]] = {
-    "climatological": ("product", CLIMATOLOGICAL_EXTRA),
-}
+def surface_classes(land: np.ndarray, bright: np.ndarray | None = None) -> dict:
+    """The three surface classes the validation was measured in.
 
+    **Bright is a class of its own, and Phase 6 is why.** Before it, pixels were
+    split by the product's land flag alone, so sea ice over ocean took the water
+    row and ice over land took the land row. Measured, the correction is 1.4
+    times worse at 490 nm over bright surfaces than over clear water and nearly
+    ten times worse at 665, so either borrowing understated an ice pixel badly -
+    at 665 nm by a factor of ten.
 
-def surface_classes(land: np.ndarray) -> dict[str, np.ndarray]:
-    """The two surface classes the validation is measured in.
-
-    Deliberately only two, and deliberately the product's own land flag rather
-    than a brightness test. The plan's Q5 established that the useful axis for
-    *interpreting* the error is bright against dark, but the axis the error was
-    *measured* along is land against water, because that is how the two
-    reference products divide. Classifying by brightness here would index the
-    table with something it was not measured against.
+    Land against water remains the split for the two clear classes because that
+    is how the reference products divide: ``SY_2_SYN`` over land, ``OL_2_WFR``
+    over water.
     """
     land = np.asarray(land, dtype=bool)
-    return {"land": land, "water": ~land}
+    if bright is None:
+        bright = np.zeros(land.shape, dtype=bool)
+    bright = np.asarray(bright, dtype=bool)
+    return {
+        "bright": bright,
+        "water": ~land & ~bright,
+        "land": land & ~bright,
+    }
 
 
 def loading_sensitivity(
@@ -205,20 +189,21 @@ def uncertainty(
     *,
     land: np.ndarray,
     tier: str,
+    bright: np.ndarray | None = None,
     aerosol_source: np.ndarray | None = None,
     depth_uncertainty=None,
     sensitivity=None,
 ):
     """The per-pixel absolute uncertainty, and why each pixel got the figure it did.
 
-    ``tier`` is the correction tier actually applied (``"none"``, ``"gas"``,
-    ``"rayleigh"`` or ``"full"``); ``aerosol_source`` is the per-pixel integer
-    from :func:`pysent._aerosol_retrieval.filled_loading`, present only for
-    ``"full"``.
+    Indexed by **surface class** rather than by aerosol tier. The tier split was
+    a guess at what would matter and Phase 6 measured what actually does: the
+    surface. The published figures were taken end to end through the shipped
+    correction with its own climatological fill in place, so they already
+    contain whatever that fill costs.
 
-    Returns the uncertainty array and a dict of boolean reason masks, so a
-    caller can report *why* a pixel has no figure instead of only that it has
-    none.
+    Returns the uncertainty array and boolean reason masks, so a caller can
+    report *why* a pixel has no figure rather than only that it has none.
     """
     land = np.asarray(land, dtype=bool)
     shape = land.shape
@@ -226,47 +211,47 @@ def uncertainty(
     inferred = np.zeros(shape, dtype=bool)
     unmeasured = np.zeros(shape, dtype=bool)
 
-    # Which validation row each pixel indexes. Without an aerosol tier every
-    # pixel is on the "none" row; with one, the row follows that pixel's own
-    # loading source, because a retrieved and a guessed loading are not equally
-    # trustworthy and must not share a figure.
-    if tier == "full" and aerosol_source is not None:
-        source = np.asarray(aerosol_source)
-        tiers = {name: source == code for code, name in
-                 ((0, "retrieved"), (1, "product"), (2, "climatological"))}
-    else:
-        tiers = {tier: np.ones(shape, dtype=bool)}
+    if tier in UNMEASURED_TIERS:
+        return values, {
+            "inferred_from_neighbour": inferred,
+            "unmeasured": np.ones(shape, dtype=bool),
+        }
 
-    for tier_name, selected in tiers.items():
-        if not selected.any():
+    retrieved = None
+    if aerosol_source is not None:
+        retrieved = np.asarray(aerosol_source) == 0
+
+    for class_name, in_class in surface_classes(land, bright).items():
+        if not in_class.any():
             continue
-        if tier_name in UNMEASURED_TIERS:
-            unmeasured |= selected
+        row = VALIDATION_RESIDUAL.get(class_name)
+        if row is None:
+            unmeasured |= in_class
             continue
-        # A tier with no row of its own borrows one, and pays for the borrowing
-        # with a measured term added in quadrature.
-        row_tier, extra = BORROWED_ROWS.get(tier_name, (tier_name, 0.0))
-        for class_name, in_class in surface_classes(land).items():
-            where = selected & in_class
+        # A band the retrieval fits cannot measure its own accuracy: it was
+        # driven to agree with a reference that is itself near zero, so its
+        # residual understates the error. Only the pixels whose loading really
+        # was retrieved are affected.
+        # Only a fitted band, and only where its loading really was retrieved.
+        # Starting this at anything other than "nothing" sends every ordinary
+        # band down the inference path.
+        fitted = np.zeros(shape, dtype=bool)
+        if band in FITTED_BANDS and retrieved is not None:
+            fitted = in_class & retrieved
+            inferred |= fitted
+        plain = in_class & ~fitted
+        for where, which in ((plain, band), (in_class & fitted, INFERRED_FROM)):
             if not where.any():
                 continue
-            row = VALIDATION_RESIDUAL.get((class_name, row_tier))
-            if row is None:
+            if which not in row:
                 unmeasured |= where
                 continue
-            # A band the retrieval fits cannot measure its own accuracy.
-            take = band
-            if tier_name == "retrieved" and band in FITTED_BANDS:
-                take = INFERRED_FROM
-                inferred |= where
-            if take not in row:
-                unmeasured |= where
-                continue
-            values = np.where(where, np.hypot(row[take], extra), values)
+            values = np.where(where, row[which], values)
 
-    # The loading's own uncertainty, propagated - the quadrature partner, not
-    # the headline. Absent where no loading uncertainty is available, which is
-    # most of the time, since SY_2_AOD carries one and the retrieval does not.
+    # The loading's own uncertainty, propagated. This is the one term that may
+    # be added, because it describes a *different* loading from the one the
+    # figures above were measured with - a caller supplying SY_2_AOD's
+    # AOD_*_uncertainty is describing their own input, not ours.
     if depth_uncertainty is not None and sensitivity is not None:
         propagated = np.abs(np.asarray(sensitivity, dtype=np.float64)) * np.abs(
             np.asarray(depth_uncertainty, dtype=np.float64)
@@ -277,15 +262,11 @@ def uncertainty(
             values,
         )
 
-    # The aerosol table's own interpolation error is deliberately **not** added
-    # here, and the reason is easy to get backwards. It looks like a missing
-    # term - ``aerosol_terms`` reports it per pixel, and an uncertainty should
-    # be conservative. But the figures above are residuals measured *through
-    # these same tables*: every interpolation error the tables commit was
-    # already present in the validation run that produced the number. Adding it
-    # again would double-count it. The same argument rules out adding the
-    # scalar-Rayleigh error and the gas coefficients' error: a measured
-    # end-to-end disagreement already contains every term the chain commits.
+    # Nothing else is added. The tables' interpolation error, the scalar
+    # Rayleigh error and the gas coefficients' error are all already inside
+    # these numbers, because the numbers are end-to-end disagreements measured
+    # through the chain that commits them. Adding any of them again
+    # double-counts it.
     unmeasured |= ~np.isfinite(values)
     return values, {"inferred_from_neighbour": inferred, "unmeasured": unmeasured}
 
@@ -294,18 +275,14 @@ def uncertainty_note(tier: str) -> str:
     """One line for the provenance tags, naming what the figure actually is.
 
     The wording matters as much as the number. "Empirical agreement with ESA
-    Level-2" is a claim a reader can check and bound; "uncertainty" on its own
+    Level-2" is a claim a reader can check and bound; "uncertainty" alone
     invites them to read it as a propagated error budget, which it is not.
     """
     if tier in UNMEASURED_TIERS:
         return f"not measured for the {tier!r} tier; the band is NaN throughout"
-    wanted = ("product", "retrieved") if tier == "full" else ("rayleigh",)
-    rows = sorted(
-        source
-        for (_, tier_name), source in VALIDATION_SOURCE.items()
-        if tier_name in wanted
-    )
     return (
-        "empirical agreement with ESA Level-2 on matched pixels, not a propagated "
-        "error budget; measured from " + "; ".join(rows)
+        "p68 of the absolute disagreement with ESA Level-2 on matched pixels, "
+        "measured through this correction end to end; not a propagated error "
+        "budget. From " + "; ".join(VALIDATION_SOURCE[name]
+                                    for name in ("water", "bright", "land"))
     )
