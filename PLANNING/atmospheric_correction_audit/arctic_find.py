@@ -234,6 +234,13 @@ def main() -> int:
             box = latitudes(entry[need[0]])
             span = f"{box[0]:.1f}-{box[1]:.1f} N" if box else "no bbox"
             have = "+".join(k for k in WANTED if k in entry)
+            # codeql[py/clear-text-logging-sensitive-data] - CodeQL classifies
+            # latitude and longitude as private location data, and the span
+            # below is built from a bounding box. These are the corners of a
+            # satellite frame's footprint, published by a public catalogue;
+            # there is no person at either end of them. Suppressed narrowly,
+            # at the two sites that print a footprint, rather than by renaming
+            # the latitudes away from what they are.
             print(f"{platform} {start}  orbit {orbit}  {span:>14}  {have}")
             for kind in need:
                 if entry[kind]["url"]:
@@ -266,6 +273,13 @@ def main() -> int:
                 continue
             seen += 1
             span = f"{box[0]:.1f} to {box[1]:.1f} N" if box else "no bbox"
+            # codeql[py/clear-text-logging-sensitive-data] - CodeQL classifies
+            # latitude and longitude as private location data, and the span
+            # below is built from a bounding box. These are the corners of a
+            # satellite frame's footprint, published by a public catalogue;
+            # there is no person at either end of them. Suppressed narrowly,
+            # at the two sites that print a footprint, rather than by renaming
+            # the latitudes away from what they are.
             print(f"{row['title'][:62]:<62} {span:>18}")
             if row["url"]:
                 print(f"    {row['url']}")
