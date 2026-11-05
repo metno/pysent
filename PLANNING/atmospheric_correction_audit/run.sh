@@ -15,6 +15,7 @@
 #   run.sh aerosol          A6: what the aerosol product holds over the land frame
 #   run.sh retrieval        A11: can the loading be retrieved from Level-1 alone?
 #   run.sh stretch          Q6: what stretch a corrected picture needs, both platforms
+#   run.sh arctic [month]   A16: Arctic OLCI in the catalogue, and matched L1+WFR sets
 #                               (and the per-pixel T865/A865 reference in WFR)
 #
 # The frames are named here rather than passed in, so a finding is reproduced
@@ -108,6 +109,13 @@ retrieval)
 sweep)
   python3 -I "$here/sweep.py" --count "${2:-28}" --decimate "${3:-8}" 2>&1 |
     grep -vi "runtimewarning\|nanfunctions\|return np\|invalid value\|divide\|mean of empty"
+  ;;
+arctic)
+  # The sea-ice gap of A15. The mounted archive stops at 68.7 N; the catalogue
+  # does not, and its records carry THREDDS URLs, so a frame months outside the
+  # seven-day window is still fetchable. Default box is Fram Strait to Barents.
+  python3 -I "$here/arctic_find.py" --sets --month "${2:-202604}" \
+    --bbox "${3:--10,75,35,85}" --min-lat "${4:-78}" --need l1,wfr
   ;;
 stretch)
   # Q6: what stretch a corrected true-colour picture needs. Both platforms,
