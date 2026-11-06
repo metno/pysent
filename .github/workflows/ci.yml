@@ -3,7 +3,15 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "PLANNING/**"
   pull_request:
+    # A claim or a close changes only PLANNING/ Markdown, and the suite cannot
+    # tell the difference between that and a code change: it would run in full
+    # for a row that moved one character. The planning workflow has no filter
+    # and covers exactly those PRs. docs.yml already filters by path.
+    paths-ignore:
+      - "PLANNING/**"
   workflow_dispatch:
 
 concurrency:
