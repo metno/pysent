@@ -16,6 +16,38 @@ if [[ -f "$root/PLANNING/check_planning.py" ]] && ! python3 "$root/PLANNING/chec
 fi
 refs="$(cat)"
 zero=0000000000000000000000000000000000000000
+# The knowledge branch is never published. Its history predates this project's
+# no-attribution rule, and metno/pysent is public; it is kept in the private
+# memory repo instead, which is what agent-memory on epifanio/pysent-memory is.
+#
+# The test is the destination, not the branch, so a backup push is allowed and
+# a push to the project is not. This lived in .git/hooks/pre-push, which
+# core.hooksPath made git ignore the moment the session system was installed -
+# a guard that silently stopped guarding. Versioned here, it holds on every
+# clone and every worktree.
+remote_url="${2:-}"
+case "$remote_url" in
+  *pysent-memory*)
+    # Backing the branch up to the private memory repo. Its thirty-eight
+    # commits predate both the identity rule and the no-attribution one, and
+    # rewriting archival history to satisfy a rule made later would destroy
+    # the thing being preserved. It never reaches the project, so the checks
+    # that guard the project's history do not apply: let the push through.
+    while read -r lref _lsha _rref _rsha; do
+      [[ "$lref" == "refs/heads/agent-memory" ]] && exit 0
+    done <<< "$refs"
+    ;;
+  *)
+    while read -r lref _lsha _rref _rsha; do
+      if [[ "$lref" == "refs/heads/agent-memory" ]]; then
+        echo "pre-push: refusing to push 'agent-memory' to '$remote' ($remote_url)." >&2
+        echo "          It is never published. Back it up instead:" >&2
+        echo "          git push <memory-remote> agent-memory" >&2
+        exit 1
+      fi
+    done <<< "$refs"
+    ;;
+esac
 if [[ -x "$scripts/check_commit_identity.sh" ]]; then
   while read -r _lref local_sha _rref _rsha; do
     [ -n "$local_sha" ] || continue
