@@ -12,7 +12,7 @@
 # The geo stack comes from Debian packages, not pip: GDAL's Python bindings have
 # no reliable wheel, and mixing an apt GDAL with a pip rasterio (which bundles
 # its own) causes hard-to-debug loader conflicts. This mirrors how the
-# FastAPI-mapserver runtime image is built, so what you benchmark here matches
+# mapping-api runtime image is built, so what you benchmark here matches
 # production.
 FROM debian:forky-slim
 

@@ -6,7 +6,8 @@ actual products, and every open item below is measurable with
 [04_benchmarks.ipynb](notebooks/04_benchmarks.ipynb).
 
 > This was the handoff document of the `test_nbs_pipeline/` QA bundle in the
-> FastAPI-mapserver repository. That bundle has been retired: its notebook is now
+> service repository (then FastAPI-mapserver, now `metno/mapping-api`). That
+> bundle has been retired: its notebook is now
 > [04_benchmarks.ipynb](notebooks/04_benchmarks.ipynb) and its helpers are
 > `pysent.qa`. Section numbering is kept so older references still resolve.
 

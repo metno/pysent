@@ -3,9 +3,9 @@
 Sentinel-1 and Sentinel-2 **SAFE → GeoTIFF quicklook** processing, packaged as a
 library.
 
-This is the processing core that was previously embedded in the
-[FastAPI-mapserver](https://github.com/epifanio/FastAPI-mapserver) ingestion
-service (`core/sentinel_s1.py`, `core/sentinel_s2.py`) and duplicated as a
+This is the processing core that was previously embedded in the ingestion path
+of [mapping-api, MET Norway's OGC service](https://ogc-service.wps.met.no/guide/)
+(`core/sentinel_s1.py`, `core/sentinel_s2.py`) and duplicated as a
 `vendor/` copy inside the QA notebook bundle. It is now one installable package
 that both consume, so the service, the notebooks and any new tooling all run
 **the same code path** — no vendored copies to re-sync.
@@ -56,7 +56,7 @@ and every deployment already gets them from the platform. Provide them one of
 these ways:
 
 ```bash
-# Debian/Ubuntu (what the FastAPI-mapserver image does)
+# Debian/Ubuntu (what the mapping-api image does)
 apt-get install python3-gdal python3-rasterio
 pip install --no-deps pysent
 
