@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Re-runs the findings of PLANNING/TODO_PLANNING_s5p_s3_pipelines.md.
+# Re-runs the findings of the Sentinel-5P/Sentinel-3 pipelines plan.
 #
 #   run.sh survey   OUT.jsonl            catalogue counts, bbox/reference statistics (needs network)
 #   run.sh detect   SAMPLE.jsonl         old vs anchored platform detection (needs network for S1/S2)

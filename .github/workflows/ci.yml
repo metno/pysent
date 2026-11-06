@@ -4,14 +4,14 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - "PLANNING/**"
+      - "evidence/**"
   pull_request:
-    # A claim or a close changes only PLANNING/ Markdown, and the suite cannot
-    # tell the difference between that and a code change: it would run in full
-    # for a row that moved one character. The planning workflow has no filter
-    # and covers exactly those PRs. docs.yml already filters by path.
+    # evidence/ holds the audit scripts that re-derive the numbers in the
+    # library's comments. They are not imported by anything and the suite does
+    # not exercise them, so a change there need not pay a full run. docs.yml
+    # already filters by path.
     paths-ignore:
-      - "PLANNING/**"
+      - "evidence/**"
   workflow_dispatch:
 
 concurrency:

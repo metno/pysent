@@ -29,7 +29,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 #: The new DNS the owner gave on 2026-11-05. The older helper in
-#: PLANNING/s5p_s3_audit hardcodes an IP that this replaces.
+#: evidence/s5p_s3_audit hardcodes an IP that this replaces.
 #:
 #: Overridden by ``--endpoint`` rather than by an environment variable, for two
 #: reasons. An evidence script should carry the service it queried in the

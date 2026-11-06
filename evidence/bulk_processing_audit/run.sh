@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Re-run the audit evidence for PLANNING/PLANNING_bulk_processing.md.
+# Re-run the audit evidence for the bulk-processing plan.
 #
-#   PLANNING/bulk_processing_audit/run.sh checks            # bug checks, synthetic data only
-#   PLANNING/bulk_processing_audit/run.sh bench <DATA_DIR>  # benchmarks, needs the two real products
-#   PLANNING/bulk_processing_audit/run.sh warp-accuracy <DATA_DIR>   # S1 polynomial vs TPS geolocation
+#   evidence/bulk_processing_audit/run.sh checks            # bug checks, synthetic data only
+#   evidence/bulk_processing_audit/run.sh bench <DATA_DIR>  # benchmarks, needs the two real products
+#   evidence/bulk_processing_audit/run.sh warp-accuracy <DATA_DIR>   # S1 polynomial vs TPS geolocation
 #
 # DATA_DIR must hold the S2/S1 zips named in bench.py (download URLs are in
 # tests/data/manifest.json). Everything runs in ubuntu:24.04 with apt GDAL 3.8,

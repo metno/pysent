@@ -62,7 +62,7 @@ S1_OVERVIEW_FACTORS: tuple[int, ...] = (2, 4, 8, 16)
 # SAR is read in dB by convention: the curve compresses the bright end and gives
 # the range to the dark end, where water, radar shadow and smooth ground live.
 # 1-99 rather than 2-98 halves the clipping for a near-identical picture
-# (PLANNING/PLANNING_s1_radiometry.md, measurements A.1).
+# (measured on real frames; see evidence/ for the audit scripts).
 S1_STRETCH_METHOD = "db"
 # Speckle filtering is off by default: it makes a browse image easier to read,
 # but it alters a measurement before anyone sees it (point targets are dimmed,
@@ -463,7 +463,7 @@ def _resolve_gdal_num_threads(requested_threads: object, product_workers: int) -
     # Every product gets all usable CPUs rather than an equal share: a product
     # keeps its threads only partly busy (I/O, single-threaded stretch), so on
     # the benchmark scenes sharing beat splitting by 20-40 % in wall time with
-    # identical output (PLANNING/PLANNING_bulk_processing.md, phase 1 log).
+    # identical output (measured when the bulk pipeline was built).
     # Bulk runners that start several calls at once pass an explicit value.
     return str(available_cpus())
 
