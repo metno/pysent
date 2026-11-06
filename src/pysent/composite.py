@@ -13,7 +13,7 @@ measured on eight Sentinel-5P NO2 granules over a Nordic box, peak memory
 moved from 128 MB to 136 MB *as the eighth was added*.
 
 Four measured facts shape what this module does, all of them in
-``PLANNING/TODO_PLANNING_composites.md``:
+the composites work:
 
 **A composite cannot derive its own grid.** The inputs are the thing being
 combined, and half the granules a spatial catalogue query selects report a

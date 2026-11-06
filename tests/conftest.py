@@ -77,7 +77,7 @@ def s5p_archive() -> Path:
 
     These are too large to commit (4-600 MB each), so the tests that need them
     skip unless ``PYSENT_S5P_ARCHIVE`` points at a directory holding them. Fetch
-    them with the titles in ``PLANNING/TODO_PLANNING_s5p_s3_pipelines.md`` B.7.
+    them by the product titles the Sentinel-5P/Sentinel-3 audit used.
     """
     import os
 

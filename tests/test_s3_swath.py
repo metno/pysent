@@ -3,7 +3,7 @@
 The warp traps here are the expensive kind. None of them raises; each one
 produces a raster of exactly the right size that is empty, shifted, or
 plausible and wrong. The measurements quoted in the tests come from real OLCI
-frames and are reproduced by ``PLANNING/s5p_s3_audit``.
+frames and are reproduced by ``evidence/s5p_s3_audit``.
 """
 import numpy as np
 import pytest

@@ -1,11 +1,11 @@
 """How far the polynomial GCP warp departs from the product's own geolocation grid.
 
-    PLANNING/bulk_processing_audit/run.sh warp-accuracy <DATA_DIR>
+    evidence/bulk_processing_audit/run.sh warp-accuracy <DATA_DIR>
 
 The thin-plate spline interpolates a SAFE product's GCPs exactly, so the numbers
 below are the polynomial transform's departure from the geolocation the product
 ships with - the evidence behind keeping `use_tps=True` as the default
-(PLANNING/PLANNING_bulk_processing.md, finding P5; docs/tuning-and-roadmap.md §4.1b).
+(the bulk-processing plan, finding P5; docs/tuning-and-roadmap.md §4.1b).
 """
 import sys
 from pathlib import Path

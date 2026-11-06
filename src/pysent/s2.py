@@ -203,7 +203,7 @@ def _resolve_gdal_num_threads(requested_threads: object, product_workers: int) -
     # Every product gets all usable CPUs rather than an equal share: a product
     # keeps its threads only partly busy (I/O, single-threaded stretch), so on
     # the benchmark scenes sharing beat splitting by 20-40 % in wall time with
-    # identical output (PLANNING/PLANNING_bulk_processing.md, phase 1 log).
+    # identical output (measured when the bulk pipeline was built).
     # Bulk runners that start several calls at once pass an explicit value.
     return str(available_cpus())
 

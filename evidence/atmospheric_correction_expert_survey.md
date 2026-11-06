@@ -1,6 +1,6 @@
 # OLCI atmospheric correction: the choices we made, for expert review
 
-**Expert-facing page:** <https://claude.ai/code/artifact/ae8af71a-84ac-4405-a309-5ae61fbf28f9>
+**This page:** <https://github.com/metno/pysent/blob/main/evidence/atmospheric_correction_expert_survey.md> — a hosted copy for reviewers without access to the repository is being prepared by the service that commissioned the study
 (private until shared). This file is the source of record; the page is the same content laid out for
 someone who is going to answer the questions rather than maintain the code.
 
@@ -10,7 +10,7 @@ it costs if the choice is wrong** - the last of those being the part that decide
 disagreement matters.
 
 Nothing here is settled by authority. Where a choice rests on a measurement, the measurement is
-reproducible with `PLANNING/atmospheric_correction_audit/run.sh`; where it rests on judgement, it is
+reproducible with `evidence/atmospheric_correction_audit/run.sh`; where it rests on judgement, it is
 marked as such and appears again in the questions at the end.
 
 **Status.** Phases 0-2 are implemented and merged into no branch yet (PR #32); Phase 3 (aerosol) is
@@ -635,4 +635,4 @@ water case is now `20261031T120105` at solar zenith 79.5, and `run.sh` refuses a
 instead of reading empty paths.
 
 The plan, with the audit findings and the phase-by-phase record, is
-`PLANNING/TODO_PLANNING_atmospheric_correction.md`.
+the atmospheric-correction plan.

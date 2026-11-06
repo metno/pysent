@@ -1,6 +1,6 @@
 """The Sentinel-1 grayscale stretch: dB versus linear.
 
-See ``PLANNING/PLANNING_s1_radiometry.md``. Synthetic amplitude fields here;
+Measured on real Sentinel-1 frames when the radiometry work was done. Synthetic amplitude fields here;
 ``test_real_scenes.py`` exercises the same code against real radiometry.
 """
 from __future__ import annotations

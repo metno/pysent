@@ -403,7 +403,7 @@ S3_PRODUCTS.update({
         "aerosol": None,
         # The corrected picture's own stretch - the plan's Q6, answered
         # "separate stretch per mode" on 2026-11-05 - measured by
-        # PLANNING/atmospheric_correction_audit/stretch.py over six S3A frames.
+        # evidence/atmospheric_correction_audit/stretch.py over six S3A frames.
         #
         # Correction does not scale the bands together: it takes about 27 % off
         # 665 nm and 67 % off 490 nm, so the clear-land composite median falls
