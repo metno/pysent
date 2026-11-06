@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Enable once per clone: git config core.hooksPath .githooks (scripts/session.sh start does it; with
+# MODE=overlay, overlay/link.sh points it at overlay/hooks).
+# Before a push: the planning rules (PLANNING/check_planning.py) must be clean, and with the
+# commit-identity module every pushed commit must pass scripts/check_commit_identity.sh. Where
+# scripts/scan.py is installed (MODE=overlay), the pushed branch's name and every pushed commit's
+# message, new paths and added lines must pass the deny-list.
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+scripts="$(cd -P "$(dirname "$0")/.." && pwd -P)/scripts"   # <checkout>/scripts, or overlay/scripts
+remote="${1:-origin}"
+if [[ -f "$root/PLANNING/check_planning.py" ]] && ! python3 "$root/PLANNING/check_planning.py" >/dev/null 2>&1; then
+  echo "pre-push: PLANNING/check_planning.py reports errors; fix them, then push:" >&2
+  python3 "$root/PLANNING/check_planning.py" >&2 || true
+  exit 1
+fi
+refs="$(cat)"
+zero=0000000000000000000000000000000000000000
+if [[ -x "$scripts/check_commit_identity.sh" ]]; then
+  while read -r _lref local_sha _rref _rsha; do
+    [ -n "$local_sha" ] || continue
+    [ "$local_sha" = "$zero" ] && continue
+    base=$(git merge-base "$local_sha" origin/main 2>/dev/null || true)
+    "$scripts/check_commit_identity.sh" "${base:+$base..}$local_sha"
+  done <<< "$refs"
+fi
+if [[ -f "$scripts/scan.py" ]]; then
+  bad=0
+  while read -r lref local_sha rref _rsha; do
+    [ -n "$local_sha" ] || continue
+    [ "$local_sha" = "$zero" ] && continue
+    for name in "${lref#refs/heads/}" "${rref#refs/heads/}"; do
+      python3 "$scripts/scan.py" -q --label "branch name" --text "$name" >&2 || bad=1
+    done
+    # what this push adds: the commits no ref of the remote holds yet
+    python3 "$scripts/scan.py" -q --repo "$root" --git-range "$local_sha --not --remotes=$remote" >&2 || bad=1
+  done <<< "$refs"
+  if [[ $bad != 0 ]]; then
+    echo "pre-push: refused: the lines above break the deny-list ($scripts/scan.py). Rename the branch, or rewrite those commits on your own branch before it has a PR." >&2
+    exit 1
+  fi
+fi
