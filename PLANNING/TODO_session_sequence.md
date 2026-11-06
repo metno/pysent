@@ -51,15 +51,15 @@ recorded it yet (`WORKFLOW.md` §8).
 
 | Unit | Now | Since (UTC) | Recorded by | Read with | Rollback · notes |
 |---|---|---|---|---|---|
-| Released version | — | 2026-11-06 | `setup-session-system` | — (fill in the command that reads what is published) | nothing deployed by a session yet |
-| `main` — working state | — | 2026-11-06 | `setup-session-system` | the project's own test command, on an up-to-date `main` | no session has run the suite and recorded it yet; not a deployment |
+| Released version | not released — consumers pin a commit; `metno/mapping-api` pins `0bc5732` | 2026-11-06 | `setup-session-system` | `gh api repos/metno/mapping-api/contents/requirements.txt --jq .content \| base64 -d \| grep -i pysent` | nothing to roll back: a merge here publishes nothing. The pin is far behind `main` and bumping it is a PR in that repository |
+| `main` — working state | `5581144` — 592 passed, 18 skipped | 2026-11-06 | `setup-session-system` | `docker run --rm -v "$PWD:/src:ro" pysent-ci:noble bash /run-tests.sh` | not a deployment. 596/14 with numba (`/run-tests.sh numba`) |
 
-### Slot 1 — <lane A>
+### Slot 1 — L library (`src/`, `tests/`, `tools/`, `scripts/`)
 
 | Mark | Session | Who | Work | Prompt | Receipt / notes |
 |---|---|---|---|---|---|
 
-### Slot 2 — <lane B, …>
+### Slot 2 — D docs (`docs/`, `README.md`, `examples/`)
 
 | Mark | Session | Who | Work | Prompt | Receipt / notes |
 |---|---|---|---|---|---|
