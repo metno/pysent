@@ -1,9 +1,16 @@
 # Sentinel-3 review-study findings: audit and fixes
 
-**Goal:** fix what the FastAPI-mapserver Sentinel-3 review study (`seq-I9-s3-review-study`,
-2026-10-31) found in pysent's Sentinel-3 code. Seven items: three plain bugs, three limitations and
-one observation for the owner. **Item R1 blocks the study's full run**, by the owner's word, so it is
-Phase 1 on its own.
+> **The consuming service's repository moved on 2026-11-06.** What this file calls
+> FastAPI-mapserver is now **`metno/mapping-api`**; the old repository is archived,
+> private and read-only, and is named below only as history. The service itself did
+> not change - <https://ogc-service.wps.met.no>, guide at
+> <https://ogc-service.wps.met.no/guide/> - so every service link in this file still
+> resolves.
+
+**Goal:** fix what the Sentinel-3 review study (`seq-I9-s3-review-study`, 2026-10-31) run by the
+consuming service - then FastAPI-mapserver, now `metno/mapping-api` - found in pysent's Sentinel-3
+code. Seven items: three plain bugs, three limitations and one observation for the owner. **Item R1
+blocks the study's full run**, by the owner's word, so it is Phase 1 on its own.
 
 | | |
 |---|---|
@@ -11,7 +18,7 @@ Phase 1 on its own.
 | Base | `main` @ `3a147c3` (2026-10-30) |
 | Status | **All seven items addressed and Q1/Q4/Q5 answered.** R1, R3-R7 fixed; R2 diagnosed, and the sample is now in hand. |
 | Audit evidence | [`s3_review_audit/`](s3_review_audit/) |
-| Comes from | the FastAPI-mapserver study's report, relayed 2026-10-31; the closed `PLANNING_s5p_s3_pipelines.md` is the code's own plan |
+| Comes from | the service's study report (`metno/mapping-api`, then FastAPI-mapserver), relayed 2026-10-31; the closed `PLANNING_s5p_s3_pipelines.md` is the code's own plan |
 
 **Constraints carried in from the report and from the earlier plans:**
 
