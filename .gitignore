@@ -15,7 +15,13 @@ executed/
 # Local editor/tool state - never publish.
 # Anchored to the repo root so these can never shadow a source directory of the
 # same name (e.g. a future src/pysent/memory/).
-/.claude/
+# The session system's own files are committed: every session and every machine
+# needs the same hooks and skills. What stays out is the personal and the
+# transient - a machine's own override, and anything Claude Code writes itself.
+/.claude/*
+!/.claude/settings.json
+!/.claude/skills/
+/.claude/settings.local.json
 /.cursor/
 /.aider*
 /AGENT/
