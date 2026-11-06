@@ -1,5 +1,9 @@
 # Sentinel-5P and Sentinel-3 processing pipelines
 
+> **The consuming service's repository moved on 2026-11-06**, to **`metno/mapping-api`**
+> from the now-archived FastAPI-mapserver. The service is unchanged and every
+> `ogc-service.wps.met.no` link below still resolves; only the code's home is different.
+
 **Goal:** let the service offer **Ingest** for the Sentinel-5P and Sentinel-3 products of the NBS catalogue,
 the way it does today for S1 GRD and S2 L1C: pysent turns one catalogue product into a GeoTIFF the service
 publishes through WMS/WCS/WFS. This file is the plan. **No pipeline code exists yet**; everything below that is
