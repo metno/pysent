@@ -1,5 +1,9 @@
 # Sentinel-1 radiometry: dB stretch and speckle filtering
 
+> **Superseded 2026-11-06 by [`PLANNING/WORKFLOW.md`](../WORKFLOW.md)**, when the session system
+> was installed. Kept for its history and for the project facts it still holds. Where this file and
+> `WORKFLOW.md` disagree about *process*, `WORKFLOW.md` wins and this file is not updated.
+
 **Goal:** make the S1 quicklook read the way SAR is meant to be read. Two items have sat in
 "known tuning work" without measurements behind them: the **linear amplitude stretch** and the
 absence of any **speckle filtering**. Measure both on a real scene, let the user choose the

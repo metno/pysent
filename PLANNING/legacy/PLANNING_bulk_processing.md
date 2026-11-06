@@ -1,5 +1,9 @@
 # Bulk SAFE → GeoTIFF processing: audit and plan
 
+> **Superseded 2026-11-06 by [`PLANNING/WORKFLOW.md`](../WORKFLOW.md)**, when the session system
+> was installed. Kept for its history and for the project facts it still holds. Where this file and
+> `WORKFLOW.md` disagree about *process*, `WORKFLOW.md` wins and this file is not updated.
+
 **Goal:** let users convert many Sentinel-1/2 SAFE products to GeoTIFF reliably and fast, using
 multiprocessing, with a ready-to-use `examples/` directory. First fix the library bugs and costs that
 break or slow that use case.

@@ -1,5 +1,9 @@
 # Atmospheric correction for OLCI: audit and phases
 
+> **Superseded 2026-11-06 by [`PLANNING/WORKFLOW.md`](../WORKFLOW.md)**, when the session system
+> was installed. Kept for its history and for the project facts it still holds. Where this file and
+> `WORKFLOW.md` disagree about *process*, `WORKFLOW.md` wins and this file is not updated.
+
 **Goal.** Turn pysent's top-of-atmosphere OLCI reflectance into **surface reflectance**, all three
 tiers: gaseous absorption, Rayleigh scattering, and aerosol. Judged against ESA's own corrected
 products for the same acquisition, not against our own expectations.

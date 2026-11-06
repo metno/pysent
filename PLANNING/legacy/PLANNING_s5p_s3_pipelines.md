@@ -1,5 +1,9 @@
 # Sentinel-5P and Sentinel-3 processing pipelines
 
+> **Superseded 2026-11-06 by [`PLANNING/WORKFLOW.md`](../WORKFLOW.md)**, when the session system
+> was installed. Kept for its history and for the project facts it still holds. Where this file and
+> `WORKFLOW.md` disagree about *process*, `WORKFLOW.md` wins and this file is not updated.
+
 > **The consuming service's repository moved on 2026-11-06**, to **`metno/mapping-api`**
 > from the now-archived FastAPI-mapserver. The service is unchanged and every
 > `ogc-service.wps.met.no` link below still resolves; only the code's home is different.
