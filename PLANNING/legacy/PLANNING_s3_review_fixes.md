@@ -1,5 +1,9 @@
 # Sentinel-3 review-study findings: audit and fixes
 
+> **Superseded 2026-11-06 by [`PLANNING/WORKFLOW.md`](../WORKFLOW.md)**, when the session system
+> was installed. Kept for its history and for the project facts it still holds. Where this file and
+> `WORKFLOW.md` disagree about *process*, `WORKFLOW.md` wins and this file is not updated.
+
 > **The consuming service's repository moved on 2026-11-06.** What this file calls
 > FastAPI-mapserver is now **`metno/mapping-api`**; the old repository is archived,
 > private and read-only, and is named below only as history. The service itself did
