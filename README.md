@@ -31,6 +31,7 @@ results = process_sentinel_s2_safe(
 |---|---|
 | `pysent.s1` | Sentinel-1 amplitude quicklooks from SAFE or NetCDF: GCP warp (TPS or polynomial), dB or linear percentile stretch + alpha, tiled/compressed GeoTIFF with overviews. Handles **VV/VH, HH/HV and single-pol** products. |
 | `pysent.s2` | Sentinel-2 RGB band combinations from SAFE: one stacked-VRT warp per scene, per-band percentile stretch with gamma (or min/max), tiled/compressed 8-bit RGB with overviews. |
+| `pysent.vrt` | The same S1/S2 pictures as **GDAL VRTs over the SAFE zip**: the scene statistics computed once and baked in, no pixels copied (S1 adds a small overview sidecar). See [Zero-copy VRTs](#zero-copy-vrts). |
 | `pysent.profiles` | Platform detection (S1 vs S2) from any textual hint, plus per-platform profile defaults. |
 | `pysent.archive` | Catalogue download URL → local archive path; UUID → local SAFE resolution. |
 | `pysent.csw` | CSW record lookup (needs the `csw` extra). |
@@ -305,6 +306,65 @@ is written for Sentinel-1 SAFE only; `PYSENT_SPECKLE_WINDOW` and
 `histogram_stretch` is off. Each result dict returns the same mapping as
 `provenance`, so a caller can record it without reopening the file. The pixels
 are unchanged: a real S1 and S2 scene give the same pixel digest before and after.
+
+## Zero-copy VRTs
+
+`pysent.vrt` writes the picture the GeoTIFF functions write as a GDAL VRT: a
+few kilobytes of XML whose sources are the files inside the SAFE zip, read
+through `/vsizip/` with nothing unpacked. Anything that reads GDAL (a map
+server, QGIS, `gdal_translate`) then decodes and stretches on every read.
+
+```python
+from pysent.vrt import build_sentinel_s1_vrt, build_sentinel_s2_vrt
+
+s2 = build_sentinel_s2_vrt(
+    input_dataset="/archive/S2B/2026/11/15/S2B_MSIL1C_..._T38WNS_....zip",
+    product="true_color_vegetation",          # or three band names
+    output_path="/srv/vrt/t38wns/true_color_vegetation.vrt",
+)
+s1 = build_sentinel_s1_vrt(
+    input_dataset="/archive/S1C/2026/11/16/IW/S1C_IW_GRDH_1SDV_....zip",
+    polarisation="VV",
+    output_path="/srv/vrt/s1c/amplitude_vv.vrt",
+    processing_options={"use_tps": False},
+)
+```
+
+A VRT holds fixed numbers, so the stretch statistics are computed once, at build
+time, **the same way the GeoTIFF path computes them**, and written into the VRT
+as a lookup table:
+
+- **Sentinel-2**: the product's bands on the tile's own grid (no warp: the tile
+  is already in UTM; a 20 m band is read at 10 m by nearest neighbour, as the
+  GeoTIFF path does), the 0.5–99.5 percentile and gamma-0.7 curve per band into
+  `[1, 255]`, 0 for NoData. On real scenes the VRT is **pixel-identical** to the
+  GeoTIFF. Zoomed out, GDAL reads the JPEG 2000 resolution levels, so no
+  overviews are needed: **only the VRT is written** (about 17 kB), in about 3 s.
+  An NBS Sentinel-2 netCDF (`.nc`) works too; its coordinates label the tile's
+  corners as pixel centres, which places it half a pixel north-west, and the
+  builder undoes that, so the picture is again the SAFE's. On a read-only mount
+  the netCDF needs `HDF5_USE_FILE_LOCKING=FALSE` in the environment.
+- **Sentinel-1**: a warped VRT over the SAFE measurement (the same GCP warp,
+  `use_tps` honoured), the dB (or linear) 1–99 percentile curve on the amplitude,
+  gray + alpha. A SAFE measurement TIFF has no overviews and one-line strips, so
+  a zoomed-out read would decode the whole scene. The builder therefore warps the
+  scene once (about the time of the GeoTIFF path) and writes a **sidecar** next to
+  the VRT: `<name>.vrt.ovr`, GDAL's external overviews from x4 (the GeoTIFF's own
+  x4, x8, x16 levels, pixel for pixel), and `<name>.vrt.alpha.tif`, the
+  full-resolution mask, so that only the gray band is warped on a fine-zoom read.
+  About 2.3 MB in all, against 10–11 MB for the JPEG GeoTIFF; the full
+  resolution is warped from the SAFE at read time. It is not bit-identical to the
+  GeoTIFF: GDAL's approximate transform is fitted per chunk, and a VRT is read in
+  other chunks than the GeoTIFF was written in, so a pixel moves by a grey level
+  or two. The JPEG of today's GeoTIFF moves pixels by far more.
+
+What a VRT cannot express is refused rather than silently dropped: the Lee
+speckle filter, a Sentinel-2 preset or output grid other than the tile's own,
+`histogram_stretch=False`. Each VRT carries the same `PYSENT_*` metadata as a
+GeoTIFF, plus `PYSENT_OUTPUT=vrt` (and, for Sentinel-1, `PYSENT_OVERVIEW_FACTORS`),
+and the result dict returns it with the numbers baked in (`stretch`) and the
+files the VRT reads (`sources`). The library knows nothing about a map server:
+where the VRT lives and how it is served is the caller's business.
 
 ## Performance
 

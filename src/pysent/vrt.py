@@ -16,16 +16,18 @@ once here, exactly as the GeoTIFF path computes them, and baked in:
     already in UTM; 20 m bands are read at 10 m by nearest neighbour, as the
     GeoTIFF path does). Each band's percentile/gamma curve becomes a ``<LUT>``
     into ``[1, 255]``, 0 staying NoData. Zoomed out, GDAL reads the JPEG 2000
-    resolution levels, so no overviews are needed. Writes only the VRT.
+    resolution levels, so no overviews are needed. Writes only the VRT. An NBS
+    netCDF works as the source too, its half-pixel coordinate shift undone.
 
 ``build_sentinel_s1_vrt``
     A warped VRT over the SAFE measurement band (the GCP warp of the GeoTIFF
-    path, kept inline), stretched to gray + alpha by a ``<LUT>`` on the
-    amplitude. A SAFE measurement TIFF has no overviews and one-line strips, so
-    a zoomed-out read would decode the whole scene: the builder therefore also
-    writes the coarse levels (x4 and up by default) as the VRT's external
-    overview file ``<name>.vrt.ovr``. Finer than the first overview, every read
-    is a warp of the SAFE at request time.
+    path, kept inline), stretched to gray by a ``<LUT>`` on the amplitude. A
+    SAFE measurement TIFF has no overviews and one-line strips, so a zoomed-out
+    read would decode the whole scene: the builder warps the scene once and
+    writes a sidecar, the coarse levels (x4 and up by default) as the VRT's
+    external overview file ``<name>.vrt.ovr`` and the full-resolution alpha as
+    ``<name>.vrt.alpha.tif``. Finer than the first overview, a read warps the
+    gray band from the SAFE at request time.
 
 Neither builder knows anything about a map server: the caller decides where
 the VRT lives and how it is served.
