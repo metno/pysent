@@ -146,6 +146,36 @@ steep terrain is exactly what a polynomial cannot model, so treat this as a floo
 guarantee. Reproduce with `gdal.Transformer(ds, None, ["METHOD=GCP_POLYNOMIAL", ...])` against
 `ds.GetGCPs()`.
 
+### 4.1c Serving from VRTs instead of GeoTIFFs (`pysent.vrt`)
+
+Measured 2026-11-16 in mapping-api's image (GDAL 3.13.3, MapServer 8.6.6,
+`map2img`, one 512×512 render per fresh process, the SAFE on Lustre and in the
+page cache) on 3 Sentinel-2 tiles and 3 Sentinel-1 scenes (6 products).
+
+| Product | Build | Written | Pixels vs the GeoTIFF |
+|---|---:|---|---|
+| S2 VRT, from the SAFE | 1.4–15 s per product | the VRT, ~17 kB | identical, whole scene, 9 products |
+| S2 VRT, from the NBS netCDF | 4–7 s | the VRT | identical to the SAFE VRT once the half-pixel label shift is undone |
+| S1 VRT + sidecar | 16–42 s per polarisation | VRT 52 kB, `.ovr` 2.1–2.5 MB, alpha 0.2 MB | mean 0.05–0.26 grey levels, p99 ≤ 2, against the same run written losslessly; today's JPEG GeoTIFF differs from that by 6.6–7.6 |
+
+| 512 px render through MapServer | whole scene | x8 | x4 | x3–x4 | x2 | x1 |
+|---|---:|---:|---:|---:|---:|---:|
+| S2 GeoTIFF | 0.13 | 0.13 | 0.13 | | 0.13 | 0.11 |
+| S2 VRT (SAFE) | 0.5–0.9 | 0.3–0.6 | 0.3–0.8 | | 0.3–0.8 | 0.2–0.4 |
+| S2 VRT (netCDF, no overviews) | 2.8 | | 0.9 | | | 0.7 |
+| S1 GeoTIFF | 0.15 | 0.20 | 0.22 | | | 0.21 |
+| S1 VRT, `GDAL_CACHEMAX=1024` | 0.15 | 0.18 | 2.6–3.0 | 2.0–2.7 | 1.2–1.4 | 0.8–1.1 |
+| S1 VRT, `GDAL_CACHEMAX=256` | 0.15 | 0.18 | > 40 | > 40 (up to 290) | 1.3–200 | 0.6 |
+
+The S1 rows between x1 and x4 are warps of the SAFE at request time. A SAFE
+measurement TIFF is stored in one-line strips the swath wide (~53 kB each), and
+the source window of a rotated swath spans thousands of them; with a small block
+cache GDAL evicts strips it still needs and reads them again, and a render goes
+from seconds to minutes. `GTIFF_DIRECT_IO=YES` helps up to a 1536 px window and
+not beyond. A cold read adds up to ~1.5 s (440 MB of strips at the 315 MB/s
+measured on Lustre). Storing x2 as well moves the problem to smaller windows and
+grows the sidecar to ~10 MB, the size of the GeoTIFF it replaces.
+
 ### 4.2 Output quality
 - **S2 percentile stretch: shipped** (2026-09-21). Defaults are
   `stretch_method="percentile"`, `stretch_percentiles=(0.5, 99.5)` and
