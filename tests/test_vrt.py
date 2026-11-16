@@ -170,6 +170,69 @@ def test_s2_vrt_refuses_what_it_cannot_express(tmp_path, s2_scene, kwargs, messa
         build_sentinel_s2_vrt(**arguments)
 
 
+def _write_nbs_netcdf(path: Path, bands: dict, x0: float, y0: float, res: float, wkt: str, *, label_corners: bool) -> Path:
+    """A netCDF laid out as NBS writes Sentinel-2: one 10 m variable per band, a ``crs`` grid mapping.
+
+    NBS's ``x``/``y`` hold the tile's corner values (``label_corners``), which a
+    CF reader takes for pixel centres; ``label_corners=False`` writes true centres.
+    """
+    root_ds = gdal.GetDriverByName("netCDF").CreateMultiDimensional(str(path))
+    root = root_ds.GetRootGroup()
+    height, width = next(iter(bands.values())).shape
+    dim_y = root.CreateDimension("y", None, None, height)
+    dim_x = root.CreateDimension("x", None, None, width)
+    shift = 0.0 if label_corners else res / 2.0
+    string = gdal.ExtendedDataType.CreateString()
+
+    def attribute(array, key, value):
+        array.CreateAttribute(key, [], string).Write(value)
+
+    for name, dim, values, axis in (
+        ("x", dim_x, x0 + shift + np.arange(width) * res, "X"),
+        ("y", dim_y, y0 - shift - np.arange(height) * res, "Y"),
+    ):
+        coordinate = root.CreateMDArray(name, [dim], gdal.ExtendedDataType.Create(gdal.GDT_Float64))
+        coordinate.Write(values)
+        attribute(coordinate, "standard_name", f"projection_{name}_coordinate")
+        attribute(coordinate, "units", "m")
+        attribute(coordinate, "axis", axis)
+    crs = root.CreateMDArray("crs", [], gdal.ExtendedDataType.Create(gdal.GDT_Int32))
+    attribute(crs, "crs_wkt", wkt)
+    attribute(crs, "spatial_ref", wkt)
+    for name, data in bands.items():
+        variable = root.CreateMDArray(name, [dim_y, dim_x], gdal.ExtendedDataType.Create(gdal.GDT_UInt16))
+        variable.Write(np.ascontiguousarray(data))
+        attribute(variable, "grid_mapping", "crs")
+    root_ds = None
+    return path
+
+
+@pytest.mark.parametrize("label_corners", [True, False])
+def test_s2_vrt_from_the_netcdf_is_the_safe_picture(tmp_path, s2_scene, label_corners):
+    """The NBS netCDF holds the SAFE's pixels; its half-pixel label shift is undone."""
+    if gdal.GetDriverByName("netCDF") is None:
+        pytest.skip("GDAL built without netCDF")
+    product = "false_color_vegetation"  # B8A is a 20 m band: the netCDF holds it at 10 m
+    from_safe = build_sentinel_s2_vrt(input_dataset=s2_scene["input"], product=product, output_path=tmp_path / "safe.vrt")
+    data = {}
+    for band in S2_DEFAULT_PRODUCTS[product]:
+        array = gdal.Open(s2_scene["sources"][band]["subdataset_name"]).ReadAsArray()
+        data[band] = np.repeat(np.repeat(array, 2, 0), 2, 1) if band == "B8A" else array
+    safe = gdal.Open(from_safe["path"])
+    x0, res, _, y0, _, _ = safe.GetGeoTransform()
+    nc = _write_nbs_netcdf(tmp_path / "scene.nc", data, x0, y0, res, safe.GetProjectionRef(), label_corners=label_corners)
+    if label_corners:  # what a CF reader makes of NBS's file
+        assert gdal.Open(f'NETCDF:"{nc}":B4').GetGeoTransform()[0] == x0 - res / 2
+
+    from_nc = build_sentinel_s2_vrt(input_dataset=str(nc), product=product, output_path=tmp_path / "nc.vrt")
+    netcdf = gdal.Open(from_nc["path"])
+    assert netcdf.GetGeoTransform() == safe.GetGeoTransform()
+    np.testing.assert_array_equal(netcdf.ReadAsArray(), safe.ReadAsArray())
+    assert from_nc["stretch"] == from_safe["stretch"]
+    assert from_nc["target_epsg"] == "EPSG:32635"
+    assert from_nc["sources"] == [f'NETCDF:"{nc}":{band}' for band in S2_DEFAULT_PRODUCTS[product]]
+
+
 # --------------------------------------------------------------------------- #
 # Sentinel-1
 # --------------------------------------------------------------------------- #

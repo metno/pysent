@@ -139,6 +139,70 @@ def _s2_band_file(subdataset_name: str, band_name: str) -> str:
     return matches[0]
 
 
+def _s2_band_entry(name: str, file_name: str, geotransform: Sequence[float] | None = None) -> dict[str, Any]:
+    with gdal_errors():
+        dataset = gdal.Open(file_name, gdal.GA_ReadOnly)
+    band = dataset.GetRasterBand(1)
+    if band.DataType != gdal.GDT_UInt16:
+        raise RuntimeError(f"Sentinel-2 band {name} is {gdal.GetDataTypeName(band.DataType)}, not UInt16")
+    return {
+        "name": name,
+        "file": file_name,
+        "width": dataset.RasterXSize,
+        "height": dataset.RasterYSize,
+        "block": band.GetBlockSize(),
+        "geotransform": tuple(geotransform or dataset.GetGeoTransform()),
+        "srs": dataset.GetProjectionRef(),
+    }
+
+
+def _is_netcdf(input_dataset: str) -> bool:
+    text = str(input_dataset or "").strip()
+    return text.lower().endswith(".nc") or text.upper().startswith("NETCDF:")
+
+
+def _epsg_of(wkt: str) -> str | None:
+    from osgeo import osr
+
+    srs = osr.SpatialReference()
+    if not wkt or srs.ImportFromWkt(wkt) != 0:
+        return None
+    srs.AutoIdentifyEPSG()
+    code = srs.GetAuthorityCode(None)
+    return f"EPSG:{code}" if code else None
+
+
+def _s2_netcdf_band(input_dataset: str, band_name: str) -> dict[str, Any]:
+    """One band of an NBS Sentinel-2 netCDF, on the tile's true grid.
+
+    The NBS netCDF holds the SAFE's pixels unchanged (the 20 m and 60 m bands
+    repeated to 10 m), but its ``x``/``y`` coordinates are the tile's corner
+    values rather than pixel centres. A CF reader, GDAL included, therefore
+    places the image half a pixel north-west of the tile. Sentinel-2 tile
+    corners lie on the 60 m grid, so an origin half a pixel off the pixel grid
+    is that shift, and it is undone here; any other origin is used as read.
+    """
+    text = str(input_dataset).strip()
+    path = text.split(":", 1)[1].rsplit(":", 1)[0].strip('"') if text.upper().startswith("NETCDF:") else text
+    file_name = f'NETCDF:"{path}":{band_name}'
+    try:
+        with gdal_errors():
+            dataset = gdal.Open(file_name, gdal.GA_ReadOnly)
+    except RuntimeError as exc:
+        # On a read-only mount HDF5's file locking fails and GDAL reports a missing file.
+        raise RuntimeError(
+            f"Unable to open {file_name} ({exc}); on a read-only file system set HDF5_USE_FILE_LOCKING=FALSE"
+        ) from exc
+    x0, dx, _, y0, _, dy = dataset.GetGeoTransform()
+    dataset = None
+    half = (dx / 2.0, dy / 2.0)
+    if math.isclose(math.remainder(x0, dx), half[0], abs_tol=1e-6) or math.isclose(
+        math.remainder(x0, dx), -half[0], abs_tol=1e-6
+    ):
+        x0, y0 = x0 + half[0], y0 + half[1]
+    return _s2_band_entry(band_name, file_name, (x0, dx, 0.0, y0, 0.0, dy))
+
+
 def _s2_resolve_options(processing_options: dict[str, Any] | None) -> tuple[tuple[float, float], str, float]:
     from .s2 import _resolve_stretch_options
 
@@ -217,22 +281,17 @@ def build_sentinel_s2_vrt(
         band_names = normalize_sentinel_s2_product_map({product_name: list(product)})[product_name]
     percentiles, method, gamma = _s2_resolve_options(processing_options)
 
-    sources = _collect_sentinel_s2_band_sources(input_dataset)
-    selected, target_epsg, resolution = _select_band_sources(sources, band_names)
-    bands: list[dict[str, Any]] = []
-    for source in selected:
-        file_name = _s2_band_file(str(source["subdataset_name"]), str(source["band_name"]))
-        with gdal_errors():
-            jp2 = gdal.Open(file_name, gdal.GA_ReadOnly)
-        bands.append({
-            "name": str(source["band_name"]),
-            "file": file_name,
-            "width": jp2.RasterXSize,
-            "height": jp2.RasterYSize,
-            "geotransform": jp2.GetGeoTransform(),
-            "srs": jp2.GetProjectionRef(),
-        })
-        jp2 = None
+    if _is_netcdf(input_dataset):
+        bands = [_s2_netcdf_band(input_dataset, band) for band in band_names]
+        target_epsg = _epsg_of(bands[0]["srs"])
+        resolution = min(band["geotransform"][1] for band in bands)
+    else:
+        sources = _collect_sentinel_s2_band_sources(input_dataset)
+        selected, target_epsg, resolution = _select_band_sources(sources, band_names)
+        bands = [
+            _s2_band_entry(str(source["band_name"]), _s2_band_file(str(source["subdataset_name"]), str(source["band_name"])))
+            for source in selected
+        ]
     finest = min(bands, key=lambda band: band["geotransform"][1])
     width, height = finest["width"], finest["height"]
     geotransform, srs = finest["geotransform"], finest["srs"]
@@ -283,7 +342,7 @@ def build_sentinel_s2_vrt(
         _sub(source, "SourceFilename", band["file"], relativeToVRT="0")
         _sub(source, "SourceBand", 1)
         _sub(source, "SourceProperties", RasterXSize=band["width"], RasterYSize=band["height"],
-             DataType="UInt16", BlockXSize=min(1024, band["width"]), BlockYSize=min(1024, band["height"]))
+             DataType="UInt16", BlockXSize=band["block"][0], BlockYSize=band["block"][1])
         _sub(source, "SrcRect", xOff=0, yOff=0, xSize=band["width"], ySize=band["height"])
         _sub(source, "DstRect", xOff=0, yOff=0, xSize=width, ySize=height)
         _sub(source, "NODATA", 0)
