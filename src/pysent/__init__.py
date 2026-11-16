@@ -8,6 +8,10 @@ Submodules:
 ``pysent.s2``
     Sentinel-2 RGB band-combination products from SAFE: stacked-VRT warp,
     per-band stretch, tiled+compressed 8-bit RGB with overviews.
+``pysent.vrt``
+    The same Sentinel-1/2 pictures as GDAL VRTs over the SAFE zip, with the
+    stretch baked in: no pixels copied (Sentinel-1 adds a small overview
+    sidecar).
 ``pysent.errors``
     ``EmptySceneError`` and ``PartialFailure``, for callers that need to tell
     an empty scene or a partly failed call from other errors.
@@ -58,6 +62,7 @@ __all__ = [
     "s2",
     "s3",
     "s5p",
+    "vrt",
     # sentinel-1
     "S1_SUPPORTED_AMPLITUDE_VARIABLES",
     "build_sentinel_s1_output_filename",
@@ -74,6 +79,9 @@ __all__ = [
     "normalize_sentinel_s2_product_map",
     "process_sentinel_s2_safe",
     "stretch_sentinel_s2_rgb",
+    # zero-copy VRTs
+    "build_sentinel_s1_vrt",
+    "build_sentinel_s2_vrt",
     # sentinel-3
     "S3_PRODUCTS",
     "build_sentinel_s3_output_filename",
@@ -104,7 +112,7 @@ __all__ = [
     "supported_sentinel_product_types",
 ]
 
-_SUBMODULES = {"archive", "composite", "csw", "errors", "profiles", "qa", "s1", "s2", "s3", "s5p"}
+_SUBMODULES = {"archive", "composite", "csw", "errors", "profiles", "qa", "s1", "s2", "s3", "s5p", "vrt"}
 
 _EXPORTS = {
     "S1_SUPPORTED_AMPLITUDE_VARIABLES": "s1",
@@ -121,6 +129,8 @@ _EXPORTS = {
     "normalize_sentinel_s2_product_map": "s2",
     "process_sentinel_s2_safe": "s2",
     "stretch_sentinel_s2_rgb": "s2",
+    "build_sentinel_s1_vrt": "vrt",
+    "build_sentinel_s2_vrt": "vrt",
     "S3_PRODUCTS": "s3",
     "build_sentinel_s3_output_filename": "s3",
     "normalize_sentinel_s3_product_map": "s3",
