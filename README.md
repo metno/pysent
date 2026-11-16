@@ -358,6 +358,17 @@ as a lookup table:
   other chunks than the GeoTIFF was written in, so a pixel moves by a grey level
   or two. The JPEG of today's GeoTIFF moves pixels by far more.
 
+**Serving a Sentinel-1 VRT needs a GDAL block cache of about 1 GB in the
+reading process** (`GDAL_CACHEMAX=1024`). A SAFE measurement is stored in
+one-line strips the full swath wide (about 53 kB each), and a fine-zoom read of
+a rotated swath touches several thousand of them: on real scenes a 2000 px
+window to 512 px took 2–3 s with a 1 GB cache and more than 40 s (up to 290 s)
+with 256 or 512 MB, where GDAL evicts and re-reads strips. Coarser than x4 the
+overview file answers in about 0.2 s whatever the cache. Sentinel-2 VRTs read
+JPEG 2000 tiles and are unaffected (0.2–0.9 s per 512 px read at any zoom).
+Reading the netCDF needs `HDF5_USE_FILE_LOCKING=FALSE` on a read-only mount;
+without it a read hangs rather than fails.
+
 What a VRT cannot express is refused rather than silently dropped: the Lee
 speckle filter, a Sentinel-2 preset or output grid other than the tile's own,
 `histogram_stretch=False`. Each VRT carries the same `PYSENT_*` metadata as a

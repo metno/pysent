@@ -553,6 +553,12 @@ def build_sentinel_s1_vrt(
     thread measured faster than six). Nothing else is written; the VRT names
     its sidecar relatively, so the three files move together.
 
+    The reading process needs a GDAL block cache of about 1 GB
+    (``GDAL_CACHEMAX``): a SAFE measurement is stored in one-line strips the
+    full swath wide, and a fine-zoom read of a rotated swath touches thousands
+    of them. With 256-512 MB a 2000 px window was measured at over 40 s, with
+    1 GB at 2-3 s.
+
     Returns ``path``, ``sidecar_paths``, ``overview_factors``, ``variable``,
     ``target_epsg``, ``resolution``, ``width``, ``height``, ``sources``,
     ``stretch`` and ``provenance``. Raises
