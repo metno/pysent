@@ -12,6 +12,10 @@ Submodules:
     The same Sentinel-1/2 pictures as GDAL VRTs over the SAFE zip, with the
     stretch baked in: no pixels copied (Sentinel-1 adds a small overview
     sidecar).
+``pysent.thumbnail``
+    Catalogue thumbnails in about a second: Sentinel-2 from the JPEG 2000
+    files' reduced levels, Sentinel-1 from a decimated read, each with the
+    quicklook products' stretch.
 ``pysent.errors``
     ``EmptySceneError`` and ``PartialFailure``, for callers that need to tell
     an empty scene or a partly failed call from other errors.
@@ -62,6 +66,7 @@ __all__ = [
     "s2",
     "s3",
     "s5p",
+    "thumbnail",
     "vrt",
     # sentinel-1
     "S1_SUPPORTED_AMPLITUDE_VARIABLES",
@@ -82,6 +87,9 @@ __all__ = [
     # zero-copy VRTs
     "build_sentinel_s1_vrt",
     "build_sentinel_s2_vrt",
+    # catalogue thumbnails
+    "sentinel_s1_thumbnail",
+    "sentinel_s2_thumbnail",
     # sentinel-3
     "S3_PRODUCTS",
     "build_sentinel_s3_output_filename",
@@ -112,7 +120,7 @@ __all__ = [
     "supported_sentinel_product_types",
 ]
 
-_SUBMODULES = {"archive", "composite", "csw", "errors", "profiles", "qa", "s1", "s2", "s3", "s5p", "vrt"}
+_SUBMODULES = {"archive", "composite", "csw", "errors", "profiles", "qa", "s1", "s2", "s3", "s5p", "thumbnail", "vrt"}
 
 _EXPORTS = {
     "S1_SUPPORTED_AMPLITUDE_VARIABLES": "s1",
@@ -131,6 +139,8 @@ _EXPORTS = {
     "stretch_sentinel_s2_rgb": "s2",
     "build_sentinel_s1_vrt": "vrt",
     "build_sentinel_s2_vrt": "vrt",
+    "sentinel_s1_thumbnail": "thumbnail",
+    "sentinel_s2_thumbnail": "thumbnail",
     "S3_PRODUCTS": "s3",
     "build_sentinel_s3_output_filename": "s3",
     "normalize_sentinel_s3_product_map": "s3",

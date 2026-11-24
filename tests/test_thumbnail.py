@@ -335,4 +335,9 @@ def test_write_thumbnail_png_writes_rgba_and_nothing_else(tmp_path, s2_zip):
 
 
 def test_thumbnail_functions_are_exported():
+    import pysent
+
     assert set(thumbnail_module.__all__) >= {"sentinel_s1_thumbnail", "sentinel_s2_thumbnail", "write_thumbnail_png"}
+    assert pysent.sentinel_s1_thumbnail is sentinel_s1_thumbnail
+    assert pysent.sentinel_s2_thumbnail is sentinel_s2_thumbnail
+    assert pysent.thumbnail is thumbnail_module
