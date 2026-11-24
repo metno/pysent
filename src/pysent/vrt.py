@@ -666,6 +666,216 @@ def sentinel_s2_vrt_band_indices(vrt: str | Path | Sequence[str], preset: str | 
     return [names.index(band) + 1 for band in triplet]
 
 
+# Normalised-difference indices: name -> (a, b) for (a - b) / (a + b), on reflectance.
+S2_INDICES: dict[str, tuple[str, str]] = {
+    "ndvi": ("B8", "B4"),  # vegetation: NIR against red
+    "ndwi": ("B3", "B8"),  # open water (McFeeters 1996): green against NIR
+}
+# Reflectance (in DN) at or below 0 is held here, so that a+b is never 0.
+S2_INDEX_REFLECTANCE_FLOOR = 0.001
+# Each index's colour ramp: (index value, "#rrggbb") stops, interpolated linearly
+# between them and held beyond the ends. Byte value v in [1, 255] stands for
+# index -1 + 2 (v - 1) / 254; 0 is NoData (transparent).
+S2_INDEX_RAMPS: dict[str, tuple[tuple[float, str], ...]] = {
+    "ndvi": (
+        (-1.0, "#0b2a5b"), (-0.25, "#2f6cb3"), (0.0, "#d9d2bd"), (0.1, "#cdbb84"),
+        (0.25, "#b5c464"), (0.4, "#7fb046"), (0.6, "#3f8a2c"), (0.8, "#1c5e1a"), (1.0, "#0a3a0d"),
+    ),
+    "ndwi": (
+        (-1.0, "#4a3016"), (-0.6, "#8c6a3f"), (-0.3, "#cdb98f"), (0.0, "#efeee8"),
+        (0.15, "#a9d3ea"), (0.4, "#4b98cf"), (0.7, "#1a5aa0"), (1.0, "#08275a"),
+    ),
+}
+
+
+def _hex_rgb(color: str) -> tuple[int, int, int]:
+    text = str(color).strip().lstrip("#")
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", text):
+        raise ValueError(f"a ramp colour is '#rrggbb', not {color!r}")
+    return int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16)
+
+
+def sentinel_s2_index_palette(ramp: Sequence[tuple[float, str]]) -> np.ndarray:
+    """The 256 RGBA entries of an index's colour table: entry 0 transparent, 1-255 the ramp over -1..1."""
+    stops = sorted((float(value), _hex_rgb(color)) for value, color in ramp)
+    if len(stops) < 2:
+        raise ValueError("a ramp needs at least two stops")
+    values = np.array([value for value, _ in stops])
+    colors = np.array([rgb for _, rgb in stops], dtype=float)
+    centres = -1.0 + 2.0 * np.arange(255) / 254.0
+    palette = np.zeros((256, 4), dtype=np.uint8)
+    for channel in range(3):
+        palette[1:, channel] = np.rint(np.interp(centres, values, colors[:, channel]))
+    palette[1:, 3] = 255
+    return palette
+
+
+def _s2_reflectance_lut(offset: float) -> str:
+    """DN to ``DN + offset``, held at :data:`S2_INDEX_REFLECTANCE_FLOOR` below: reflectance (in DN) above 0.
+
+    Below the offset (DN <= 1000 from baseline 04.00 on) the reflectance would
+    be zero or negative, which is noise over dark water and shadow. Held just
+    above 0 the index stays within -1..1, and a pixel whose two bands are both
+    that dark gets index 0: GDAL's ``norm_diff`` returns infinity, not NoData,
+    when the sum is 0 (3.8 and 3.13 alike).
+    """
+    offset, floor = float(offset), S2_INDEX_REFLECTANCE_FLOOR
+    top = f"65535:{_number(65535 + offset)}"
+    if 1 + offset >= floor:
+        return f"1:{_number(1 + offset)},{top}"
+    return f"1:{_number(floor)},{_number(floor - offset)}:{_number(floor)},{top}"
+
+
+def _s2_index_values_root(
+    bands: list[dict[str, Any]],
+    offsets: Sequence[float],
+    grid: tuple[int, int, tuple[float, ...], str],
+) -> ET.Element:
+    """A Float32 band: GDAL's built-in ``norm_diff`` over the two bands' raw files, offsets applied in the sources."""
+    width, height, geotransform, srs = grid
+    root = _dataset_element(width, height, srs, geotransform)
+    element = _sub(root, "VRTRasterBand", dataType="Float32", band=1, subClass="VRTDerivedRasterBand")
+    _sub(element, "NoDataValue", "nan")
+    _sub(element, "PixelFunctionType", "norm_diff")
+    _sub(element, "SourceTransferType", "Float32")
+    for band, offset in zip(bands, offsets):
+        source = _sub(element, "ComplexSource")
+        _sub(source, "SourceFilename", band["file"], relativeToVRT="0")
+        _sub(source, "SourceBand", 1)
+        _sub(source, "SourceProperties", RasterXSize=band["width"], RasterYSize=band["height"],
+             DataType="UInt16", BlockXSize=band["block"][0], BlockYSize=band["block"][1])
+        _sub(source, "SrcRect", xOff=0, yOff=0, xSize=band["width"], ySize=band["height"])
+        _sub(source, "DstRect", xOff=0, yOff=0, xSize=width, ySize=height)
+        _sub(source, "NODATA", 0)
+        _sub(source, "LUT", _s2_reflectance_lut(offset))
+    return root
+
+
+def build_sentinel_s2_index_vrt(
+    *,
+    input_dataset: str,
+    index: str,
+    output_path: str | Path,
+    processing_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Write a Sentinel-2 normalised-difference index as a one-band VRT over the SAFE zip, coloured by a ramp.
+
+    ``index`` is a name from :data:`S2_INDICES`: NDVI ``(B8 - B4) / (B8 + B4)``,
+    NDWI ``(B3 - B8) / (B3 + B8)``. The index is GDAL's built-in ``norm_diff``
+    pixel function (no Python runs on read) over the two bands' JPEG 2000
+    files, not the stretched all-bands VRT: each value has the product's
+    offset added first (``BOA_ADD_OFFSET``/``RADIO_ADD_OFFSET``, -1000 from
+    processing baseline 04.00 on, read from the product metadata by
+    :func:`pysent.s2.read_sentinel_s2_radiometry`), and a reflectance at or
+    below 0 is held at :data:`S2_INDEX_REFLECTANCE_FLOOR`, so the index is
+    that of reflectance and lies within -1..1 (0 where both bands are that
+    dark). The
+    quantification value cancels in the ratio. Nothing is computed when the
+    VRT is written: it costs a metadata read.
+
+    By default the band is Byte with a colour table: value ``v`` in 1-255 is
+    the index ``-1 + 2 (v - 1) / 254``, its colour the index's ramp from
+    :data:`S2_INDEX_RAMPS` (``processing_options["ramp"]``, a list of
+    ``(value, "#rrggbb")`` stops, replaces it), 0 NoData. A map server draws it
+    as is. ``processing_options["values"] = True`` writes the Float32 index
+    itself instead (NoData NaN), for point queries or a renderer's own
+    styling.
+
+    A pixel where either band is NoData is NoData. A netCDF source is refused
+    (its offsets are not known here); so is ``cloud_mask``.
+
+    Only ``output_path`` (ending in ``.vrt``) is written. Returns ``path``,
+    ``index``, ``bands``, ``offsets`` (per band, as applied), ``values``
+    (``True`` for the Float32 form), ``ramp`` (the stops, ``None`` for the
+    values), ``encoding`` (how a byte maps to the index), ``target_epsg``,
+    ``resolution``, ``width``, ``height``, ``sources``, ``radiometry`` and
+    ``provenance``.
+    """
+    from .s2 import read_sentinel_s2_radiometry
+
+    final_path = _output_path(output_path)
+    name = str(index).strip().lower()
+    if name not in S2_INDICES:
+        raise ValueError(f"unknown Sentinel-2 index {index!r}; one of {sorted(S2_INDICES)}")
+    processing = dict(processing_options or {})
+    values = bool(processing.pop("values", False))
+    ramp = processing.pop("ramp", None)
+    if processing.pop("cloud_mask", None) not in (None, False):
+        raise ValueError("cloud_mask is not supported for an index VRT")
+    if processing:
+        raise ValueError(f"unknown processing options for an index VRT: {sorted(processing)}")
+    if _is_netcdf(input_dataset):
+        raise ValueError("an index needs the product's radiometric offsets; pass the SAFE product, not a netCDF")
+    ramp_stops = None if values else tuple((float(v), str(c)) for v, c in (ramp or S2_INDEX_RAMPS[name]))
+    palette = None if values else sentinel_s2_index_palette(ramp_stops)
+
+    band_names = S2_INDICES[name]
+    radiometry = read_sentinel_s2_radiometry(input_dataset)
+    offsets = [float(radiometry["offsets"].get(band, 0.0)) for band in band_names]
+    bands, _, target_epsg, resolution = _s2_scene_bands(input_dataset, band_names, ())
+    grid = _s2_grid(bands, None)
+    inner = _s2_index_values_root(bands, offsets, grid)
+
+    stamp = provenance(
+        index=name,
+        index_formula=f"({band_names[0]} - {band_names[1]}) / ({band_names[0]} + {band_names[1]})",
+        index_offsets=offsets,
+        index_encoding=None if values else "index = -1 + 2 * (value - 1) / 254; 0 = NoData",
+        index_ramp=None if values else [f"{v:g}:{c}" for v, c in ramp_stops],
+        target_epsg=target_epsg,
+        target_resolution=float(resolution),
+        output=VRT_OUTPUT,
+    )
+    stamp.pop("TIFFTAG_SOFTWARE", None)
+
+    if values:
+        root = inner
+        _add_metadata(root, stamp)
+        element = root.find("VRTRasterBand")
+        element.insert(0, ET.Element("Description"))
+        element[0].text = name
+    else:
+        width, height, geotransform, srs = grid
+        root = _dataset_element(width, height, srs, geotransform)
+        _add_metadata(root, stamp)
+        element = _sub(root, "VRTRasterBand", dataType="Byte", band=1)
+        _sub(element, "Description", name)
+        _sub(element, "NoDataValue", 0)
+        _sub(element, "ColorInterp", "Palette")
+        table = _sub(element, "ColorTable")
+        for red, green, blue, alpha in palette:
+            _sub(table, "Entry", c1=int(red), c2=int(green), c3=int(blue), c4=int(alpha))
+        source = _sub(element, "ComplexSource")
+        # The Float32 index, inline: GDAL opens a VRT given as its XML text.
+        _sub(source, "SourceFilename", ET.tostring(inner, encoding="unicode"), relativeToVRT="0")
+        _sub(source, "SourceBand", 1)
+        _sub(source, "SourceProperties", RasterXSize=width, RasterYSize=height, DataType="Float32",
+             BlockXSize=min(width, 128), BlockYSize=min(height, 128))
+        _sub(source, "SrcRect", xOff=0, yOff=0, xSize=width, ySize=height)
+        _sub(source, "DstRect", xOff=0, yOff=0, xSize=width, ySize=height)
+        _sub(source, "NODATA", "nan")
+        _sub(source, "LUT", "-1:1,1:255")
+    _write_vrt(root, final_path)
+
+    return {
+        "index": name,
+        "bands": list(band_names),
+        "offsets": dict(zip(band_names, offsets)),
+        "values": values,
+        "ramp": [list(stop) for stop in ramp_stops] if ramp_stops else None,
+        "encoding": None if values else {"nodata": 0, "min_value": 1, "max_value": 255, "min_index": -1.0, "max_index": 1.0},
+        "path": str(final_path),
+        "output_file": final_path.name,
+        "target_epsg": target_epsg,
+        "resolution": resolution,
+        "width": grid[0],
+        "height": grid[1],
+        "sources": [band["file"] for band in bands],
+        "radiometry": radiometry,
+        "provenance": stamp,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Sentinel-1
 # --------------------------------------------------------------------------- #
