@@ -556,6 +556,14 @@ def warp_swath(
         "xRes": float(resolution),
         "yRes": float(resolution),
         "dstNodata": float("nan"),
+        # The exact transformer, not GDAL's approximation along each output
+        # line. On GDAL 3.13 the approximation drops whole output rows of some
+        # swaths (a Sentinel-5P CH4 window lost a 20-row strip, 2,094 cells,
+        # that GDAL 3.8.4 fills), and its edges differ between versions. Exact,
+        # GDAL 3.13 and 3.8.4 agree pixel for pixel on 100 Sentinel-5P windows
+        # and within 0.005 % on 80 Sentinel-3 frames; it costs 11-18 % on a
+        # Sentinel-3 swath, 50 % on truecolor, nothing measurable on 5P.
+        "errorThreshold": 0.0,
         "outputType": gdal.GDT_Float32,
         "creationOptions": list(creation_options or ["TILED=YES", "COMPRESS=DEFLATE", "PREDICTOR=3"]),
     }

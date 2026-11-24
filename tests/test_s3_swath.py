@@ -87,6 +87,29 @@ def test_a_good_warp_passes_the_same_check(tmp_path):
     assert np.count_nonzero(np.isfinite(grid)) > values.size // 100
 
 
+def test_every_swath_warp_uses_the_exact_transformer(tmp_path, monkeypatch):
+    # GDAL 3.13's approximate transformer drops whole output rows from some
+    # swaths (a Sentinel-5P CH4 window lost a 20-row strip that GDAL 3.8.4
+    # fills). CI's GDAL does not show it, so the option itself is what is held.
+    calls = []
+    real_warp = gdal.Warp
+
+    def spy(destination, source, **options):
+        calls.append(options)
+        return real_warp(destination, source, **options)
+
+    monkeypatch.setattr(gdal, "Warp", spy)
+    lat, lon = _simple_swath()
+    values = np.ones(lat.shape, dtype=np.float32)
+    warp_swath(
+        values=values, lat=lat, lon=lon, output_path=str(tmp_path / "exact.tif"),
+        epsg=4326, resolution=0.01, bounds=(10.0, 60.0, 11.0, 61.0), resampling="average",
+        scratch=tmp_path, categorical=np.ones(lat.shape, dtype=np.float32),
+    )
+    assert len(calls) == 2  # the values, and the reason band
+    assert all(call.get("errorThreshold") == 0.0 for call in calls)
+
+
 def test_the_step_that_has_been_seen_to_truncate_is_refused(tmp_path):
     """Step 4 measured correct on a 296-row frame but returned a truncated warp
     on a full 4091-row one. Steps 2 and 8 are indistinguishable from it in
