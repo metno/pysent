@@ -69,6 +69,18 @@ S2_SUPPORTED_BANDS: tuple[str, ...] = (
     "B11",
     "B12",
 )
+# Named band combinations (red, green, blue) for a scene served as one
+# all-bands VRT (pysent.vrt.build_sentinel_s2_all_bands_vrt): each preset
+# selects three of its bands, nothing is rendered per combination. Every band
+# named here is in both Level-1C and Level-2A products.
+S2_BAND_PRESETS: dict[str, tuple[str, str, str]] = {
+    "true_color": ("B4", "B3", "B2"),
+    "false_color": ("B8", "B4", "B3"),
+    "false_color_vegetation": ("B8A", "B4", "B3"),
+    "swir": ("B12", "B8A", "B4"),
+    "agriculture": ("B11", "B8", "B2"),
+    "glacier": ("B12", "B8A", "B3"),
+}
 # Level-2A scene classification (SCL) classes the optional cloud mask removes:
 # 3 cloud shadow, 8 cloud medium probability, 9 cloud high probability, 10 thin
 # cirrus. The mask is off by default: it costs an extra pass over the stack.
@@ -125,6 +137,46 @@ def normalize_sentinel_s2_product_map(raw: object | None) -> dict[str, tuple[str
             raise ValueError(f"Product '{product_name}' contains unsupported bands. Allowed: {allowed}")
         normalized[product_name] = bands
     return normalized
+
+
+def resolve_sentinel_s2_preset(
+    preset: str | Sequence[str],
+    available_bands: Sequence[str] | None = None,
+) -> tuple[str, str, str]:
+    """The (red, green, blue) band names of a preset or of a free triplet.
+
+    ``preset`` is a name from :data:`S2_BAND_PRESETS` (or
+    :data:`S2_DEFAULT_PRODUCTS`), or three band names in any case (``"8a"``
+    and ``"B08"`` read as ``B8A`` and ``B8``). With ``available_bands`` (the
+    bands a product or an all-bands VRT holds) every band must be among them:
+    a Level-2A product has no ``B10``. Raises :class:`ValueError` otherwise.
+    """
+    if isinstance(preset, str):
+        key = preset.strip().lower()
+        bands = S2_BAND_PRESETS.get(key) or S2_DEFAULT_PRODUCTS.get(key)
+        if bands is None:
+            names = ", ".join(sorted(S2_BAND_PRESETS))
+            raise ValueError(f"unknown Sentinel-2 preset {preset!r}; one of {names}, or three band names")
+    else:
+        if len(preset) != 3:
+            raise ValueError(f"a Sentinel-2 band combination is three bands, not {len(preset)}")
+        bands = tuple(_canonical_band_name(band) for band in preset)
+        unknown = [band for band in bands if band not in S2_SUPPORTED_BANDS]
+        if unknown:
+            raise ValueError(f"not Sentinel-2 bands: {', '.join(unknown)}; allowed: {', '.join(S2_SUPPORTED_BANDS)}")
+    if available_bands is not None:
+        available = [_canonical_band_name(band) for band in available_bands]
+        missing = [band for band in bands if band not in available]
+        if missing:
+            raise ValueError(f"this product has no {', '.join(missing)}; it has {', '.join(available)}")
+    return bands  # type: ignore[return-value]
+
+
+def _canonical_band_name(value: object) -> str:
+    """``b8a``, ``8A``, ``B08`` -> ``B8A``, ``B8A``, ``B8``; anything else upper-cased."""
+    text = str(value or "").strip().upper()
+    match = re.fullmatch(r"B?0*(\d{1,2})(A?)", text)
+    return f"B{int(match.group(1))}{match.group(2)}" if match else text
 
 
 def _coerce_overview_factors(factors: object) -> tuple[int, ...]:
