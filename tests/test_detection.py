@@ -220,7 +220,7 @@ def test_detect_product_for_dataset_is_duck_typed():
 # --------------------------------------------------------------------------- #
 # Routing
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("title, pipeline", [(S1_GRD, "s1"), (S2_L1C, "s2")])
+@pytest.mark.parametrize("title, pipeline", [(S1_GRD, "s1"), (S2_L1C, "s2"), (S2_L2A, "s2")])
 def test_supported_products_route_to_their_pipeline(title, pipeline):
     assert resolve_sentinel_pipeline(title) == pipeline
 
@@ -229,7 +229,6 @@ def test_supported_products_route_to_their_pipeline(title, pipeline):
     "title, expected",
     [
         (S1_SLC, "single-look complex"),
-        (S2_L2A, "surface reflectance"),
         (S3_VGP, "355 Mpx"),
         (S5P_O3TCL_RPRO, "gridded product"),
     ],
@@ -287,7 +286,7 @@ def test_the_ready_set_is_exactly_what_has_a_pipeline():
     """Flipping a row of the table to ``ready`` is how a phase makes its work
     reachable, so the set is pinned here rather than left to drift."""
     assert sorted(supported_sentinel_product_types()) == [
-        "S1 GRD", "S1 GRDH", "S1 GRDM", "S2 MSIL1C",
+        "S1 GRD", "S1 GRDH", "S1 GRDM", "S2 MSIL1C", "S2 MSIL2A",
         "S3 OL_1_EFR", "S3 OL_1_ERR", "S3 OL_2_LFR", "S3 OL_2_LRR",
         "S3 OL_2_WFR", "S3 OL_2_WRR",
         "S3 SL_2_LST", "S3 SL_2_WST", "S3 SY_2_V10", "S3 SY_2_VG1",
@@ -297,7 +296,7 @@ def test_the_ready_set_is_exactly_what_has_a_pipeline():
     ]
 
 
-@pytest.mark.parametrize("title", [S1_GRD, S2_L1C, S5P_NO2_OFFL])
+@pytest.mark.parametrize("title", [S1_GRD, S2_L1C, S2_L2A, S5P_NO2_OFFL])
 def test_every_ready_product_routes_rather_than_refusing(title):
     assert resolve_sentinel_pipeline(title) in {"s1", "s2", "s5p"}
 
