@@ -28,6 +28,14 @@ once here, exactly as the GeoTIFF path computes them, and baked in:
     product does not have. The three bands of a preset read the same pixels as
     that preset's own :func:`build_sentinel_s2_vrt`.
 
+``build_sentinel_s2_index_vrt``
+    NDVI or NDWI (:data:`S2_INDICES`) as one band: GDAL's built-in
+    ``norm_diff`` pixel function over the two bands' raw JPEG 2000 files, the
+    product's radiometric offset applied in the sources, so the value is the
+    index of reflectance. Coloured by default (a paletted Byte band, the ramp
+    from :data:`S2_INDEX_RAMPS`), or the Float32 index itself. No statistics:
+    writing it costs a metadata read.
+
 ``build_sentinel_s1_vrt``
     A warped VRT over the SAFE measurement band (the GCP warp of the GeoTIFF
     path, kept inline), stretched to gray by a ``<LUT>`` on the amplitude. A
