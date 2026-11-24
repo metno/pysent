@@ -73,10 +73,12 @@ from ._sen3 import (
 from ._swath import (
     GEOLOCATION_STEPS,
     RESAMPLING_METHODS,
+    bbox_window,
     choose_grid,
     footprint_polygon,
     decimation_for,
     grid_bounds,
+    normalise_bbox,
     refine_for_thin_swath,
     valid_fraction,
     value_statistics,
@@ -109,6 +111,11 @@ EPSG_LATLON = 4326
 # both. The ozone-profile bug of phase 2 was exactly this mistake.
 OLCI_GROUND_SAMPLING_M = 300.0
 SLSTR_GROUND_SAMPLING_M = 1000.0
+# The reduced-resolution OLCI types sample the ground every 1.2 km, sixteen
+# full-resolution pixels to one. Gridding them at 300 m made sixteen output
+# cells per measurement and put every one of them over the size cap.
+OLCI_RR_GROUND_SAMPLING_M = 1200.0
+OLCI_REDUCED_RESOLUTION_TYPES = ("OL_2_WRR", "OL_2_LRR", "OL_1_ERR")
 
 # The masks below were read off the flag names in the files rather than from the
 # product notices, which were not available when this was written. The owner
@@ -933,6 +940,7 @@ def _resolve_processing_settings(processing_options: dict[str, Any] | None) -> d
     target_resolution = float(target_resolution) if target_resolution not in (None, "") else None
 
     return {
+        "bbox": normalise_bbox(processing.get("bbox")),
         "context": context,
         "on_empty": on_empty,
         "decimate": decimate,
@@ -1251,6 +1259,106 @@ def _apply_flag_mask(
     return kept, missing
 
 
+def _ground_sampling_m(options: dict[str, Any], manifest: dict[str, Any]) -> float:
+    """The distance on the ground between two source pixels of this granule.
+
+    A product's own setting wins (SLSTR's 1 km); otherwise OLCI's, which depends
+    on the type and not on the product: ``chl`` from a WRR segment is 1.2 km,
+    ``chl`` from a WFR frame 300 m.
+    """
+    if options.get("ground_sampling_m"):
+        return float(options["ground_sampling_m"])
+    product_type = str(manifest.get("productType", ""))[:8]
+    if product_type in OLCI_REDUCED_RESOLUTION_TYPES:
+        return OLCI_RR_GROUND_SAMPLING_M
+    return OLCI_GROUND_SAMPLING_M
+
+
+def _over_the_cap(product: str, what: str, cells: float, settings: dict[str, Any]) -> ValueError:
+    """The refusal for a grid over ``max_output_pixels``, naming every way out of it.
+
+    A reduced-resolution segment is 44 minutes of orbit, pole to pole, and no
+    resolution a map would want makes it fit; a bbox does, so the message says
+    so rather than leaving the caller to find the option.
+    """
+    if settings["bbox"] is None:
+        crop = "pass a bbox (lon0, lat0, lon1, lat1 in degrees) to crop the swath"
+    else:
+        crop = "pass a smaller bbox"
+    return ValueError(
+        f"{product}: {what} would be {cells:,.0f} cells, over the {settings['max_output_pixels']:,} "
+        f"limit for a {settings['context']} request; {crop}, ask for a coarser resolution, "
+        "or run it as a bulk job"
+    )
+
+
+class _SwathCrop:
+    """Where a ``bbox`` cuts a swath, applied to every per-pixel array alike.
+
+    Built from the full geolocation; :meth:`__call__` cuts any array of the same
+    shape to the source window. With no bbox it hands every array back
+    untouched, so a request without one runs exactly as before.
+
+    A bbox with no pixel inside is an empty product: ``on_empty="raise"`` says so
+    at once, and ``"write"`` replaces the swath with a small all-empty mesh
+    spanning the box, so the empty product lands on the box's own grid rather
+    than on the whole segment's.
+    """
+
+    MESH = 32
+
+    def __init__(self, lat: np.ndarray, lon: np.ndarray, *, product: str, settings: dict[str, Any]):
+        self.bbox = settings["bbox"]
+        self.full_shape = lat.shape
+        self.window: tuple[slice, slice] | None = None
+        self.outside = False
+        if self.bbox is None:
+            self.lat, self.lon = lat, lon
+            return
+        self.window = bbox_window(lat, lon, self.bbox)
+        if self.window is not None:
+            self.lat, self.lon = lat[self.window], lon[self.window]
+            return
+        if settings["on_empty"] == "raise":
+            raise EmptySceneError(
+                f"{product}: no pixel of this swath lies inside the bbox "
+                f"{', '.join(f'{value:g}' for value in self.bbox)}, so there is nothing to map"
+            )
+        self.outside = True
+        lon0, lat0, lon1, lat1 = self.bbox
+        east = lon1 if lon1 > lon0 else lon1 + 360.0
+        lons = np.linspace(lon0, east, self.MESH)
+        lons = np.where(lons > 180.0, lons - 360.0, lons)
+        lats = np.linspace(lat1, lat0, self.MESH)
+        self.lon, self.lat = (array.astype(np.float32) for array in np.meshgrid(lons, lats))
+
+    def __call__(self, array: np.ndarray, fill: Any = np.nan) -> np.ndarray:
+        if self.bbox is None or getattr(array, "shape", None) != self.full_shape:
+            return array
+        if self.outside:
+            return np.full(self.lat.shape, fill, dtype=array.dtype)
+        return array[self.window]
+
+    def nested(self, value: Any) -> Any:
+        """Cut every array of the swath's shape inside a dict, leaving the rest."""
+        if isinstance(value, dict):
+            return {key: self.nested(item) for key, item in value.items()}
+        if isinstance(value, np.ndarray):
+            fill = np.nan if value.dtype.kind == "f" else (False if value.dtype == bool else 0)
+            return self(value, fill)
+        return value
+
+    def describe(self) -> dict[str, Any]:
+        """What the result says about the crop."""
+        if self.bbox is None:
+            return {"bbox": None, "source_window": None}
+        window = None
+        if self.window is not None:
+            rows, columns = self.window
+            window = [rows.start, rows.stop, columns.start, columns.stop]
+        return {"bbox": list(self.bbox), "source_window": window}
+
+
 def _resolve_geoloc_step(requested: Any, source_pixels: int) -> int:
     """The geolocation decimation to warp with.
 
@@ -1319,6 +1427,14 @@ def _process_swath_product(
         flags = flag_band.ReadAsArray(buf_xsize=values.shape[1], buf_ysize=values.shape[0])
         flag_ds = None
 
+    # A bbox keeps only the source rows and columns that reach into it, before
+    # anything is masked or warped; without one this changes nothing.
+    crop = _SwathCrop(lat, lon, product=product, settings=settings)
+    lat, lon = crop.lat, crop.lon
+    values = crop(values)
+    if flags is not None:
+        flags = crop(flags, 0)
+
     kept, missing_flags = _apply_flag_mask(
         values=values, flags=flags, table=table,
         keep=list(options["mask_flags"]), reject=list(options["reject_flags"]),
@@ -1342,9 +1458,9 @@ def _process_swath_product(
     extra_applied: list[str] = []
     for spec in options.get("extra_masks", ()):
         rejected, label = _apply_extra_mask(
-            spec=spec, root=root, scratch=scratch, shape=values.shape, decimate=decimate,
+            spec=spec, root=root, scratch=scratch, shape=crop.full_shape, decimate=decimate,
         )
-        extra_rejected |= rejected
+        extra_rejected |= crop(rejected, False)
         extra_applied.append(label)
     kept = kept & ~extra_rejected
 
@@ -1370,12 +1486,12 @@ def _process_swath_product(
             "A water product over land, or a land product over sea, is normally empty."
         )
 
+    sampling = _ground_sampling_m(options, manifest)
     epsg, resolution = choose_grid(
         lat, lon,
         epsg=settings["target_epsg"] or "auto",
         resolution=settings["target_resolution"],
-        ground_sampling_m=(options.get("ground_sampling_m") or OLCI_GROUND_SAMPLING_M)
-        * settings["grid_multiplier"],
+        ground_sampling_m=sampling * settings["grid_multiplier"],
     )
     # A swath far narrower in one direction than the grid it is going on cannot
     # be warped at all: GDAL's geolocation transformer has too few points and
@@ -1383,19 +1499,14 @@ def _process_swath_product(
     # refine_for_thin_swath, which leaves every ordinary granule alone.
     refined = refine_for_thin_swath(
         lat.shape, epsg, resolution,
-        ground_sampling_m=(options.get("ground_sampling_m") or OLCI_GROUND_SAMPLING_M)
-        * decimate,
+        ground_sampling_m=sampling * decimate,
     )
     grid_refined = refined != resolution
     resolution = refined
     bounds = grid_bounds(lat, lon, epsg, resolution)
     cells = ((bounds[2] - bounds[0]) / resolution) * ((bounds[3] - bounds[1]) / resolution)
     if cells > settings["max_output_pixels"]:
-        raise ValueError(
-            f"{product}: a {epsg} grid at {resolution:g} would be {cells:,.0f} cells, over the "
-            f"{settings['max_output_pixels']:,} limit for a {settings['context']} request; "
-            "ask for a coarser resolution or run it as a bulk job"
-        )
+        raise _over_the_cap(product, f"a {epsg} grid at {resolution:g}", cells, settings)
 
     step = _resolve_geoloc_step(
         options["geoloc_step"] if options["geoloc_step"] is not None else settings["geoloc_step"],
@@ -1405,7 +1516,7 @@ def _process_swath_product(
     metadata = _product_metadata(
         product=product, options=options, input_dataset=input_dataset, manifest=manifest,
         decimate=decimate, resolution=resolution, epsg=epsg,
-        member=member, variable=variable, geoloc_step=step,
+        member=member, variable=variable, geoloc_step=step, bbox=crop.bbox,
     )
 
     float_path = Path(output_path)
@@ -1437,7 +1548,8 @@ def _process_swath_product(
         extra={"geoloc_step": step, "member": member, "variable": variable,
                "unavailable_flags": missing_flags,
                "grid_refined_for_thin_swath": grid_refined,
-               "footprint": footprint_polygon(lat, lon)},
+               "footprint": footprint_polygon(lat, lon),
+               **crop.describe()},
     )
 
 
@@ -1521,6 +1633,15 @@ def _process_rgb_product(
         )
         reflectances = [correction["surfaces"][band] for band in bands]
 
+    # The crop comes after the correction, which reads its own fields on the
+    # whole frame's grid, and before anything is counted or warped.
+    crop = _SwathCrop(lat, lon, product=product, settings=settings)
+    lat, lon = crop.lat, crop.lon
+    reflectances = [crop(values) for values in reflectances]
+    bright = crop(bright, False)
+    if correction is not None:
+        correction = crop.nested(correction)
+
     kept = np.isfinite(reflectances[0])
     kept_count = int(np.count_nonzero(kept))
     if kept_count == 0 and settings["on_empty"] == "raise":
@@ -1529,12 +1650,12 @@ def _process_rgb_product(
             f"({', '.join(options['reject_flags']) or 'nothing rejected'}), so there is nothing to draw"
         )
 
+    sampling = _ground_sampling_m(options, manifest)
     epsg, resolution = choose_grid(
         lat, lon,
         epsg=settings["target_epsg"] or "auto",
         resolution=settings["target_resolution"],
-        ground_sampling_m=(options.get("ground_sampling_m") or OLCI_GROUND_SAMPLING_M)
-        * settings["grid_multiplier"],
+        ground_sampling_m=sampling * settings["grid_multiplier"],
     )
     # A swath far narrower in one direction than the grid it is going on cannot
     # be warped at all: GDAL's geolocation transformer has too few points and
@@ -1542,8 +1663,7 @@ def _process_rgb_product(
     # refine_for_thin_swath, which leaves every ordinary granule alone.
     refined = refine_for_thin_swath(
         lat.shape, epsg, resolution,
-        ground_sampling_m=(options.get("ground_sampling_m") or OLCI_GROUND_SAMPLING_M)
-        * decimate,
+        ground_sampling_m=sampling * decimate,
     )
     grid_refined = refined != resolution
     resolution = refined
@@ -1556,10 +1676,8 @@ def _process_rgb_product(
     carries_quality = options["kind"] == "surface" and tier != "none"
     layer_count = len(bands) * (2 if carries_quality else 1) + (1 if carries_quality else 0)
     if cells * layer_count > settings["max_output_pixels"]:
-        raise ValueError(
-            f"{product}: {layer_count} bands on a {epsg} grid at {resolution:g} would be "
-            f"{cells * layer_count:,.0f} cells, over the {settings['max_output_pixels']:,} limit for a "
-            f"{settings['context']} request; ask for a coarser resolution or run it as a bulk job"
+        raise _over_the_cap(
+            product, f"{layer_count} bands on a {epsg} grid at {resolution:g}", cells * layer_count, settings
         )
 
     step = _resolve_geoloc_step(
@@ -1575,6 +1693,7 @@ def _process_rgb_product(
             else "top-of-atmosphere reflectance (derived)"
         ),
         geoloc_step=step,
+        bbox=crop.bbox,
     )
     if correction is not None:
         metadata.update(
@@ -1684,6 +1803,7 @@ def _process_rgb_product(
         },
         "browse_hidden_reasons": [],
         "footprint": footprint_polygon(lat, lon),
+        **crop.describe(),
         "time": manifest.get("time", {}),
         "provenance": metadata,
     }
@@ -1767,6 +1887,14 @@ def _process_grid_product(
     manifest: dict[str, Any],
 ) -> dict[str, Any]:
     from osgeo import gdal
+
+    if settings["bbox"] is not None:
+        # Refused rather than ignored: a result that came back whole after a
+        # crop was asked for would look cropped to anyone not checking.
+        raise ValueError(
+            f"{product}: bbox crops a swath (OLCI and SLSTR); a {manifest.get('productType', '').strip('_')} "
+            "tile is already on a fixed grid and does not take one"
+        )
 
     decimate = options["decimate"] or settings["decimate"] or 1
 
@@ -1921,6 +2049,7 @@ def _product_metadata(
     member: str | None = None,
     variable: str | None = None,
     geoloc_step: int | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
 ) -> dict[str, str]:
     return provenance(
         product=product,
@@ -1936,6 +2065,9 @@ def _product_metadata(
         grid_resolution=f"{resolution:g}",
         decimate=str(decimate),
         geoloc_step=str(geoloc_step) if geoloc_step is not None else None,
+        # Only when a crop was asked for, so a product without one carries
+        # exactly the tags it always did.
+        bbox=",".join(f"{value:g}" for value in bbox) if bbox is not None else None,
         units=options["units"],
         style_range=f"{options['value_range'][0]:g},{options['value_range'][1]:g}",
         style_scale="log10" if options["log_scale"] else "linear",
@@ -1982,6 +2114,17 @@ def process_sentinel_s3_safe(
     ``on_empty``
         ``raise`` (default) gives :class:`pysent.errors.EmptySceneError` when
         nothing survives the mask, which for a winter tile is normal.
+    ``bbox``
+        ``(lon0, lat0, lon1, lat1)`` in degrees, or the same as a
+        ``"lon0,lat0,lon1,lat1"`` string; ``lon0 > lon1`` crosses the
+        antimeridian. A swath product (OLCI, SLSTR) keeps only the source rows
+        and columns with a pixel inside it, before masking and warping, so the
+        grid covers that part alone. It is what makes a reduced-resolution
+        segment (``OL_2_WRR``, ``OL_2_LRR``, ``OL_1_ERR``: 44 minutes of orbit,
+        pole to pole) fit under the size cap. No pixel inside is an empty
+        product (``on_empty`` applies). Recorded as ``PYSENT_BBOX`` and in the
+        result beside ``source_window`` (rows and columns kept). A Synergy tile
+        refuses it. There is no default area.
     ``preset``
         ``full`` (default) or ``quicklook``, which decimates by 8.
     ``context``, ``work_dir``, ``gdal_num_threads``, ``gdal_cachemax_mb``,
