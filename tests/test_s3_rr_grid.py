@@ -265,3 +265,38 @@ def test_a_bad_bbox_is_refused_before_anything_is_opened(tmp_path):
             input_dataset=str(tmp_path / "missing.zip"), output_dir=tmp_path, products={"chl": {}},
             processing_options={"bbox": [1, 2]},
         )
+
+
+# --------------------------------------------------------------------------- #
+# The warp's thread pool
+# --------------------------------------------------------------------------- #
+def test_the_swath_warp_runs_with_one_gdal_pool_thread_and_puts_it_back(tmp_path, monkeypatch):
+    # On GDAL 3.13 a multithreaded geolocation warp with GDAL_NUM_THREADS above 1
+    # could wait forever: 3 hangs in 5 runs on a cropped LRR segment, 0 in 8
+    # once the warp saw 1. CI's GDAL does not hang, so the setting is what is
+    # held: the warp keeps NUM_THREADS, the pool sees 1, and the caller's
+    # setting comes back afterwards.
+    from pysent._swath import warp_swath
+
+    seen = []
+    real_warp = gdal.Warp
+
+    def spy(destination, source, **options):
+        seen.append((gdal.GetConfigOption("GDAL_NUM_THREADS"), options.get("warpOptions")))
+        return real_warp(destination, source, **options)
+
+    monkeypatch.setattr(gdal, "Warp", spy)
+    lat = np.repeat(np.linspace(60.0, 61.0, 24)[:, None], 24, axis=1)
+    lon = np.repeat(np.linspace(10.0, 11.0, 24)[None, :], 24, axis=0)
+    gdal.SetConfigOption("GDAL_NUM_THREADS", "4")
+    try:
+        warp_swath(
+            values=np.ones(lat.shape, dtype=np.float32), lat=lat, lon=lon,
+            output_path=str(tmp_path / "threads.tif"), epsg=4326, resolution=0.01,
+            bounds=(10.0, 60.0, 11.0, 61.0), resampling="near", scratch=tmp_path,
+            num_threads="2", categorical=np.ones(lat.shape, dtype=np.float32),
+        )
+        assert gdal.GetConfigOption("GDAL_NUM_THREADS") == "4"
+    finally:
+        gdal.SetConfigOption("GDAL_NUM_THREADS", None)
+    assert seen == [("1", ["NUM_THREADS=2"])] * 2

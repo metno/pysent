@@ -660,7 +660,21 @@ def warp_swath(
         )
         vrt.FlushCache()
         vrt = None
-        gdal.Warp(destination, vrt_path, resampleAlg=how, **options)
+        # GDAL_NUM_THREADS is 1 for the warp itself; the warp keeps its own
+        # NUM_THREADS. On GDAL 3.13 each warp thread builds its own geolocation
+        # backmap, and the backmap's hole fill writes GeoTIFF work files. With
+        # GDAL_NUM_THREADS above 1 those files ask the shared thread pool for
+        # compression threads that the warp threads are already holding, and
+        # the process can wait forever at 0 % CPU. Measured on a cropped OL_2_LRR
+        # segment (2026-11-22, lat 50-85), gifapar, 2 threads: 3 hangs in
+        # 5 runs as it was, 0 in 8 with this.
+        # GDAL_GEOLOC_USE_TEMP_DATASETS=NO did not help (2 hangs in 3).
+        previous_threads = gdal.GetConfigOption("GDAL_NUM_THREADS")
+        gdal.SetConfigOption("GDAL_NUM_THREADS", "1")
+        try:
+            gdal.Warp(destination, vrt_path, resampleAlg=how, **options)
+        finally:
+            gdal.SetConfigOption("GDAL_NUM_THREADS", previous_threads)
 
     # GDAL's geolocation warp writes hole-filling work files to CPL_TMPDIR, or
     # to the current directory when that is unset. In a read-only container
