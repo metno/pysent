@@ -298,6 +298,72 @@ def refine_for_thin_swath(
     return extent / minimum_cells
 
 
+def normalise_bbox(value: Any) -> tuple[float, float, float, float] | None:
+    """A ``(lon0, lat0, lon1, lat1)`` box in degrees, checked, or ``None``.
+
+    Accepts a sequence of four numbers or a ``"lon0,lat0,lon1,lat1"`` string, the
+    form a query parameter arrives in. ``lon0 > lon1`` is a box across the
+    antimeridian (``170, 60, -170, 70`` is twenty degrees wide, not three
+    hundred and forty), so the only longitude order refused is ``lon0 == lon1``.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, str):
+        parts: list[Any] = [part for part in value.replace(" ", "").split(",") if part]
+    else:
+        parts = list(value)
+    message = f"bbox must be four numbers lon0, lat0, lon1, lat1 in degrees, not {value!r}"
+    if len(parts) != 4:
+        raise ValueError(message)
+    try:
+        lon0, lat0, lon1, lat1 = (float(part) for part in parts)
+    except (TypeError, ValueError):
+        raise ValueError(message) from None
+    if not all(np.isfinite([lon0, lat0, lon1, lat1])):
+        raise ValueError(message)
+    if not (-180.0 <= lon0 <= 180.0 and -180.0 <= lon1 <= 180.0):
+        raise ValueError(f"bbox longitudes must lie in -180..180, not {lon0:g} and {lon1:g}")
+    if not (-90.0 <= lat0 < lat1 <= 90.0):
+        raise ValueError(
+            f"bbox latitudes must lie in -90..90 with lat0 below lat1, not {lat0:g} and {lat1:g}"
+        )
+    if lon0 == lon1:
+        raise ValueError(f"bbox has no width: lon0 and lon1 are both {lon0:g}")
+    return lon0, lat0, lon1, lat1
+
+
+def inside_bbox(lat: np.ndarray, lon: np.ndarray, bbox: tuple[float, float, float, float]) -> np.ndarray:
+    """True for every pixel centre inside ``bbox``; a fill coordinate is outside."""
+    lon0, lat0, lon1, lat1 = bbox
+    with np.errstate(invalid="ignore"):
+        in_lat = (lat >= lat0) & (lat <= lat1)
+        if lon0 < lon1:
+            in_lon = (lon >= lon0) & (lon <= lon1)
+        else:
+            # Across the antimeridian: east of lon0 or west of lon1.
+            in_lon = (lon >= lon0) | (lon <= lon1)
+    return in_lat & in_lon
+
+
+def bbox_window(
+    lat: np.ndarray, lon: np.ndarray, bbox: tuple[float, float, float, float]
+) -> tuple[slice, slice] | None:
+    """The smallest block of source rows and columns holding every pixel inside ``bbox``.
+
+    ``None`` when no pixel is inside. The block is a rectangle of the *source*
+    array, so a pixel just outside the box but between two inside it is kept:
+    this crops the swath rather than masking it. The mask, the warp and the grid
+    all shrink with it, and the pixels kept carry exactly the values the whole
+    frame would have given them.
+    """
+    inside = inside_bbox(lat, lon, bbox)
+    rows = np.flatnonzero(inside.any(axis=1))
+    if not rows.size:
+        return None
+    columns = np.flatnonzero(inside.any(axis=0))
+    return slice(int(rows[0]), int(rows[-1]) + 1), slice(int(columns[0]), int(columns[-1]) + 1)
+
+
 def _spatial_reference(epsg: int) -> osr.SpatialReference:
     reference = osr.SpatialReference()
     reference.ImportFromEPSG(int(epsg))
@@ -594,7 +660,21 @@ def warp_swath(
         )
         vrt.FlushCache()
         vrt = None
-        gdal.Warp(destination, vrt_path, resampleAlg=how, **options)
+        # GDAL_NUM_THREADS is 1 for the warp itself; the warp keeps its own
+        # NUM_THREADS. On GDAL 3.13 each warp thread builds its own geolocation
+        # backmap, and the backmap's hole fill writes GeoTIFF work files. With
+        # GDAL_NUM_THREADS above 1 those files ask the shared thread pool for
+        # compression threads that the warp threads are already holding, and
+        # the process can wait forever at 0 % CPU. Measured on a cropped OL_2_LRR
+        # segment (2026-11-22, lat 50-85), gifapar, 2 threads: 3 hangs in
+        # 5 runs as it was, 0 in 8 with this.
+        # GDAL_GEOLOC_USE_TEMP_DATASETS=NO did not help (2 hangs in 3).
+        previous_threads = gdal.GetConfigOption("GDAL_NUM_THREADS")
+        gdal.SetConfigOption("GDAL_NUM_THREADS", "1")
+        try:
+            gdal.Warp(destination, vrt_path, resampleAlg=how, **options)
+        finally:
+            gdal.SetConfigOption("GDAL_NUM_THREADS", previous_threads)
 
     # GDAL's geolocation warp writes hole-filling work files to CPL_TMPDIR, or
     # to the current directory when that is unset. In a read-only container
