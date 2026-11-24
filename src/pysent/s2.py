@@ -69,6 +69,12 @@ S2_SUPPORTED_BANDS: tuple[str, ...] = (
     "B11",
     "B12",
 )
+# Level-2A scene classification (SCL) classes the optional cloud mask removes:
+# 3 cloud shadow, 8 cloud medium probability, 9 cloud high probability, 10 thin
+# cirrus. The mask is off by default: it costs an extra pass over the stack.
+S2_CLOUD_MASK_CLASSES: tuple[int, ...] = (3, 8, 9, 10)
+S2_SCL_BAND = "SCL"
+_S2_SCL_CLASSES = range(12)  # 0 no data ... 11 snow or ice
 # Product metadata GDAL's SENTINEL2 driver opens: MTD_MSIL1C.xml / MTD_MSIL2A.xml,
 # or S2A_OPER_MTD_SAFL1C_*.xml in pre-2016 (PSD < 14) products.
 _S2_METADATA_XML = re.compile(r"MTD_MSIL\w+\.xml|S2\w_\w+_MTD_SAFL\w+\.xml")
@@ -239,6 +245,152 @@ def _resolve_sentinel_s2_dataset_ref(input_dataset: str) -> str:
     if dataset_ref.startswith("/vsizip/"):
         return dataset_ref
     raise ValueError(f"Unsupported Sentinel-2 SAFE dataset reference: {dataset_ref}")
+
+
+def _read_text(path: str) -> str:
+    handle = gdal.VSIFOpenL(path, "rb")
+    if handle is None:
+        raise RuntimeError(f"Unable to read {path}")
+    try:
+        chunks = []
+        while chunk := gdal.VSIFReadL(1, 1 << 20, handle):
+            chunks.append(chunk)
+    finally:
+        gdal.VSIFCloseL(handle)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def read_sentinel_s2_radiometry(input_dataset: str) -> dict[str, Any]:
+    """How a Sentinel-2 product's digital numbers map to reflectance.
+
+    ``reflectance = (DN + offsets[band]) / quantification``. From processing
+    baseline 04.00 (January 2022) on, every band carries an offset of -1000:
+    ``RADIO_ADD_OFFSET`` in a Level-1C product, ``BOA_ADD_OFFSET`` in a
+    Level-2A one; older products have none, and their offsets are 0. GDAL's
+    SENTINEL2 driver does not report them (GDAL 3.8 gives every band offset 0),
+    so they are read from the product metadata here.
+
+    The RGB products need none of this: their stretch is per scene, from the
+    scene's own percentiles, and an offset added to every value moves those
+    percentiles by the same amount, so the picture is the same either way. A
+    caller that computes with the values themselves (an index, a fixed
+    reflectance range) needs it.
+
+    Returns ``level`` (``"L1C"`` or ``"L2A"``), ``processing_baseline``,
+    ``quantification`` and ``offsets`` (band name to offset, for every band
+    the product describes).
+    """
+    root_ref = _resolve_sentinel_s2_dataset_ref(input_dataset)
+    if root_ref.startswith("SENTINEL2_"):
+        # SENTINEL2_L2A:<path to MTD xml>:10m:EPSG_32633
+        root_ref = root_ref.split(":", 1)[1].rsplit(":", 2)[0].strip('"')
+    text = _read_text(root_ref)
+    level_match = re.search(r"<PROCESSING_LEVEL>\s*Level-(\w+)\s*<", text)
+    baseline_match = re.search(r"<PROCESSING_BASELINE>\s*([\d.]+)\s*<", text)
+    quantification_match = re.search(r"<(?:BOA_)?QUANTIFICATION_VALUE\b[^>]*>\s*([\d.]+)\s*<", text)
+    band_ids = dict(re.findall(r'<Spectral_Information bandId="(\d+)" physicalBand="(\w+)"', text))
+    if not band_ids:
+        band_ids = {str(index): name for index, name in enumerate(S2_SUPPORTED_BANDS)}
+    offsets = {
+        band_ids.get(band_id, band_id): float(value)
+        for band_id, value in re.findall(r'<(?:RADIO|BOA)_ADD_OFFSET band_id="(\d+)">\s*(-?[\d.]+)\s*<', text)
+    }
+    return {
+        "level": f"L{level_match.group(1).upper()}" if level_match else "",
+        "processing_baseline": baseline_match.group(1) if baseline_match else "",
+        "quantification": float(quantification_match.group(1)) if quantification_match else 10000.0,
+        "offsets": {name: offsets.get(name, 0.0) for name in band_ids.values()},
+    }
+
+
+def _radiometry_or_none(input_dataset: str) -> dict[str, Any] | None:
+    """The radiometry for the result record; it decides no pixel, so an unreadable one is left out."""
+    try:
+        return read_sentinel_s2_radiometry(input_dataset)
+    except (RuntimeError, ValueError, OSError):
+        return None
+
+
+def resolve_sentinel_s2_cloud_mask(value: object) -> tuple[int, ...]:
+    """The SCL classes ``cloud_mask`` asks to remove; empty when the mask is off.
+
+    ``False``/``None`` (the default) is off, ``True`` is
+    :data:`S2_CLOUD_MASK_CLASSES`, and a list of class numbers (0-11) picks
+    them.
+    """
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"", "false", "off", "none", "0"}:
+            return ()
+        if text in {"true", "on", "1"}:
+            return S2_CLOUD_MASK_CLASSES
+        raise ValueError(f"cloud_mask must be true, false or a list of SCL classes, not {value!r}")
+    if value is None or value is False:
+        return ()
+    if value is True:
+        return S2_CLOUD_MASK_CLASSES
+    if isinstance(value, (list, tuple, set, frozenset)):
+        classes = sorted({int(item) for item in value})
+        if not classes or any(item not in _S2_SCL_CLASSES for item in classes):
+            raise ValueError(f"cloud_mask classes must be SCL classes 0-11, not {list(value)!r}")
+        return tuple(classes)
+    raise ValueError(f"cloud_mask must be true, false or a list of SCL classes, not {value!r}")
+
+
+def _require_scl(sources: Mapping[str, Any]) -> None:
+    if S2_SCL_BAND not in sources:
+        raise ValueError("cloud_mask needs the scene classification (SCL) of a Level-2A product; this product has none")
+
+
+def _apply_cloud_mask(
+    stack_path: Path,
+    scl_source: Mapping[str, object],
+    classes: Sequence[int],
+    *,
+    strip_rows: int = 1024,
+) -> float:
+    """Set every band of the warped stack to NoData (0) where the SCL is one of ``classes``.
+
+    The SCL is warped onto the stack's grid by nearest neighbour, so a 20 m
+    class covers its four 10 m pixels. Returns the fraction of pixels masked.
+    """
+    with gdal_errors():
+        stack = gdal.Open(str(stack_path), gdal.GA_Update)
+    width, height = stack.RasterXSize, stack.RasterYSize
+    x0, dx, _, y0, _, dy = stack.GetGeoTransform()
+    band_vrt = f"/vsimem/pysent_scl_{os.getpid()}_{id(stack)}.vrt"
+    warped_vrt = band_vrt.replace(".vrt", ".warp.vrt")
+    lookup = np.isin(np.arange(65536), list(classes))
+    masked = 0
+    try:
+        with gdal_errors():
+            gdal.Translate(band_vrt, str(scl_source["subdataset_name"]),
+                           options=gdal.TranslateOptions(format="VRT", bandList=[int(scl_source["band_index"])]))
+            scl = gdal.Warp(
+                warped_vrt, band_vrt,
+                options=gdal.WarpOptions(
+                    format="VRT", dstSRS=stack.GetProjectionRef(), width=width, height=height,
+                    outputBounds=(x0, y0 + dy * height, x0 + dx * width, y0), resampleAlg="near",
+                ),
+            )
+            scl_band = scl.GetRasterBand(1)
+            for row in range(0, height, strip_rows):
+                rows = min(strip_rows, height - row)
+                mask = lookup[scl_band.ReadAsArray(0, row, width, rows)]
+                if not mask.any():
+                    continue
+                masked += int(mask.sum())
+                for index in range(1, stack.RasterCount + 1):
+                    band = stack.GetRasterBand(index)
+                    chunk = band.ReadAsArray(0, row, width, rows)
+                    chunk[mask] = 0
+                    band.WriteArray(chunk, 0, row)
+            scl = None
+    finally:
+        stack = None
+        gdal.Unlink(band_vrt)
+        gdal.Unlink(warped_vrt)
+    return masked / float(width * height)
 
 
 def _extract_epsg(subdataset_name: str, dataset: gdal.Dataset) -> str:
@@ -777,6 +929,8 @@ def _process_sentinel_s2_product(
     stretch_method: str = S2_STRETCH_METHOD,
     stretch_gamma: float = S2_STRETCH_GAMMA,
     preset: str = "full",
+    cloud_mask: tuple[int, ...] = (),
+    radiometry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write one RGB product by selecting its three bands from the scene's warped stack."""
     if isinstance(stack, BaseException):
@@ -804,6 +958,7 @@ def _process_sentinel_s2_product(
             target_epsg=stack["target_epsg"],
             target_resolution=stack["target_resolution"],
             preset=preset,
+            cloud_mask=cloud_mask or None,
         )
         # The final file is moved into place only once complete, so a failure or a
         # kill leaves no truncated output under the final name.
@@ -849,6 +1004,8 @@ def _process_sentinel_s2_product(
         "target_resolution": stack["target_resolution"],
         "histogram_stretch": histogram_stretch,
         "stretch": stretch_stats,
+        "cloud_mask": {"classes": list(cloud_mask), "masked_fraction": stack.get("masked_fraction")} if cloud_mask else None,
+        "radiometry": radiometry,
         "provenance": stamp,
     }
 
@@ -889,6 +1046,8 @@ def _prepare_sentinel_s2_stacks(
         sources = _collect_sentinel_s2_band_sources(input_dataset)
     except Exception as exc:
         return dict.fromkeys(product_names, exc)
+    if settings["cloud_mask"]:
+        _require_scl(sources)  # a request no product can meet: refused as a whole
 
     prepared: dict[str, Any] = {}
     grids: dict[tuple[str | None, float], list[str]] = {}
@@ -925,6 +1084,10 @@ def _prepare_sentinel_s2_stacks(
                 compression=settings["intermediate_compression"],
                 interleave="BAND",
             )
+            masked = (
+                _apply_cloud_mask(stack_path, sources[S2_SCL_BAND], settings["cloud_mask"])
+                if settings["cloud_mask"] else None
+            )
         except Exception as exc:
             prepared.update(dict.fromkeys(names, exc))
             continue
@@ -934,6 +1097,7 @@ def _prepare_sentinel_s2_stacks(
                 "band_indexes": [band_names.index(band) + 1 for band in product_bands[name]],
                 "target_epsg": epsg,
                 "target_resolution": resolution,
+                "masked_fraction": masked,
             }
     return prepared
 
@@ -976,6 +1140,7 @@ def _resolve_sentinel_s2_processing_settings(
         requested_gdal_threads = os.environ.get("S2_GDAL_NUM_THREADS")
     gdal_num_threads = _resolve_gdal_num_threads(requested_gdal_threads, product_workers)
     warp_memory_limit_mb = _resolve_warp_memory_limit_mb(processing.get("warp_memory_limit_mb"))
+    cloud_mask = resolve_sentinel_s2_cloud_mask(processing.get("cloud_mask"))
     histogram_enabled = bool(histogram)
     if not histogram_enabled and any(key in processing for key in _STRETCH_KEYS):
         warnings.warn(
@@ -1000,6 +1165,7 @@ def _resolve_sentinel_s2_processing_settings(
         "product_workers": product_workers,
         "gdal_num_threads": gdal_num_threads,
         "warp_memory_limit_mb": warp_memory_limit_mb,
+        "cloud_mask": cloud_mask,
         "work_dir": resolve_work_dir(processing.get("work_dir")),
         "runtime": resolve_gdal_runtime(processing, requested_gdal_threads, gdal_num_threads),
     }
@@ -1043,6 +1209,18 @@ def process_sentinel_s2_safe(
         ``full`` (default) or ``quicklook``, which renders at 60 m: about an
         order of magnitude faster, since GDAL then reads the JP2 overviews.
         Options given explicitly win over the preset.
+    ``cloud_mask``
+        Level-2A only. ``True`` turns the pixels the scene classification
+        (SCL) calls cloud, cloud shadow or thin cirrus
+        (:data:`S2_CLOUD_MASK_CLASSES`) into NoData before the stretch, so
+        they are transparent and leave the percentiles to the rest of the
+        scene; a list of SCL classes picks others. Off by default. A product
+        without an SCL (Level-1C) fails with ``ValueError``.
+
+    Level-1C and Level-2A products are both read; each result also carries
+    ``radiometry`` (:func:`read_sentinel_s2_radiometry`; ``None`` when the
+    metadata cannot be read) and ``cloud_mask`` (the classes and the fraction
+    of pixels masked, or ``None``).
 
     Every requested product is attempted. If one of several fails,
     :class:`pysent.errors.PartialFailure` is raised after the rest finish. A
@@ -1057,6 +1235,7 @@ def process_sentinel_s2_safe(
     with scratch_dir(scratch_root) as scratch:
         with gdal_runtime(**settings["runtime"]):
             stacks = _prepare_sentinel_s2_stacks(input_dataset, product_bands, product_names, scratch, settings)
+            radiometry = _radiometry_or_none(input_dataset)
         jobs = [
             (
                 product_name,
@@ -1073,6 +1252,8 @@ def process_sentinel_s2_safe(
                     "compression": settings["compression"],
                     "overview_factors": settings["overview_factors"],
                     "preset": settings["preset"],
+                    "cloud_mask": settings["cloud_mask"],
+                    "radiometry": radiometry,
                 },
             )
             for product_name in product_names

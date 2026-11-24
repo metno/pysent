@@ -289,7 +289,7 @@ SENTINEL_PRODUCT_TYPES: dict[tuple[str, str], tuple[str, str, str]] = {
     ("S1", "GRD"): ("s1", "ready", ""),
     ("S1", "SLC"): ("s1", "unsupported", "single-look complex data needs a different pipeline"),
     ("S2", "MSIL1C"): ("s2", "ready", ""),
-    ("S2", "MSIL2A"): ("s2", "unsupported", "surface reflectance has its own masks and scaling"),
+    ("S2", "MSIL2A"): ("s2", "ready", ""),
     ("S5P", "L2__NO2___"): ("s5p", "ready", ""),
     ("S5P", "L2__CO____"): ("s5p", "ready", ""),
     ("S5P", "L2__HCHO__"): ("s5p", "ready", ""),

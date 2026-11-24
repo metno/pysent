@@ -141,18 +141,26 @@ def _s2_band_file(subdataset_name: str, band_name: str) -> str:
     return matches[0]
 
 
-def _s2_band_entry(name: str, file_name: str, geotransform: Sequence[float] | None = None) -> dict[str, Any]:
+def _s2_band_entry(
+    name: str,
+    file_name: str,
+    geotransform: Sequence[float] | None = None,
+    *,
+    data_types: tuple[int, ...] = (gdal.GDT_UInt16,),
+) -> dict[str, Any]:
     with gdal_errors():
         dataset = gdal.Open(file_name, gdal.GA_ReadOnly)
     band = dataset.GetRasterBand(1)
-    if band.DataType != gdal.GDT_UInt16:
-        raise RuntimeError(f"Sentinel-2 band {name} is {gdal.GetDataTypeName(band.DataType)}, not UInt16")
+    if band.DataType not in data_types:
+        expected = " or ".join(gdal.GetDataTypeName(value) for value in data_types)
+        raise RuntimeError(f"Sentinel-2 band {name} is {gdal.GetDataTypeName(band.DataType)}, not {expected}")
     return {
         "name": name,
         "file": file_name,
         "width": dataset.RasterXSize,
         "height": dataset.RasterYSize,
         "block": band.GetBlockSize(),
+        "data_type": gdal.GetDataTypeName(band.DataType),
         "geotransform": tuple(geotransform or dataset.GetGeoTransform()),
         "srs": dataset.GetProjectionRef(),
     }
@@ -216,16 +224,66 @@ def _s2_resolve_options(processing_options: dict[str, Any] | None) -> tuple[tupl
     return _resolve_stretch_options(processing)
 
 
-def _s2_stats_vrt(bands: list[dict[str, Any]], width: int, height: int, srs: str, geotransform) -> str:
+def _s2_mask_lut(classes: Sequence[int]) -> str:
+    """SCL class to 0 (masked) or 1 (kept); a ``mul`` pixel function applies it."""
+    values = np.arange(256)
+    return _step_lut(values, np.where(np.isin(values, list(classes)), 0, 1))
+
+
+def _s2_band_element(
+    root: ET.Element,
+    position: int,
+    data_type: str,
+    mask: dict[str, Any] | None,
+) -> ET.Element:
+    """A plain band, or with a mask the product of the band and the mask's 0/1 lookup.
+
+    ``mul`` is one of GDAL's built-in pixel functions: no Python runs on read.
+    """
+    if mask is None:
+        return _sub(root, "VRTRasterBand", dataType=data_type, band=position)
+    element = _sub(root, "VRTRasterBand", dataType=data_type, band=position, subClass="VRTDerivedRasterBand")
+    _sub(element, "PixelFunctionType", "mul")
+    _sub(element, "SourceTransferType", data_type)
+    return element
+
+
+def _s2_add_mask_source(element: ET.Element, mask: dict[str, Any], width: int, height: int,
+                        classes: Sequence[int], *, full_resolution: bool) -> None:
+    source = _sub(element, "ComplexSource")
+    _sub(source, "SourceFilename", mask["file"], relativeToVRT="0")
+    if full_resolution:
+        options = _sub(source, "OpenOptions")
+        _sub(options, "OOI", "NONE", key="OVERVIEW_LEVEL")
+    _sub(source, "SourceBand", 1)
+    if not full_resolution:
+        _sub(source, "SourceProperties", RasterXSize=mask["width"], RasterYSize=mask["height"],
+             DataType=mask["data_type"], BlockXSize=mask["block"][0], BlockYSize=mask["block"][1])
+    _sub(source, "SrcRect", xOff=0, yOff=0, xSize=mask["width"], ySize=mask["height"])
+    _sub(source, "DstRect", xOff=0, yOff=0, xSize=width, ySize=height)
+    _sub(source, "LUT", _s2_mask_lut(classes))
+
+
+def _s2_stats_vrt(
+    bands: list[dict[str, Any]],
+    width: int,
+    height: int,
+    srs: str,
+    geotransform,
+    mask: dict[str, Any] | None = None,
+    classes: Sequence[int] = (),
+) -> str:
     """An in-memory UInt16 stack of the bands, read at full resolution only.
 
     The GeoTIFF path samples the warped full-resolution stack; opening the JPEG
     2000 files without their resolution levels makes the same decimated read
-    pick the same pixels, so the percentiles come out identical.
+    pick the same pixels, so the percentiles come out identical. With a cloud
+    mask the masked pixels read 0 (NoData), as they do in the GeoTIFF path's
+    masked stack, and leave the percentiles.
     """
     root = _dataset_element(width, height, srs, geotransform)
     for position, band in enumerate(bands, start=1):
-        element = _sub(root, "VRTRasterBand", dataType="UInt16", band=position)
+        element = _s2_band_element(root, position, "UInt16", mask)
         _sub(element, "NoDataValue", 0)
         source = _sub(element, "ComplexSource")
         _sub(source, "SourceFilename", band["file"], relativeToVRT="0")
@@ -235,6 +293,8 @@ def _s2_stats_vrt(bands: list[dict[str, Any]], width: int, height: int, srs: str
         _sub(source, "SrcRect", xOff=0, yOff=0, xSize=band["width"], ySize=band["height"])
         _sub(source, "DstRect", xOff=0, yOff=0, xSize=width, ySize=height)
         _sub(source, "NODATA", 0)
+        if mask is not None:
+            _s2_add_mask_source(element, mask, width, height, classes, full_resolution=True)
     path = f"/vsimem/pysent_s2_stats_{uuid.uuid4().hex}.vrt"
     gdal.FileFromMemBuffer(path, ET.tostring(root, encoding="unicode"))
     return path
@@ -257,20 +317,32 @@ def build_sentinel_s2_vrt(
     (``stretch_gamma``, default 0.7), valid pixels in ``[1, 255]`` and 0 for
     NoData, on the tile's own grid at the finest band's resolution.
 
+    ``cloud_mask`` (Level-2A, off by default) is the option of
+    :func:`pysent.s2.process_sentinel_s2_safe`: the pixels whose scene
+    classification is one of the classes read 0, through GDAL's built-in
+    ``mul`` pixel function over the SCL file, and the percentiles are taken
+    without them.
+
     Only ``output_path`` (ending in ``.vrt``) is written. Returns ``path``,
     ``product_name``, ``bands``, ``target_epsg``, ``resolution``, ``width``,
     ``height``, ``sources`` (the files the VRT reads), ``stretch`` (the
-    numbers baked in) and ``provenance`` (the ``PYSENT_*`` tags, also in the
-    VRT's metadata). Raises :class:`pysent.errors.EmptySceneError` if a band
+    numbers baked in), ``cloud_mask`` (the classes and the SCL file, or
+    ``None``), ``radiometry`` (:func:`pysent.s2.read_sentinel_s2_radiometry`,
+    ``None`` for a netCDF or unreadable metadata) and ``provenance`` (the
+    ``PYSENT_*`` tags, also in the VRT's metadata). Raises :class:`pysent.errors.EmptySceneError` if a band
     has no valid pixel.
     """
     from .s2 import (
         S2_DEFAULT_PRODUCTS,
+        S2_SCL_BAND,
         _collect_sentinel_s2_band_sources,
+        _radiometry_or_none,
+        _require_scl,
         _select_band_sources,
         _stretch_lut,
         _stretch_range,
         normalize_sentinel_s2_product_map,
+        resolve_sentinel_s2_cloud_mask,
     )
 
     final_path = _output_path(output_path)
@@ -282,22 +354,34 @@ def build_sentinel_s2_vrt(
         product_name = "_".join(str(band).lower() for band in product)
         band_names = normalize_sentinel_s2_product_map({product_name: list(product)})[product_name]
     percentiles, method, gamma = _s2_resolve_options(processing_options)
+    classes = resolve_sentinel_s2_cloud_mask((processing_options or {}).get("cloud_mask"))
 
+    mask = None
     if _is_netcdf(input_dataset):
+        if classes:
+            raise ValueError("cloud_mask needs the SAFE product's scene classification (SCL); a netCDF source has none here")
         bands = [_s2_netcdf_band(input_dataset, band) for band in band_names]
         target_epsg = _epsg_of(bands[0]["srs"])
         resolution = min(band["geotransform"][1] for band in bands)
     else:
         sources = _collect_sentinel_s2_band_sources(input_dataset)
+        if classes:
+            _require_scl(sources)
         selected, target_epsg, resolution = _select_band_sources(sources, band_names)
         bands = [
             _s2_band_entry(str(source["band_name"]), _s2_band_file(str(source["subdataset_name"]), str(source["band_name"])))
             for source in selected
         ]
+        if classes:
+            scl = sources[S2_SCL_BAND]
+            mask = _s2_band_entry(
+                S2_SCL_BAND, _s2_band_file(str(scl["subdataset_name"]), S2_SCL_BAND),
+                data_types=(gdal.GDT_Byte, gdal.GDT_UInt16),
+            )
     finest = min(bands, key=lambda band: band["geotransform"][1])
     width, height = finest["width"], finest["height"]
     geotransform, srs = finest["geotransform"], finest["srs"]
-    for band in bands:
+    for band in bands + ([mask] if mask is not None else []):
         # Every band of a tile covers the same square; a mismatch means the
         # nearest-neighbour upsampling below would shift it.
         span = (band["width"] * band["geotransform"][1], band["height"] * band["geotransform"][5])
@@ -305,7 +389,7 @@ def build_sentinel_s2_vrt(
                 span != (width * geotransform[1], height * geotransform[5]):
             raise RuntimeError(f"Sentinel-2 band {band['name']} is not on the tile's grid")
 
-    stats_path = _s2_stats_vrt(bands, width, height, srs, geotransform)
+    stats_path = _s2_stats_vrt(bands, width, height, srs, geotransform, mask, classes)
     try:
         with gdal_errors():
             stats_dataset = gdal.Open(stats_path)
@@ -328,6 +412,7 @@ def build_sentinel_s2_vrt(
         target_resolution=float(resolution),
         preset="full",
         output=VRT_OUTPUT,
+        cloud_mask=classes or None,
     )
     stamp.pop("TIFFTAG_SOFTWARE", None)  # a TIFF tag means nothing in a VRT
 
@@ -336,7 +421,7 @@ def build_sentinel_s2_vrt(
     inputs = np.arange(1, 65536)
     for position, (band, (low, high), color) in enumerate(zip(bands, ranges, ("Red", "Green", "Blue")), start=1):
         lut = _stretch_lut(low, high, gamma, 65536, 0)
-        element = _sub(root, "VRTRasterBand", dataType="Byte", band=position)
+        element = _s2_band_element(root, position, "Byte", mask)
         _sub(element, "Description", band["name"])
         _sub(element, "NoDataValue", 0)
         _sub(element, "ColorInterp", color)
@@ -349,6 +434,8 @@ def build_sentinel_s2_vrt(
         _sub(source, "DstRect", xOff=0, yOff=0, xSize=width, ySize=height)
         _sub(source, "NODATA", 0)
         _sub(source, "LUT", _step_lut(inputs, lut[1:]))
+        if mask is not None:
+            _s2_add_mask_source(element, mask, width, height, classes, full_resolution=False)
     _write_vrt(root, final_path)
 
     return {
@@ -368,6 +455,8 @@ def build_sentinel_s2_vrt(
             **({"percentiles": [float(value) for value in percentiles]} if method == "percentile" else {}),
             "gamma": gamma,
         },
+        "cloud_mask": {"classes": list(classes), "source": mask["file"]} if mask is not None else None,
+        "radiometry": None if _is_netcdf(input_dataset) else _radiometry_or_none(input_dataset),
         "provenance": stamp,
     }
 
