@@ -1044,10 +1044,10 @@ def _prepare_sentinel_s2_stacks(
     """
     try:
         sources = _collect_sentinel_s2_band_sources(input_dataset)
-        if settings["cloud_mask"]:
-            _require_scl(sources)
     except Exception as exc:
         return dict.fromkeys(product_names, exc)
+    if settings["cloud_mask"]:
+        _require_scl(sources)  # a request no product can meet: refused as a whole
 
     prepared: dict[str, Any] = {}
     grids: dict[tuple[str | None, float], list[str]] = {}

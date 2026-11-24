@@ -127,6 +127,14 @@ def test_the_mask_refuses_a_product_without_an_scl(tmp_path, l2a_scene):
     l2a_scene["state"]["sources"].pop("SCL")  # a Level-1C product
     with pytest.raises(ValueError, match="SCL"):
         _gtiff(tmp_path, {"cloud_mask": True})
+    # Several products: still one ValueError, not a partial failure of each.
+    with pytest.raises(ValueError, match="SCL"):
+        process_sentinel_s2_safe(
+            input_dataset="scene.zip", output_dir=tmp_path / "several",
+            product_bands={"a": ("B4", "B3", "B2"), "b": ("B2", "B3", "B4")},
+            output_names={"a": "a.tif", "b": "b.tif"},
+            processing_options={"histogram_stretch": True, "cloud_mask": True},
+        )
     _gtiff(tmp_path, name="unmasked")  # and without the mask it is processed as before
 
 
