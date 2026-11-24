@@ -107,7 +107,10 @@ S5P_PRODUCTS: dict[str, dict[str, Any]] = {
         "variable": f"{PRODUCT_GROUP}/carbonmonoxide_total_column",
         "units": "mol m-2",
         "qa_min": 0.5,
-        "value_range": (0.02, 0.04),
+        # The review study's approved range (2026-10-30): the table's 0.02-0.04 put
+        # 29.8 % of a year's kept pixels in the bottom colour; the pool's p1/p99 are
+        # 0.0070/0.0476.
+        "value_range": (0.007, 0.048),
         "colormap": "viridis",
         "label": "CO total column",
     },
@@ -131,7 +134,10 @@ S5P_PRODUCTS: dict[str, dict[str, Any]] = {
         "variable": f"{PRODUCT_GROUP}/ozone_total_vertical_column",
         "units": "mol m-2",
         "qa_min": 0.5,
-        "value_range": (0.12, 0.15),
+        # The review study's approved range (2026-10-30): the table's 0.12-0.15 put
+        # 23.4 % of a year's kept pixels in the top colour and 23.9 % in the bottom;
+        # the pool's p1/p99 are 0.087/0.217.
+        "value_range": (0.08, 0.22),
         "colormap": "viridis",
         "label": "Total ozone column",
     },
@@ -139,7 +145,10 @@ S5P_PRODUCTS: dict[str, dict[str, Any]] = {
         "variable": f"{PRODUCT_GROUP}/methane_mixing_ratio_bias_corrected",
         "units": "ppb",
         "qa_min": 0.5,
-        "value_range": (1850.0, 2000.0),
+        # The review study's approved range (2026-10-30): the table's 1850-2000 put
+        # 25.4 % of a year's kept pixels in the bottom colour; the pool's p1/p99 are
+        # 1699/1977.
+        "value_range": (1690.0, 1980.0),
         "colormap": "viridis",
         "label": "Methane mixing ratio",
     },
@@ -174,7 +183,9 @@ S5P_PRODUCTS: dict[str, dict[str, Any]] = {
         "variable": f"{PRODUCT_GROUP}/ozone_total_column",
         "units": "mol m-2",
         "qa_min": 0.5,
-        "value_range": (0.12, 0.15),
+        # The review study's approved range (2026-10-30): the table's 0.12-0.15 put
+        # 23.8 % of a year's kept pixels in the top colour.
+        "value_range": (0.10, 0.22),
         "colormap": "viridis",
         "label": "Total ozone column (profile product)",
         # The profile product is on a 75x77 grid of about 29 km pixels, against

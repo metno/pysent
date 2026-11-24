@@ -280,14 +280,12 @@ S3_PRODUCTS.update({
         "geolocation": SLSTR_GEOLOCATION,
         "units": "degC",
         "unit": "celsius",
-        # Q7's rule gives 10-45 from a June Nordic frame (masked p01/p50/p99 of
-        # 12.0 / 26.2 / 43.0 °C), and a February polar frame medians at -31 °C.
-        # No single range satisfies both: the plan's note that "a Nordic winter
-        # wants -10 to 40" is the practical compromise, with the top widened to
-        # cover the measured summer p99. A polar winter scene will clip at the
-        # bottom, which is a real limitation and an open question for a
-        # reviewer rather than something to decide from two frames.
-        "value_range": (-10.0, 45.0),
+        # The review study's approved range (2026-11-02): the first proposal,
+        # -10-45 from one June Nordic frame, put 57.4 % of a year's pictured
+        # Nordic pixels in the bottom colour, because polar and winter frames
+        # median far below -10. The pool's p1-p99 over the year is -43-33 °C,
+        # fixed per product rather than per frame.
+        "value_range": (-43.0, 33.0),
         "log_scale": False,
         "colormap": "magma",
         "label": "Land surface temperature",
