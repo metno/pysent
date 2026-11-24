@@ -1171,6 +1171,9 @@ def _assemble_result(
         "provenance": metadata,
     }
     result.update(extra or {})
+    # Described; the styled pair reads the file again a strip at a time, so the
+    # whole grid need not stay in memory while it does.
+    del values
 
     if settings["styled"]:
         styled_path = float_path.with_name(f"{float_path.stem}_styled.tif")

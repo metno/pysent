@@ -143,6 +143,36 @@ def _matches_codes(codes: np.ndarray, wanted: tuple[int, ...]) -> np.ndarray:
     return matched & finite
 
 
+# Cells styled at once: about 4 M, so a strip's float64 temporaries are tens of
+# megabytes whatever the grid. A module attribute so a test can make it small.
+STRIP_CELLS = 1 << 22
+
+
+def _row_strips(height: int, width: int, block_rows: int):
+    """``(first row, row count)`` pairs covering ``height`` rows in order.
+
+    Each strip is a whole number of the output's block rows (the last one
+    excepted). A strip that ended inside a row of tiles would leave those tiles
+    half written; GDAL may flush a half-written tile and rewrite it later at a
+    new offset, which keeps the pixels but not the file's bytes.
+    """
+    block_rows = max(1, int(block_rows))
+    blocks = max(1, STRIP_CELLS // max(1, width * block_rows))
+    step = blocks * block_rows
+    for offset in range(0, height, step):
+        yield offset, min(step, height - offset)
+
+
+def _hidden_removed(source, offset: int, rows: int, hide_codes: tuple[int, ...], reason_band: int | None):
+    """Rows ``offset .. offset + rows`` of band 1, NaN where the reason band holds a hidden code."""
+    width = source.RasterXSize
+    values = source.GetRasterBand(1).ReadAsArray(0, offset, width, rows)
+    if hide_codes:
+        codes = source.GetRasterBand(reason_band).ReadAsArray(0, offset, width, rows)
+        values = np.where(_matches_codes(codes, hide_codes), np.nan, values)
+    return values
+
+
 def write_styled_copy(
     *,
     source_path: str,
@@ -164,23 +194,20 @@ def write_styled_copy(
     from osgeo import gdal
 
     source = gdal.Open(source_path)
-    values = source.GetRasterBand(1).ReadAsArray()
+    width, height = source.RasterXSize, source.RasterYSize
     # The browse image may hide pixels the float product keeps. The two outputs
     # answer to different audiences: a coverage service serves people who can
     # filter for themselves, a map service serves a picture that should not have
     # cloud edges in it. Which pixels those are is read back from the reason
     # band, so this needs no access to the source product.
-    if hide_codes and reason_band and source.RasterCount >= reason_band:
-        codes = source.GetRasterBand(reason_band).ReadAsArray()
-        values = np.where(_matches_codes(codes, hide_codes), np.nan, values)
-    styled = styled_bytes(values, value_range, log_scale=log_scale)
+    hiding = bool(hide_codes) and bool(reason_band) and source.RasterCount >= (reason_band or 1)
 
     with atomic_output(output_path) as temporary:
         driver = gdal.GetDriverByName("GTiff")
         dataset = driver.Create(
             str(temporary),
-            styled.shape[1],
-            styled.shape[0],
+            width,
+            height,
             1,
             gdal.GDT_Byte,
             options=creation_options(settings, float_data=False),
@@ -193,7 +220,13 @@ def write_styled_copy(
         band.SetRasterColorTable(colour_table(colormap))
         band.SetRasterColorInterpretation(gdal.GCI_PaletteIndex)
         band.SetNoDataValue(0)
-        band.WriteArray(styled)
+        # A strip at a time: styling is per pixel, so the bytes are the same as
+        # styling the whole grid at once, and the float64 temporaries are the
+        # size of a strip rather than of the grid (on a full-resolution OLCI
+        # frame they took the run from 1.3 GB to 2.7 GB).
+        for offset, rows in _row_strips(height, width, band.GetBlockSize()[1]):
+            values = _hidden_removed(source, offset, rows, hide_codes if hiding else (), reason_band)
+            band.WriteArray(styled_bytes(values, value_range, log_scale=log_scale), 0, offset)
         dataset.SetMetadata({
             **metadata,
             "PYSENT_STYLE_RANGE": f"{value_range[0]},{value_range[1]}",
@@ -242,16 +275,19 @@ def write_thumbnail(*, source_path: str, output_path: Path, value_range: tuple[f
         # Off by default, because turning it on changes what an existing
         # pipeline renders. Sentinel-3 asks for it; Sentinel-5P does not, so its
         # thumbnails stay byte-for-byte what they were.
-        full = source.GetRasterBand(1).ReadAsArray()
-        if hiding:
-            codes = source.GetRasterBand(reason_band).ReadAsArray()
-            full = np.where(_matches_codes(codes, hide_codes), np.nan, full)
+        #
+        # The copy is filled a strip at a time, so the only full-size array is
+        # the copy itself, not the copy plus the read and its masked twin.
         materialised = gdal.GetDriverByName("MEM").Create("", width, height, 1, gdal.GDT_Float32)
         materialised.SetGeoTransform(source.GetGeoTransform())
         materialised.SetProjection(source.GetProjection())
         band = materialised.GetRasterBand(1)
         band.SetNoDataValue(float("nan"))
-        band.WriteArray(full)
+        block_rows = source.GetRasterBand(1).GetBlockSize()[1]
+        for offset, rows in _row_strips(height, width, block_rows):
+            band.WriteArray(
+                _hidden_removed(source, offset, rows, hide_codes if hiding else (), reason_band), 0, offset
+            )
         source = materialised
 
     resampled = gdal.Warp(
