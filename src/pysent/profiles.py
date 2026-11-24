@@ -36,7 +36,9 @@ __all__ = [
     "get_nbs_sentinel_platform_profiles",
     "normalize_nbs_sentinel_platform_profiles",
     "resolve_nbs_sentinel_platform_profile",
+    "REVIEWED_SENTINEL_DEFAULTS",
     "resolve_sentinel_pipeline",
+    "sentinel_product_defaults",
     "supported_sentinel_product_types",
 ]
 
@@ -335,6 +337,14 @@ def supported_sentinel_product_types() -> list[str]:
     ]
 
 
+def _detected(info: Any) -> dict[str, str]:
+    if isinstance(info, dict):
+        return info if "product_type" in info else {**info, "product_type": "", "stream": ""}
+    if isinstance(info, str):
+        return detect_nbs_sentinel_product(info)
+    return detect_nbs_sentinel_product_for_dataset(info)
+
+
 def resolve_sentinel_pipeline(info: Any) -> str:
     """Return the pipeline name for a product, or refuse it with a reason.
 
@@ -353,13 +363,7 @@ def resolve_sentinel_pipeline(info: Any) -> str:
     """
     from .errors import UnsupportedProductError
 
-    if isinstance(info, dict):
-        detected = info if "product_type" in info else {**info, "product_type": "", "stream": ""}
-    elif isinstance(info, str):
-        detected = detect_nbs_sentinel_product(info)
-    else:
-        detected = detect_nbs_sentinel_product_for_dataset(info)
-
+    detected = _detected(info)
     family = detected.get("family") or "unknown"
     product_type = detected.get("product_type") or ""
     supported = ", ".join(supported_sentinel_product_types()) or "nothing"
@@ -551,3 +555,115 @@ def apply_nbs_sentinel_metadata_profile(
             if value:
                 merged[key] = value
     return merged
+
+
+# The Sentinel-3 and Sentinel-5P products whose display defaults (mask, quality
+# threshold, colour range, ramp, scale; truecolor's range and gamma; SST's view)
+# were shown on about 100 scenes each, across a year of the Nordic archive, in a
+# review study, and approved from those pictures by the owner on the date given.
+# The study's renders were reproduced by this release on GDAL 3.8.4 and 3.13.3
+# (tools/review_parity/). A product that is not listed runs on pysent's table
+# value, proposed from a few granules and not reviewed.
+REVIEWED_SENTINEL_DEFAULTS: dict[str, dict[str, str]] = {
+    "s5p": {
+        "study": "s5p-l2",
+        "approved": "2026-10-30",
+        "products": "no2 co hcho so2 o3 ch4 aer_ai cloud aer_lh o3_pr_total",
+    },
+    "s3": {
+        "study": "s3-l2",
+        "approved": "2026-11-02",
+        "products": "chl tsm kd490 gifapar otci lst sst truecolor",
+    },
+}
+
+
+def sentinel_product_defaults(info: Any) -> dict[str, Any]:
+    """What pysent makes from a product by default, and how each map is styled.
+
+    ``info`` is what :func:`resolve_sentinel_pipeline` takes (a title, filename,
+    archive path, detection dict or dataset object), and a product it refuses is
+    refused here the same way, with :class:`pysent.errors.UnsupportedProductError`.
+
+    Returns ``family``, ``product_type``, ``pipeline`` and ``products``: for
+    Sentinel-3 and Sentinel-5P one entry per product made by default, holding
+    exactly the values a request with no options is processed with - so a
+    service can register a layer's legend, units and ramp without running it:
+
+    ``label``, ``units``
+        what the stored numbers are (after any unit conversion, e.g. ``degC``);
+    ``value_range``, ``colormap``, ``scale``
+        the colour range baked into the 8-bit copy, its ramp (``None`` for an
+        RGB composite) and ``"linear"`` or ``"log10"``;
+    ``gamma``
+        RGB composites only;
+    ``qa_min``, ``variable``
+        Sentinel-5P: the quality threshold a pixel must exceed, and the array read;
+    ``view``
+        Sentinel-3 SST: which retrieval (``"dual"``, ``"nadir"``, ``"best"``);
+    ``reviewed``
+        ``{"study", "approved"}`` when the defaults come from a review study
+        (:data:`REVIEWED_SENTINEL_DEFAULTS`), else ``None``.
+
+    Sentinel-1 and Sentinel-2 maps are stretched per scene, with no fixed range
+    to report, so their ``products`` is ``None``.
+
+    Nothing is opened; the Sentinel-3 or Sentinel-5P module is imported.
+    """
+    pipeline = resolve_sentinel_pipeline(info)
+    detected = _detected(info)
+    out: dict[str, Any] = {
+        "family": detected.get("family"),
+        "product_type": detected.get("product_type"),
+        "pipeline": pipeline,
+        "products": None,
+    }
+    reviewed = REVIEWED_SENTINEL_DEFAULTS.get(pipeline)
+    reviewed_products = set(reviewed["products"].split()) if reviewed else set()
+
+    def review(name: str) -> dict[str, str] | None:
+        if name not in reviewed_products:
+            return None
+        return {"study": reviewed["study"], "approved": reviewed["approved"]}
+
+    if pipeline == "s5p":
+        from .s5p import S5P_DEFAULT_PRODUCTS, S5P_TYPE_PRODUCTS, normalize_sentinel_s5p_product_map
+
+        names = S5P_TYPE_PRODUCTS.get(out["product_type"], S5P_DEFAULT_PRODUCTS)
+        normalized = normalize_sentinel_s5p_product_map(None, default_products=names)
+        out["products"] = {
+            name: {
+                "label": options["label"],
+                "units": options["units"],
+                "value_range": [float(x) for x in options["value_range"]],
+                "colormap": options["colormap"],
+                "scale": "linear",
+                "qa_min": options["qa_min"],
+                "variable": options["variable"],
+                "reviewed": review(name),
+            }
+            for name, options in normalized.items()
+        }
+    elif pipeline == "s3":
+        from .s3 import S3_DEFAULT_PRODUCTS, S3_TYPE_PRODUCTS, normalize_sentinel_s3_product_map
+
+        names = S3_TYPE_PRODUCTS.get(out["product_type"], S3_DEFAULT_PRODUCTS)
+        normalized = normalize_sentinel_s3_product_map(None, default_products=names)
+        products: dict[str, Any] = {}
+        for name, options in normalized.items():
+            rgb = options["kind"] in ("rgb", "surface")
+            entry: dict[str, Any] = {
+                "label": options["label"],
+                "units": options["units"],
+                "value_range": [float(x) for x in options["value_range"]],
+                "colormap": None if rgb else options["colormap"],
+                "scale": "log10" if options["log_scale"] else "linear",
+            }
+            if rgb:
+                entry["gamma"] = options["gamma"]
+            if options.get("view"):
+                entry["view"] = options["view"]
+            entry["reviewed"] = review(name)
+            products[name] = entry
+        out["products"] = products
+    return out
