@@ -69,6 +69,7 @@ _S1_READ_THREADS = 16
 _S2_READ_THREADS = 12
 _S1_ROWS_PER_TASK = 8
 _S1_STATS_COLUMNS = 32
+_S1_ROW_OVERSAMPLE = 2
 
 
 def _fit(width: int, height: int, size: int) -> tuple[int, int]:
@@ -286,6 +287,7 @@ def sentinel_s2_thumbnail(
     cols = _reduced_side(finest.GetRasterBand(1), _OVERSAMPLE * size)
     rows = max(1, round(finest.RasterYSize * cols / finest.RasterXSize))
     geotransform = finest.GetGeoTransform()
+    full_cols, full_rows = finest.RasterXSize, finest.RasterYSize
     crs = finest.GetProjectionRef()
     split = _window_split(cols, rows, datasets)
     datasets = finest = None
@@ -315,7 +317,7 @@ def sentinel_s2_thumbnail(
         "alpha": alpha,
         "width": width,
         "height": height,
-        "geotransform": _scaled_geotransform(geotransform, cols, rows, width, height),
+        "geotransform": _scaled_geotransform(geotransform, full_cols, full_rows, width, height),
         "crs": crs,
         "read_side": cols,
         "stretch": {
@@ -481,7 +483,7 @@ def sentinel_s1_thumbnail(
 
     # Row i of the coarse grid is the middle row of source rows [i*step, (i+1)*step);
     # column j is the mean of source columns [j*col_step, (j+1)*col_step).
-    step = max(1, height // (_OVERSAMPLE * size))
+    step = max(1, height // (_S1_ROW_OVERSAMPLE * size))
     col_step = max(1, width // (_OVERSAMPLE * size))
     rows = np.arange(height // step) * step + step // 2
     method = str(stretch_method or S1_STRETCH_METHOD).strip().lower()
