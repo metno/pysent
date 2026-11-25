@@ -31,7 +31,7 @@ import re
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 from osgeo import gdal
@@ -169,17 +169,32 @@ _GHRSST_MARK = "L2P_GHRSST"
 _VIEW_MARKS = ("_DUAL_", "_NADIR_")
 
 
+def single_ghrsst_member(members: Iterable[str]) -> str | None:
+    """The one GHRSST file of an older sea-surface-temperature product, or None.
+
+    The layout before about June 2026 (GHRSST v02.0) is an orbit-long dump with
+    exactly one ``*L2P_GHRSST*.nc`` member and no view in its name; from then
+    on (v02.1) a product holds the ``_DUAL_``/``_NADIR_`` pair. None for the
+    pair, for no GHRSST file at all, and for two or more without a view mark,
+    which is no layout seen so far and is left to fail loudly.
+    """
+    ghrsst = [member for member in members if _GHRSST_MARK in member]
+    if len(ghrsst) != 1:
+        return None
+    if any(mark in ghrsst[0] for mark in _VIEW_MARKS):
+        return None
+    return ghrsst[0]
+
+
 def _layout_hint(pattern: str, members: list[str]) -> str:
     """An explanation when a pattern missed because the product has another layout."""
     if not any(mark in pattern for mark in _VIEW_MARKS):
         return ""
-    ghrsst = [member for member in members if _GHRSST_MARK in member]
-    if not ghrsst:
-        return ""
-    if any(mark in member for member in ghrsst for mark in _VIEW_MARKS):
+    single = single_ghrsst_member(members)
+    if single is None:
         return ""
     return (
-        f". This product holds a single GHRSST file ({ghrsst[0]}) rather than the "
+        f". This product holds a single GHRSST file ({single}) rather than the "
         "_DUAL_/_NADIR_ pair this reader expects - the layout of the orbit-long "
         "sea-surface-temperature dumps, where neither view is stored separately and "
         "the one retrieval is the best-quality one. Ask for it with view='best'"
@@ -421,8 +436,14 @@ def resolve_variable(
         if dataset is not None:
             dataset = None
             return local, member, variable
+    # The miss a caller actually meets for the older sea-surface-temperature
+    # layout is this one, not find_member's, so it carries the same hint.
+    hint = next(
+        (text for text in (_layout_hint(member, sorted(members)) for member, _ in candidates) if text),
+        "",
+    )
     raise ValueError(
         f"none of {', '.join(tried)} is in this product. Its members are: "
         f"{', '.join(sorted(members))}. A processing baseline this table does not cover "
-        "would look exactly like this."
+        "would look exactly like this" + (hint or ".")
     )

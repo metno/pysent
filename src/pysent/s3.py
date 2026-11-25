@@ -68,7 +68,9 @@ from ._sen3 import (
     read_flag_table,
     read_packed,
     read_sen3_manifest,
+    sen3_members,
     sen3_root,
+    single_ghrsst_member,
 )
 from ._swath import (
     GEOLOCATION_STEPS,
@@ -648,7 +650,11 @@ def normalize_sentinel_s3_product_map(
         view = requested.get("view")
         if view in (None, ""):
             view = defaults.get("view")
+            # Not final: process_sentinel_s3_safe may still pick another view
+            # from the product's layout, which only a default view allows.
+            view_reason = "default" if view else None
         else:
+            view_reason = "requested"
             view = str(view).strip().lower()
             if not views:
                 raise ValueError(
@@ -866,6 +872,7 @@ def normalize_sentinel_s3_product_map(
             # Log *packing* is detected from the file's units; this is only the
             # override, and it is a different thing from the log colour scale.
             "log10": defaults.get("log10", "auto"),
+            "view_reason": view_reason if views else None,
         }
     if not normalized:
         raise ValueError("no products were requested")
@@ -1170,6 +1177,11 @@ def _assemble_result(
         "time": manifest.get("time", {}),
         "provenance": metadata,
     }
+    if options.get("view_reason"):
+        # Which retrieval the numbers are, and whether the caller, the table or
+        # the product's layout chose it.
+        result["view"] = options["view"]
+        result["view_reason"] = options["view_reason"]
     result.update(extra or {})
     # Described; the styled pair reads the file again a strip at a time, so the
     # whole grid need not stay in memory while it does.
@@ -2071,6 +2083,12 @@ def _product_metadata(
         # Only when a crop was asked for, so a product without one carries
         # exactly the tags it always did.
         bbox=",".join(f"{value:g}" for value in bbox) if bbox is not None else None,
+        # Only when the layout chose the view, for the same reason: a product
+        # read the way it always was keeps exactly the tags it always had.
+        view=options["view"] if options.get("view_reason") == VIEW_BY_LAYOUT_REASON else None,
+        view_reason=(
+            VIEW_BY_LAYOUT_REASON if options.get("view_reason") == VIEW_BY_LAYOUT_REASON else None
+        ),
         units=options["units"],
         style_range=f"{options['value_range'][0]:g},{options['value_range'][1]:g}",
         style_scale="log10" if options["log_scale"] else "linear",
@@ -2084,6 +2102,51 @@ def _product_metadata(
             f"{options['gamma']:g}" if options.get("kind") in ("rgb", "surface") else None
         ),
     )
+
+
+# Sea-surface-temperature products before about June 2026 (GHRSST v02.0) hold
+# one orbit-long GHRSST file instead of the _DUAL_/_NADIR_ pair, so the default
+# view finds nothing to read. With no view asked for, that file is read as the
+# `best` view it is (Q8 of the service-gaps plan); an asked-for view is never
+# changed, and fails on such a product with a hint naming `best`.
+VIEW_BY_LAYOUT = "best"
+VIEW_BY_LAYOUT_REASON = "single GHRSST file (pre-2026-06 layout)"
+
+
+def _pick_views_by_layout(
+    normalized: dict[str, dict[str, Any]], products: Any, root: str
+) -> dict[str, dict[str, Any]]:
+    """Swap a default view the product cannot serve for the one its layout holds.
+
+    Only a product whose view came from the table is considered, only when the
+    default view's member is absent and the product holds a single GHRSST file.
+    The product is normalised again with that view, from the caller's own
+    options, so whatever else they asked for applies to it unchanged.
+    """
+    import fnmatch
+
+    asked = (
+        {str(name).strip().lower(): (options or {}) for name, options in products.items()}
+        if isinstance(products, dict)
+        else {}
+    )
+    members: list[str] | None = None
+    for key in list(normalized):
+        options = normalized[key]
+        if options.get("view_reason") != "default" or VIEW_BY_LAYOUT not in options["views"]:
+            continue
+        if members is None:
+            members = sen3_members(root)
+        default_member = options["views"][options["view"]]["candidates"][0][0]
+        if any(fnmatch.fnmatch(member, default_member) for member in members):
+            continue
+        if single_ghrsst_member(members) is None:
+            continue
+        picked = normalize_sentinel_s3_product_map(
+            {key: {**asked.get(key, {}), "view": VIEW_BY_LAYOUT}}
+        )[key]
+        normalized[key] = {**picked, "view_reason": VIEW_BY_LAYOUT_REASON}
+    return normalized
 
 
 # --------------------------------------------------------------------------- #
@@ -2152,6 +2215,7 @@ def process_sentinel_s3_safe(
     with scratch_dir(scratch_root) as scratch:
         with gdal_runtime(**settings["runtime"]), gdal_errors():
             root = sen3_root(input_dataset)
+            requested = _pick_views_by_layout(requested, products, root)
             compressed = check_members_stored(input_dataset)
             manifest = read_sen3_manifest(root)
             if compressed:
