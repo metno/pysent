@@ -141,6 +141,25 @@ def test_the_product_from_files_is_byte_identical_to_the_one_from_arrays(tmp_pat
     assert (tmp_path / "files.tif").read_bytes() == (tmp_path / "arrays.tif").read_bytes()
 
 
+@pytest.fixture
+def small_cache():
+    # Smaller than the product, as GDAL_CACHEMAX=512 is beside a full-resolution
+    # frame's 550 MB: tiles are flushed before all their bands are written, and
+    # where that happens depends on what else is in the cache.
+    before = gdal.GetCacheMax()
+    gdal.SetCacheMax(5 * 1024 * 1024)
+    yield
+    gdal.SetCacheMax(before)
+
+
+def test_reading_the_band_files_leaves_the_cache_to_the_product(tmp_path, small_strips, small_cache):
+    bands = _bands()
+    _product(tmp_path / "arrays.tif", bands)
+    _product(tmp_path / "files.tif", _single_band_files(tmp_path, bands))
+
+    assert (tmp_path / "files.tif").read_bytes() == (tmp_path / "arrays.tif").read_bytes()
+
+
 def test_a_band_file_on_another_grid_is_refused(tmp_path):
     paths = _single_band_files(tmp_path, _bands())
     small = tmp_path / "small.tif"
@@ -154,6 +173,26 @@ def test_the_picture_is_byte_identical_to_the_whole_grid_one(product, tmp_path, 
                   metadata={"PYSENT_PRODUCT": "truecolor"})
     _whole_grid_rgb_styled(source_path=str(product), output_path=tmp_path / "whole.tif", **kwargs)
     write_rgb_styled(source_path=str(product), output_path=tmp_path / "strips.tif", **kwargs)
+
+    assert (tmp_path / "strips.tif").read_bytes() == (tmp_path / "whole.tif").read_bytes()
+    # The styled scratch files go with the call.
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["strips.tif", "whole.tif"]
+
+
+@pytest.mark.parametrize("cache_mb", [2, 5, 12])
+def test_reading_the_product_leaves_the_cache_to_the_picture(product, tmp_path, small_strips, cache_mb):
+    # The product is compressed, so it is read through the cache. Styled straight
+    # into the picture, its decompressed tiles pushed the picture's tiles out
+    # early and moved them in the file; 2 MB is below the picture's own size,
+    # where even the order of the writes shows in the bytes.
+    kwargs = dict(value_range=VALUE_RANGE, gamma=GAMMA, settings=SETTINGS, metadata={})
+    before = gdal.GetCacheMax()
+    gdal.SetCacheMax(cache_mb * 1024 * 1024)
+    try:
+        _whole_grid_rgb_styled(source_path=str(product), output_path=tmp_path / "whole.tif", **kwargs)
+        write_rgb_styled(source_path=str(product), output_path=tmp_path / "strips.tif", **kwargs)
+    finally:
+        gdal.SetCacheMax(before)
 
     assert (tmp_path / "strips.tif").read_bytes() == (tmp_path / "whole.tif").read_bytes()
 

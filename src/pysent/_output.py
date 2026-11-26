@@ -398,6 +398,27 @@ def rgb_bytes(
     return out
 
 
+def _read_uncached(path: str, offset: int, rows: int) -> np.ndarray:
+    """Rows ``offset .. offset + rows`` of band 1 of an uncompressed GeoTIFF, around GDAL's block cache.
+
+    The product being written shares that cache. When its bands are larger than
+    the cache, GDAL flushes tiles before the other bands of them are written and
+    rewrites them later at a new offset; how many, and which, depends on what
+    else is in the cache. Reading the source through it as well would change
+    that, and with it the file's bytes - the pixels stay the same, the layout
+    does not. Direct reads leave the cache as writing from arrays leaves it.
+    """
+    from osgeo import gdal
+
+    with gdal.config_option("GTIFF_DIRECT_IO", "YES"):
+        source = gdal.Open(path)
+        band = source.GetRasterBand(1)
+        try:
+            return band.ReadAsArray(0, offset, band.XSize, rows)
+        finally:
+            band = source = None
+
+
 def write_rgb_product(
     *,
     path: str,
@@ -423,6 +444,7 @@ def write_rgb_product(
     from osgeo import gdal
 
     sources = [gdal.Open(str(band)) if isinstance(band, (str, Path)) else None for band in bands]
+    # Only the shape is needed from each; the pixels are read strip by strip.
     first = bands[0]
     rows, columns = (
         (sources[0].RasterYSize, sources[0].RasterXSize) if sources[0] is not None else first.shape
@@ -445,11 +467,10 @@ def write_rgb_product(
                     f"band {index + 1} is {source.RasterYSize} x {source.RasterXSize}, "
                     f"not {rows} x {columns}"
                 )
-            source_band = source.GetRasterBand(1)
+            source = sources[index] = None
             for offset, count in _row_strips(rows, columns, raster.GetBlockSize()[1]):
-                strip = source_band.ReadAsArray(0, offset, columns, count)
+                strip = _read_uncached(str(band), offset, count)
                 raster.WriteArray(np.asarray(strip, dtype=np.float32), 0, offset)
-            sources[index] = source = source_band = None
         raster.SetDescription(descriptions[index])
     dataset.SetMetadata(metadata)
     dataset.FlushCache()
@@ -468,32 +489,58 @@ def write_rgb_styled(
     """The picture: an 8-bit RGB GeoTIFF with an alpha band for no data."""
     from osgeo import gdal
 
+    import tempfile
+
     _check_rgb_style(value_range, gamma)
     source = gdal.Open(source_path)
     if source.RasterCount < 3:
         raise ValueError(f"a true-colour composite needs three bands, not {source.RasterCount}")
     transform, projection = source.GetGeoTransform(), source.GetProjection()
     columns, rows = source.RasterXSize, source.RasterYSize
+    source = None
 
-    with atomic_output(output_path) as temporary:
+    with atomic_output(output_path) as temporary, tempfile.TemporaryDirectory(
+        dir=Path(temporary).parent, prefix=".rgb-"
+    ) as work:
         dataset = gdal.GetDriverByName("GTiff").Create(
             str(temporary), columns, rows, 4, gdal.GDT_Byte,
             options=creation_options(settings, float_data=False) + ["PHOTOMETRIC=RGB", "ALPHA=YES"],
         )
         dataset.SetGeoTransform(transform)
         dataset.SetProjection(projection)
-        # A strip of whole tile rows at a time, all four bands of it before the
-        # next: the channels and the alpha are per pixel, so the bytes are the
-        # same as styling the whole grid, and memory holds three float strips
-        # rather than three full-resolution bands (2.7 GB on an FR frame).
         block_rows = dataset.GetRasterBand(1).GetBlockSize()[1]
+        # Two passes, so that memory holds a strip rather than three
+        # full-resolution bands (2.7 GB on an FR frame) and the file's bytes stay
+        # the same. First the four bands are styled a strip at a time into
+        # uncompressed scratch files - per pixel, so the values are the ones the
+        # whole grid gives. Then they are copied in band after band, top to
+        # bottom, read around GDAL's block cache: the order and the cache the
+        # writes of whole arrays had. Styling straight into the picture while
+        # reading the product left the product's decompressed tiles in that
+        # cache, which pushed the picture's tiles out early and moved them in
+        # the file - same pixels, different bytes.
+        channels = [str(Path(work) / f"channel_{index}.tif") for index in range(4)]
+        scratch = [
+            gdal.GetDriverByName("GTiff").Create(
+                path, columns, rows, 1, gdal.GDT_Byte,
+                options=["TILED=YES", "COMPRESS=NONE", f"BLOCKYSIZE={block_rows}"],
+            )
+            for path in channels
+        ]
+        source = gdal.Open(source_path)
         for offset, count in _row_strips(rows, columns, block_rows):
             strip = [source.GetRasterBand(index + 1).ReadAsArray(0, offset, columns, count) for index in range(3)]
             for index in range(3):
-                dataset.GetRasterBand(index + 1).WriteArray(_rgb_channel(strip[index], value_range, gamma), 0, offset)
-            dataset.GetRasterBand(4).WriteArray(_alpha(strip[0]), 0, offset)
+                scratch[index].GetRasterBand(1).WriteArray(_rgb_channel(strip[index], value_range, gamma), 0, offset)
+            scratch[3].GetRasterBand(1).WriteArray(_alpha(strip[0]), 0, offset)
             strip = None
         source = None
+        scratch = None
+        for index, path in enumerate(channels):
+            band = dataset.GetRasterBand(index + 1)
+            for offset, count in _row_strips(rows, columns, block_rows):
+                band.WriteArray(_read_uncached(path, offset, count), 0, offset)
+            band = None
         dataset.SetMetadata({
             **metadata,
             "PYSENT_STYLE_RANGE": f"{value_range[0]:g},{value_range[1]:g}",
