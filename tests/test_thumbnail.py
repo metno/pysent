@@ -65,7 +65,9 @@ def _s2_bands(s2_rgb, *, empty_rows: int = 0) -> dict[str, tuple[np.ndarray, tup
     return {"B4": (rgb[0], geotransform), "B3": (rgb[1], geotransform), "B8A": (coarse, coarse_gt)}
 
 
-def _s2_zip(tmp_path: Path, s2_rgb, *, empty_rows: int = 0, level2a: bool = False) -> Path:
+def _s2_zip(
+    tmp_path: Path, s2_rgb, *, empty_rows: int = 0, level2a: bool = False, deflate: bool = False
+) -> Path:
     wkt = gdal.Open(str(s2_rgb)).GetProjectionRef()
     work = tmp_path / "bands"
     work.mkdir(exist_ok=True)
@@ -87,7 +89,9 @@ def _s2_zip(tmp_path: Path, s2_rgb, *, empty_rows: int = 0, level2a: bool = Fals
         _jp2(path, data[::6, ::6].copy(), (geotransform[0], 60.0, 0, geotransform[3], 0, -60.0), wkt)
         members[f"IMG_DATA/R60m/{TILE}_20260810T092031_B04_60m.jp2"] = path
     archive = tmp_path / f"{SAFE[:-5]}.zip"
-    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as handle:  # the archive stores
+    # The archive stores its band files; the N0500 reprocessing deflates them.
+    compression = zipfile.ZIP_DEFLATED if deflate else zipfile.ZIP_STORED
+    with zipfile.ZipFile(archive, "w", compression=compression) as handle:
         handle.writestr(f"{SAFE}/MTD_MSIL1C.xml", "<metadata/>")
         for member, path in members.items():
             handle.write(path, f"{SAFE}/GRANULE/{GRANULE}/{member}")
@@ -155,15 +159,36 @@ def test_s2_thumbnail_edge_of_the_swath_does_not_wash_it_out(tmp_path, s2_rgb):
     assert np.abs(result["rgb"].astype(int) - expected.astype(int))[:, inside].mean() < 4
 
 
-def test_s2_thumbnail_windows_are_one_whole_read(s2_zip):
-    files = thumbnail_module._s2_listed_band_files(str(s2_zip))
-    paths = [files[name] for name in ("B8A", "B4", "B3")]
-    whole = thumbnail_module._read_reduced(paths, 128, 128, 1)
-    datasets = [gdal.Open(path) for path in paths]
-    split = thumbnail_module._window_split(128, 128, datasets)
-    assert split == 2  # 128, 512 and 256 divide by 2, not by 3
-    for one, other in zip(whole, thumbnail_module._read_reduced(paths, 128, 128, split)):
-        np.testing.assert_array_equal(one, other)
+def _vsimem_files() -> set[str]:
+    return set(gdal.ReadDirRecursive("/vsimem/") or [])
+
+
+def test_s2_deflated_bands_are_decoded_from_a_copy_in_memory(tmp_path, s2_zip, s2_rgb, monkeypatch):
+    """A deflated band file gives the stored one's pixels, decoded from a copy that is then removed."""
+    (tmp_path / "deflated").mkdir()
+    deflated = _s2_zip(tmp_path / "deflated", s2_rgb, deflate=True)
+    files = thumbnail_module._s2_listed_band_files(str(deflated))
+    assert all(thumbnail_module._deflated(path) for path in files.values())
+    assert not any(thumbnail_module._deflated(path) for path in thumbnail_module._s2_listed_band_files(str(s2_zip)).values())
+    opened = []
+    real_open = thumbnail_module.gdal.Open
+    monkeypatch.setattr(thumbnail_module.gdal, "Open", lambda path, *a: opened.append(path) or real_open(path, *a))
+    before = _vsimem_files()
+    result = sentinel_s2_thumbnail(str(deflated), size=64)
+    assert _vsimem_files() == before
+    # The grid is taken from the zip; each of the three bands is decoded from memory.
+    assert sum(path.startswith("/vsimem/") for path in opened) == 3
+    stored = sentinel_s2_thumbnail(str(s2_zip), size=64)
+    for key in ("rgb", "alpha"):
+        np.testing.assert_array_equal(result[key], stored[key])
+    assert result["stretch"] == stored["stretch"] and result["read_side"] == stored["read_side"]
+
+
+def test_s2_stored_bands_are_read_in_place(s2_zip, monkeypatch):
+    copies = []
+    monkeypatch.setattr(thumbnail_module, "_copy_to_memory", lambda path: copies.append(path) or path)
+    sentinel_s2_thumbnail(str(s2_zip), size=64)
+    assert copies == []
 
 
 def test_s2_thumbnail_takes_a_presets_or_three_bands(s2_zip):
