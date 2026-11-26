@@ -212,9 +212,17 @@ def solar_flux_per_pixel(root: str, scratch: Path, band: int, shape: tuple[int, 
             "same table shape for a row of one to name a row of the other"
         )
 
-    row = table[flux_row_for_band(wavelengths, band)]
-    inside = (detector >= 0) & (detector < row.size)
-    return np.where(inside, row[np.clip(detector, 0, row.size - 1)], np.nan).astype(np.float32)
+    # One frame-sized array out, and no frame-sized temporary beside it: the row
+    # is rounded to float32 before the lookup (each entry rounds the same way
+    # it did when the looked-up frame was rounded), the detector index is
+    # clipped where it lies, and the pixels with no detector are set after.
+    row = table[flux_row_for_band(wavelengths, band)].astype(np.float32)
+    outside = ~((detector >= 0) & (detector < row.size))
+    np.clip(detector, 0, row.size - 1, out=detector)
+    flux = row[detector]
+    detector = None
+    flux[outside] = np.nan
+    return flux
 
 
 def toa_reflectance(
@@ -255,13 +263,24 @@ def toa_reflectance(
             f"the solar zenith angle is {solar_zenith_degrees.shape} but the band is {radiance.shape}"
         )
 
+    # pi * L / (F0 * cos(theta)) in float32, worked in the three arrays already
+    # here rather than a new one per operation: the same operations on the same
+    # operands in the same order, so the same bits, at three frames instead of
+    # about seven. The radiance becomes the reflectance; the caller's zenith is
+    # copied, since the bands of a scene share it.
     with np.errstate(invalid="ignore", divide="ignore"):
-        cosine = np.cos(np.radians(solar_zenith_degrees.astype(np.float32)))
-        reflectance = (np.pi * radiance) / (flux * cosine)
+        cosine = solar_zenith_degrees.astype(np.float32)
+        np.radians(cosine, out=cosine)
+        np.cos(cosine, out=cosine)
+        reflectance = np.multiply(radiance, np.pi, out=radiance)
+        radiance = None
+        np.multiply(flux, cosine, out=flux)
+        np.divide(reflectance, flux, out=reflectance)
+        flux = None
         # A non-positive cosine means the sun is at or below the horizon, where
         # a reflectance has no meaning.
-        reflectance = np.where(cosine > 0, reflectance, np.nan)
-    return reflectance.astype(np.float32)
+        reflectance[~(cosine > 0)] = np.nan
+    return reflectance
 
 
 def quality_mask(
