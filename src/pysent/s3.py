@@ -1841,7 +1841,10 @@ def _process_rgb_product(
     singles: list[Path] = []
     transform = projection = None
     width = height = 0
-    for index, (name, values, role) in enumerate(layers):
+    # By index, not enumerate(): enumerate keeps the tuple it last gave out, and
+    # with it the layer's array, alive through that layer's warp.
+    for index in range(len(layers)):
+        name, values, role = layers[index]
         layers[index] = (name, None, role)
         swath = SwathArrays(values=values, lat=lat, lon=lon)
         values = None

@@ -53,7 +53,7 @@ from typing import Any
 
 import numpy as np
 
-from ._sen3 import extract_member, open_sen3_variable, read_flag_table, read_packed, read_window
+from ._sen3 import _row_slices, extract_member, open_sen3_variable, read_flag_table, read_packed, read_window
 
 # Members a reflectance conversion needs beyond the radiance band itself.
 INSTRUMENT_MEMBER = "instrument_data.nc"
@@ -184,6 +184,24 @@ def solar_flux_per_pixel(root: str, scratch: Path, band: int, shape: tuple[int, 
     With ``window`` (``(rows, columns)`` of the image of ``shape``) only that
     part comes back.
     """
+    row, detector, outside = _flux_lookup(root, scratch, band, shape, window)
+    flux = row[detector]
+    detector = None
+    flux[outside] = np.nan
+    return flux
+
+
+def _flux_lookup(
+    root: str, scratch: Path, band: int, shape: tuple[int, int], window: tuple[slice, slice] | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """What :func:`solar_flux_per_pixel` looks up, before the lookup.
+
+    The band's row of the flux table (rounded to float32, as the looked-up
+    frame was), the detector index clipped into it, and the pixels whose
+    detector is outside it. ``row[detector]`` with NaN at ``outside`` is the
+    flux, and a strip of each gives that strip of it, so
+    :func:`toa_reflectance` never holds the whole flux beside the radiance.
+    """
     full_shape = tuple(shape)
     if window is not None:
         shape = (window[0].stop - window[0].start, window[1].stop - window[1].start)
@@ -212,17 +230,13 @@ def solar_flux_per_pixel(root: str, scratch: Path, band: int, shape: tuple[int, 
             "same table shape for a row of one to name a row of the other"
         )
 
-    # One frame-sized array out, and no frame-sized temporary beside it: the row
-    # is rounded to float32 before the lookup (each entry rounds the same way
-    # it did when the looked-up frame was rounded), the detector index is
-    # clipped where it lies, and the pixels with no detector are set after.
+    # No frame-sized temporary: the row is rounded to float32 before the lookup
+    # (each entry rounds as it did when the looked-up frame was rounded), and
+    # the detector index is clipped where it lies.
     row = table[flux_row_for_band(wavelengths, band)].astype(np.float32)
     outside = ~((detector >= 0) & (detector < row.size))
     np.clip(detector, 0, row.size - 1, out=detector)
-    flux = row[detector]
-    detector = None
-    flux[outside] = np.nan
-    return flux
+    return row, detector, outside
 
 
 def toa_reflectance(
@@ -255,7 +269,7 @@ def toa_reflectance(
     radiance = read_packed(source, decimate=decimate, log10=False, window=window)
     source = dataset = None
 
-    flux = solar_flux_per_pixel(root, scratch, band, full_shape, window)
+    row, detector, outside = _flux_lookup(root, scratch, band, full_shape, window)
     if solar_zenith_degrees is None:
         solar_zenith_degrees = solar_zenith(root, scratch, full_shape, window)
     if solar_zenith_degrees.shape != radiance.shape:
@@ -263,23 +277,27 @@ def toa_reflectance(
             f"the solar zenith angle is {solar_zenith_degrees.shape} but the band is {radiance.shape}"
         )
 
-    # pi * L / (F0 * cos(theta)) in float32, worked in the three arrays already
-    # here rather than a new one per operation: the same operations on the same
-    # operands in the same order, so the same bits, at three frames instead of
-    # about seven. The radiance becomes the reflectance; the caller's zenith is
-    # copied, since the bands of a scene share it.
+    # pi * L / (F0 * cos(theta)) in float32, a strip of rows at a time and in
+    # the radiance's own array: the same operations on the same operands in the
+    # same order as the whole-frame expression, so the same bits, without the
+    # flux, the cosine and a new array per operation each a frame in size.
+    # The caller's zenith is only read, since the bands of a scene share it.
+    reflectance = radiance
+    radiance = None
     with np.errstate(invalid="ignore", divide="ignore"):
-        cosine = solar_zenith_degrees.astype(np.float32)
-        np.radians(cosine, out=cosine)
-        np.cos(cosine, out=cosine)
-        reflectance = np.multiply(radiance, np.pi, out=radiance)
-        radiance = None
-        np.multiply(flux, cosine, out=flux)
-        np.divide(reflectance, flux, out=reflectance)
-        flux = None
-        # A non-positive cosine means the sun is at or below the horizon, where
-        # a reflectance has no meaning.
-        reflectance[~(cosine > 0)] = np.nan
+        for rows in _row_slices(reflectance):
+            cosine = solar_zenith_degrees[rows].astype(np.float32)
+            np.radians(cosine, out=cosine)
+            np.cos(cosine, out=cosine)
+            flux = row[detector[rows]]
+            flux[outside[rows]] = np.nan
+            part = reflectance[rows]
+            np.multiply(part, np.pi, out=part)
+            np.multiply(flux, cosine, out=flux)
+            np.divide(part, flux, out=part)
+            # A non-positive cosine means the sun is at or below the horizon,
+            # where a reflectance has no meaning.
+            part[~(cosine > 0)] = np.nan
     return reflectance
 
 
