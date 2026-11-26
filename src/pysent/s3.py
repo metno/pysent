@@ -1571,10 +1571,11 @@ def _process_swath_product(
             minimum_valid=(kept_count // 100 or 1) if kept_count else None,
             categorical=reason_codes,
         )
+        # Nothing after the warp reads the swath: the overviews and the result
+        # are made from the file on disk.
+        masked = reason_codes = lat = lon = None
         finish_float_product(path=str(temporary), settings=settings, metadata=metadata)
 
-    # The result is described from the file on disk, so the swath can go.
-    masked = reason_codes = lat = lon = None
     return _assemble_result(
         product=product, options=options, float_path=float_path, settings=settings,
         metadata=metadata, manifest=manifest, epsg=epsg, resolution=resolution,
