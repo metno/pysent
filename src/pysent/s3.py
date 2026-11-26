@@ -68,6 +68,7 @@ from ._sen3 import (
     read_flag_table,
     read_packed,
     read_sen3_manifest,
+    read_window,
     sen3_members,
     sen3_root,
     single_ghrsst_member,
@@ -980,8 +981,12 @@ def _apply_extra_mask(
     scratch: Path,
     shape: tuple[int, int],
     decimate: int,
+    window: tuple[slice, slice] | None = None,
 ) -> tuple[np.ndarray, str]:
     """One further condition, as a rejection mask and a label for the provenance.
+
+    ``shape`` is the swath's; with ``window`` (``bbox``) the mask is only that
+    part of it, and only that part of the variable is read.
 
     Three forms, each the natural reading of the variable it applies to:
 
@@ -998,7 +1003,7 @@ def _apply_extra_mask(
     local = extract_member(root, spec["member"], scratch)
     dataset = open_sen3_variable(local, spec["variable"])
     band = dataset.GetRasterBand(1)
-    raw = band.ReadAsArray(buf_xsize=shape[1], buf_ysize=shape[0])
+    raw = read_window(band, shape, window)
     table = read_flag_table(band)
     dataset = None
 
@@ -1011,7 +1016,7 @@ def _apply_extra_mask(
     if names:
         selected, _ = flag_selection(raw, table, names, allow_missing=True)
         return selected, f"{spec['variable']} not {','.join(names)}"
-    return np.zeros(shape, dtype=bool), spec["variable"]
+    return np.zeros(raw.shape, dtype=bool), spec["variable"]
 
 
 def _resampling_for(options: dict[str, Any], settings: dict[str, Any]) -> str:
@@ -1314,6 +1319,11 @@ class _SwathCrop:
     shape to the source window. With no bbox it hands every array back
     untouched, so a request without one runs exactly as before.
 
+    :attr:`read_window` is the window for the readers, so that only it is read
+    rather than the whole swath read and then cut (``None``: read whole, as
+    without a bbox, or when no pixel is inside). An array read that way is
+    already the window's shape and :meth:`__call__` leaves it alone.
+
     A bbox with no pixel inside is an empty product: ``on_empty="raise"`` says so
     at once, and ``"write"`` replaces the swath with a small all-empty mesh
     spanning the box, so the empty product lands on the box's own grid rather
@@ -1346,6 +1356,10 @@ class _SwathCrop:
         lons = np.where(lons > 180.0, lons - 360.0, lons)
         lats = np.linspace(lat1, lat0, self.MESH)
         self.lon, self.lat = (array.astype(np.float32) for array in np.meshgrid(lons, lats))
+
+    @property
+    def read_window(self) -> tuple[slice, slice] | None:
+        return self.window if self.bbox is not None and not self.outside else None
 
     def __call__(self, array: np.ndarray, fill: Any = np.nan) -> np.ndarray:
         if self.bbox is None or getattr(array, "shape", None) != self.full_shape:
@@ -1411,8 +1425,7 @@ def _process_swath_product(
     # decimation would leave too few rows to warp keeps more of them. No
     # ordinary granule is anywhere near this.
     decimate = decimation_for((science_band.YSize, science_band.XSize), decimate)
-    values = read_packed(science_band, decimate=decimate, log10=options["log10"])
-    science = None
+    science_shape = (max(1, science_band.YSize // decimate), max(1, science_band.XSize // decimate))
 
     # Geolocation. Stored as Int32 micro-degrees with a 1e-6 scale, and GDAL
     # uses a GEOLOCATION array exactly as it finds it, so it has to be scaled
@@ -1426,11 +1439,20 @@ def _process_swath_product(
     lat = read_packed(lat_ds.GetRasterBand(1), decimate=decimate, log10=False)
     lon = read_packed(lon_ds.GetRasterBand(1), decimate=decimate, log10=False)
     lat_ds = lon_ds = None
-    if lat.shape != values.shape:
+    if lat.shape != science_shape:
         raise ValueError(
-            f"{product}: {member}:{variable} is {values.shape} but the geolocation is {lat.shape}; "
+            f"{product}: {member}:{variable} is {science_shape} but the geolocation is {lat.shape}; "
             "this variable is not on the full-resolution grid"
         )
+
+    # A bbox keeps only the source rows and columns that reach into it, before
+    # anything is masked or warped; without one this changes nothing. The
+    # geolocation is read whole to find them, everything else only inside them.
+    crop = _SwathCrop(lat, lon, product=product, settings=settings)
+    lat, lon = crop.lat, crop.lon
+    window = crop.read_window
+    values = read_packed(science_band, decimate=decimate, log10=options["log10"], window=window)
+    science = science_band = None
 
     flags = None
     table: list[dict[str, Any]] = []
@@ -1439,13 +1461,9 @@ def _process_swath_product(
         flag_ds = open_sen3_variable(flag_local, options["flag_variable"])
         flag_band = flag_ds.GetRasterBand(1)
         table = read_flag_table(flag_band)
-        flags = flag_band.ReadAsArray(buf_xsize=values.shape[1], buf_ysize=values.shape[0])
+        flags = read_window(flag_band, crop.full_shape, window)
         flag_ds = None
 
-    # A bbox keeps only the source rows and columns that reach into it, before
-    # anything is masked or warped; without one this changes nothing.
-    crop = _SwathCrop(lat, lon, product=product, settings=settings)
-    lat, lon = crop.lat, crop.lon
     values = crop(values)
     if flags is not None:
         flags = crop(flags, 0)
@@ -1475,6 +1493,7 @@ def _process_swath_product(
     for spec in options.get("extra_masks", ()):
         rejected, label = _apply_extra_mask(
             spec=spec, root=root, scratch=scratch, shape=crop.full_shape, decimate=decimate,
+            window=window,
         )
         extra_rejected |= crop(rejected, False)
         extra_applied.append(label)
@@ -1628,23 +1647,36 @@ def _process_rgb_product(
     lat = read_packed(lat_ds.GetRasterBand(1), decimate=decimate, log10=False)
     lon = read_packed(lon_ds.GetRasterBand(1), decimate=decimate, log10=False)
     lat_ds = lon_ds = None
+    tier = options.get("atmospheric_correction", "none")
+
+    # With a bbox and no correction, every field is read only inside the
+    # window (the geolocation, read whole, finds it). The correction reads its
+    # own fields on the whole frame's grid, so there the bands are read whole
+    # too and cut after it, as before.
+    crop = _SwathCrop(lat, lon, product=product, settings=settings)
+    window = crop.read_window if tier == "none" else None
+    frame_shape = crop.full_shape
+    shape = frame_shape if window is None else (
+        window[0].stop - window[0].start, window[1].stop - window[1].start
+    )
 
     # One expansion of the solar-zenith tie grid, shared by the three bands:
     # it is the expensive part and it does not depend on the band.
-    zenith = solar_zenith(root, scratch, lat.shape)
+    zenith = solar_zenith(root, scratch, frame_shape, window)
 
     rejected, missing_flags, bright = quality_mask(
-        root, scratch, lat.shape, list(options["reject_flags"])
+        root, scratch, frame_shape, list(options["reject_flags"]), window
     )
 
     reflectances: list[np.ndarray] = []
     for band in bands:
         values = toa_reflectance(
-            root, band, scratch, decimate=decimate, solar_zenith_degrees=zenith
+            root, band, scratch, decimate=decimate, solar_zenith_degrees=zenith,
+            window=window, image_shape=frame_shape if window is not None else None,
         )
-        if values.shape != lat.shape:
+        if values.shape != shape:
             raise ValueError(
-                f"{product}: band {band} is {values.shape} but the geolocation is {lat.shape}"
+                f"{product}: band {band} is {values.shape} but the geolocation is {frame_shape}"
             )
         reflectances.append(np.where(rejected, np.nan, values).astype(np.float32))
 
@@ -1653,15 +1685,14 @@ def _process_rgb_product(
     # that carried both would invite a reader to difference them and call the
     # difference an atmosphere, which is only true in the one tier that has no
     # transmittance division.
-    tier = options.get("atmospheric_correction", "none")
     correction = None
     if tier != "none":
         from ._olci_correction import correct_frame
 
-        land, _, _ = quality_mask(root, scratch, lat.shape, ["land"])
+        land, _, _ = quality_mask(root, scratch, frame_shape, ["land"])
         correction = correct_frame(
             input_dataset, root, scratch,
-            bands=bands, shape=lat.shape, decimate=decimate,
+            bands=bands, shape=frame_shape, decimate=decimate,
             solar_zenith_for_toa=zenith,
             land=land, bright=bright, rejected=rejected,
             tier=tier, aerosol=options.get("aerosol"),
@@ -1669,8 +1700,8 @@ def _process_rgb_product(
         reflectances = [correction["surfaces"][band] for band in bands]
 
     # The crop comes after the correction, which reads its own fields on the
-    # whole frame's grid, and before anything is counted or warped.
-    crop = _SwathCrop(lat, lon, product=product, settings=settings)
+    # whole frame's grid, and before anything is counted or warped. Arrays
+    # read inside the window are already cut and pass through unchanged.
     lat, lon = crop.lat, crop.lon
     reflectances = [crop(values) for values in reflectances]
     bright = crop(bright, False)
