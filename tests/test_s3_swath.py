@@ -348,6 +348,95 @@ def test_a_default_mask_tolerates_a_flag_an_older_baseline_lacks():
     assert selected.tolist() == [[False, True, True]]
 
 
+class _PackedBand:
+    """A band with packing, fill and a size that does not divide into strips."""
+
+    def __init__(self, raw, *, nodata=255.0, scale=0.01574803, offset=-2.0):
+        self.raw, self.nodata, self.scale, self.offset = raw, nodata, scale, offset
+        self.YSize, self.XSize = raw.shape
+
+    def ReadAsArray(self, buf_xsize=None, buf_ysize=None):
+        return self.raw.copy()
+
+    def GetNoDataValue(self):
+        return self.nodata
+
+    def GetScale(self):
+        return self.scale
+
+    def GetOffset(self):
+        return self.offset
+
+    def GetUnitType(self):
+        return ""
+
+    def GetMetadata(self):
+        return {}
+
+
+def _whole_frame_unpack(band, log10):
+    """``read_packed`` as it was before it worked in strips: the reference."""
+    raw = band.ReadAsArray()
+    values = raw.astype(np.float64)
+    missing = np.zeros(raw.shape, dtype=bool) if band.nodata is None else (raw == band.nodata)
+    if band.scale not in (None, 1.0):
+        values = values * float(band.scale)
+    if band.offset not in (None, 0.0):
+        values = values + float(band.offset)
+    if log10:
+        values = np.power(10.0, values)
+    return np.where(missing, np.nan, values).astype(np.float32)
+
+
+@pytest.mark.parametrize("dtype,nodata,scale,offset,log10", [
+    (np.uint8, 255.0, 0.01574803, -2.0, True),       # an OLCI log-packed byte
+    (np.uint8, 255.0, 0.01574803, -2.0, False),
+    (np.int32, -2147483648.0, 1e-6, None, False),   # micro-degree geolocation
+    (np.int16, None, None, None, False),            # no packing, no fill
+])
+def test_unpacking_in_strips_gives_the_same_bits_as_the_whole_frame(monkeypatch, dtype, nodata, scale, offset, log10):
+    """The strips only bound the temporaries; every float32 must be bitwise the one the whole frame gave."""
+    import pysent._sen3 as sen3
+
+    rng = np.random.default_rng(5)
+    info = np.iinfo(dtype)
+    high = 200 if dtype == np.uint8 else min(info.max, 90_000_000)
+    raw = rng.integers(max(info.min, -high), high, size=(37, 11)).astype(dtype)
+    if nodata is not None:
+        raw[rng.random(raw.shape) < 0.2] = dtype(nodata)
+    band = _PackedBand(raw, nodata=nodata, scale=scale, offset=offset)
+
+    monkeypatch.setattr(sen3, "_STRIP_CELLS", 50)  # four rows a strip, the last one short
+    values = read_packed(band, log10=log10)
+    expected = _whole_frame_unpack(band, log10)
+    assert values.dtype == np.float32
+    assert values.tobytes() == expected.tobytes()
+
+
+def test_flags_are_selected_in_strips_with_the_same_result_as_the_whole_word(monkeypatch):
+    """uint64 words with the top bit set too: the int64 view is the same one per strip as per frame."""
+    import pysent._sen3 as sen3
+
+    rng = np.random.default_rng(7)
+    flags = rng.integers(0, 2**63, size=(29, 13), dtype=np.uint64)
+    flags[::3] |= np.uint64(1) << np.uint64(63)
+    table = [
+        {"name": "WATER", "mask": 2, "value": 2},
+        {"name": "PAIR", "mask": 3 << 40, "value": 1 << 40},
+        {"name": "HIGH", "mask": 1 << 62, "value": 1 << 62},
+    ]
+    names = ["WATER", "PAIR", "HIGH", "ABSENT"]
+    expected = np.zeros(flags.shape, dtype=bool)
+    for row in table:
+        expected |= (flags.astype(np.int64) & row["mask"]) == row["value"]
+
+    monkeypatch.setattr(sen3, "_STRIP_CELLS", 40)
+    selected, missing = flag_selection(flags, table, names, allow_missing=True)
+    assert missing == ["ABSENT"]
+    assert np.array_equal(selected, expected)
+    assert selected.any() and not selected.all()
+
+
 def test_a_requested_mask_is_strict_about_a_flag_that_does_not_exist():
     """A typo in a request must not quietly become a mask that does nothing."""
     table = [{"name": "WATER", "mask": 2, "value": 2}]

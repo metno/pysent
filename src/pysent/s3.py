@@ -1462,6 +1462,7 @@ def _process_swath_product(
     if marginal and flags is not None and table:
         selected, _ = flag_selection(flags, table, marginal, allow_missing=True)
         browse_clean = ~selected
+        del selected
     else:
         browse_clean = np.ones(values.shape, dtype=bool)
 
@@ -1477,13 +1478,16 @@ def _process_swath_product(
         )
         extra_rejected |= crop(rejected, False)
         extra_applied.append(label)
-    kept = kept & ~extra_rejected
+        del rejected
+    kept &= ~extra_rejected
 
     unit_scale, unit_offset, unit_label = _UNIT_CONVERSIONS[options["unit"]]
     if unit_scale != 1.0 or unit_offset != 0.0:
-        values = (values * np.float32(unit_scale) + np.float32(unit_offset)).astype(np.float32)
+        # float32 throughout, as before; in place instead of two new frames.
+        values = np.ascontiguousarray(values, dtype=np.float32)
+        values *= np.float32(unit_scale)
+        values += np.float32(unit_offset)
 
-    masked = np.where(kept, values, np.nan).astype(np.float32)
     kept_count = int(np.count_nonzero(kept))
     source_valid = valid_fraction(values)
     reason_codes = _swath_reject_codes(
@@ -1491,6 +1495,14 @@ def _process_swath_product(
         reject=list(options["reject_flags"]), marginal=marginal,
         extra_rejected=extra_rejected,
     )
+    # The flags and the masks have no reader after the reason codes, and the
+    # values are needed only as the masked copy the warp takes: blank the
+    # rejected pixels in place rather than hold the frame twice.
+    flags = browse_clean = extra_rejected = None
+    masked = np.ascontiguousarray(values, dtype=np.float32)
+    values = None
+    masked[~kept] = np.nan
+    kept = None
 
     if kept_count == 0 and settings["on_empty"] == "raise":
         raise EmptySceneError(
@@ -1525,7 +1537,7 @@ def _process_swath_product(
 
     step = _resolve_geoloc_step(
         options["geoloc_step"] if options["geoloc_step"] is not None else settings["geoloc_step"],
-        values.size,
+        masked.size,
     )
 
     metadata = _product_metadata(
@@ -1533,6 +1545,11 @@ def _process_swath_product(
         decimate=decimate, resolution=resolution, epsg=epsg,
         member=member, variable=variable, geoloc_step=step, bbox=crop.bbox,
     )
+
+    # Taken now, so nothing of the swath has to outlive the warp.
+    footprint = footprint_polygon(lat, lon)
+    described = crop.describe()
+    crop.lat = crop.lon = None
 
     float_path = Path(output_path)
     with atomic_output(float_path) as temporary:
@@ -1556,6 +1573,8 @@ def _process_swath_product(
         )
         finish_float_product(path=str(temporary), settings=settings, metadata=metadata)
 
+    # The result is described from the file on disk, so the swath can go.
+    masked = reason_codes = lat = lon = None
     return _assemble_result(
         product=product, options=options, float_path=float_path, settings=settings,
         metadata=metadata, manifest=manifest, epsg=epsg, resolution=resolution,
@@ -1563,8 +1582,8 @@ def _process_swath_product(
         extra={"geoloc_step": step, "member": member, "variable": variable,
                "unavailable_flags": missing_flags,
                "grid_refined_for_thin_swath": grid_refined,
-               "footprint": footprint_polygon(lat, lon),
-               **crop.describe()},
+               "footprint": footprint,
+               **described},
     )
 
 
