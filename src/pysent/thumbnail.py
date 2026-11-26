@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 import threading
+import uuid
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -67,6 +68,7 @@ THUMBNAIL_SIZE = 256
 _OVERSAMPLE = 2
 _S1_READ_THREADS = 16
 _S2_READ_THREADS = 12
+_COPY_CHUNK = 1 << 20
 _S1_ROWS_PER_TASK = 8
 _S1_STATS_COLUMNS = 32
 _S1_ROW_OVERSAMPLE = 2
@@ -150,51 +152,75 @@ def _s2_band_files(input_dataset: str) -> dict[str, str]:
     }
 
 
-def _window_split(side: int, rows: int, datasets: Sequence[gdal.Dataset]) -> int:
-    """How many windows a side is read in: one that divides every grid evenly, so the
-    windows give exactly the pixels of one whole read; 1 when none does."""
-    for split in (3, 2):
-        sizes = [side, rows] + [n for dataset in datasets for n in (dataset.RasterXSize, dataset.RasterYSize)]
-        if all(n % split == 0 for n in sizes):
-            return split
-    return 1
+def _deflated(path: str) -> bool:
+    """Whether ``path`` is a zip member stored compressed (not ``STORED``)."""
+    if not path.startswith("/vsizip/"):
+        return False
+    method = (gdal.GetFileMetadata(path, "ZIP") or {}).get("COMPRESSION_METHOD", "0")
+    return not method.startswith("0")
 
 
-def _read_reduced(paths: Sequence[str], cols: int, rows: int, split: int) -> list[np.ndarray]:
-    """Every file read whole into ``cols`` x ``rows``, in ``split`` x ``split`` windows at once.
+def _copy_to_memory(path: str) -> str:
+    """``path`` copied into a ``/vsimem/`` file with forward reads only; its name."""
+    name = f"/vsimem/pysent-thumbnail-{uuid.uuid4().hex}.jp2"
+    with gdal_errors():
+        source = gdal.VSIFOpenL(path, "rb")
+        try:
+            target = gdal.VSIFOpenL(name, "wb")
+            try:
+                while chunk := gdal.VSIFReadL(1, _COPY_CHUNK, source):
+                    gdal.VSIFWriteL(chunk, 1, len(chunk), target)
+            finally:
+                gdal.VSIFCloseL(target)
+        except BaseException:
+            gdal.Unlink(name)
+            raise
+        finally:
+            gdal.VSIFCloseL(source)
+    return name
 
-    On network storage a reduced-resolution JPEG 2000 read is many small reads
-    (a few packets of every tile), so it waits on round trips, not on the CPU:
-    windows on their own file handles keep several in flight.
+
+def _read_reduced(paths: Sequence[str], cols: int, rows: int) -> list[np.ndarray]:
+    """Every file read whole into ``cols`` x ``rows``: one read per file, the files at once.
+
+    Each read decodes on one thread: a thumbnail worker runs several tasks on as
+    many CPUs, and letting each read decode on all of them made six thumbnails
+    at once slower (17.5 s against 14.3 s on six CPUs). Splitting a read into
+    windows on their own handles was slower everywhere, cold or warm.
+
+    A band zipped compressed (the reprocessed archive, baseline N0500, deflates
+    its JPEG 2000 files) is first copied into memory with forward reads: the
+    decoder goes back to the codestream's start for every tile, and every
+    backward seek in a deflated member inflates it again from its start (2.5 s
+    for a band, against 0.15 s to copy it and 0.55 s to decode the copy). The
+    bytes decoded are the same either way. A stored member is read in place, so
+    a cold read fetches only what the level needs.
     """
     out = [np.zeros((rows, cols), dtype=np.uint16) for _ in paths]
-    col_edges = [cols * i // split for i in range(split + 1)]
-    row_edges = [rows * i // split for i in range(split + 1)]
 
-    def read(job: tuple[int, int, int]) -> None:
-        index, i, j = job
+    def read(index: int) -> None:
         gdal.SetThreadLocalConfigOption("GDAL_NUM_THREADS", "1")
+        path = paths[index]
+        copied = _deflated(path)
         try:
+            if copied:
+                path = _copy_to_memory(path)
             with gdal_errors():
-                dataset = gdal.Open(paths[index], gdal.GA_ReadOnly)
-                width, height = dataset.RasterXSize, dataset.RasterYSize
-                x0, x1 = (col_edges[k] * width // cols for k in (i, i + 1))
-                y0, y1 = (row_edges[k] * height // rows for k in (j, j + 1))
-                ox0, ox1, oy0, oy1 = col_edges[i], col_edges[i + 1], row_edges[j], row_edges[j + 1]
+                dataset = gdal.Open(path, gdal.GA_ReadOnly)
                 # A buffer the size of one of the file's own levels makes GDAL decode that
                 # level and nothing finer; "average" matters only for a band whose levels do
                 # not line up with it (a 60 m band read on the 10 m bands' level).
-                out[index][oy0:oy1, ox0:ox1] = dataset.GetRasterBand(1).ReadAsArray(
-                    x0, y0, x1 - x0, y1 - y0, buf_xsize=ox1 - ox0, buf_ysize=oy1 - oy0,
-                    resample_alg=gdal.GRIORA_Average,
+                out[index][:] = dataset.GetRasterBand(1).ReadAsArray(
+                    buf_xsize=cols, buf_ysize=rows, resample_alg=gdal.GRIORA_Average,
                 )
             dataset = None
         finally:
+            if copied and path != paths[index]:
+                gdal.Unlink(path)
             gdal.SetThreadLocalConfigOption("GDAL_NUM_THREADS", None)
 
-    jobs = [(index, i, j) for index in range(len(paths)) for i in range(split) for j in range(split)]
-    with ThreadPoolExecutor(max_workers=min(len(jobs), _S2_READ_THREADS)) as pool:
-        list(pool.map(read, jobs))
+    with ThreadPoolExecutor(max_workers=min(len(paths), _S2_READ_THREADS)) as pool:
+        list(pool.map(read, range(len(paths))))
     return out
 
 
@@ -289,9 +315,8 @@ def sentinel_s2_thumbnail(
     geotransform = finest.GetGeoTransform()
     full_cols, full_rows = finest.RasterXSize, finest.RasterYSize
     crs = finest.GetProjectionRef()
-    split = _window_split(cols, rows, datasets)
     datasets = finest = None
-    data = _read_reduced(paths, cols, rows, split)
+    data = _read_reduced(paths, cols, rows)
 
     valid = np.zeros((rows, cols), dtype=bool)
     for array in data:
