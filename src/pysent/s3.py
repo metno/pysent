@@ -1682,7 +1682,11 @@ def _process_rgb_product(
             raise ValueError(
                 f"{product}: band {band} is {values.shape} but the geolocation is {frame_shape}"
             )
-        reflectances.append(np.where(rejected, np.nan, values).astype(np.float32))
+        # Masked where it lies: the band is this loop's own, and a masked copy
+        # beside it was one more frame per band (the same NaN either way).
+        values[rejected] = np.nan
+        reflectances.append(values)
+    values = None
 
     # The atmospheric correction, when one was asked for. It replaces the
     # top-of-atmosphere values rather than adding bands beside them: a product
@@ -1701,7 +1705,10 @@ def _process_rgb_product(
             land=land, bright=bright, rejected=rejected,
             tier=tier, aerosol=options.get("aerosol"),
         )
+        land = None
         reflectances = [correction["surfaces"][band] for band in bands]
+    # Nothing below reads the zenith or the quality mask.
+    zenith = rejected = None
 
     # The crop comes after the correction, which reads its own fields on the
     # whole frame's grid, and before anything is counted or warped. Arrays
@@ -1797,35 +1804,8 @@ def _process_rgb_product(
         # its neighbour is a different bitfield, and a plausible-looking one.
         layers.append(("quality_flags", correction["quality"].astype(np.float32), "code"))
 
-    # Each band is warped on its own, onto the same grid, then stacked. The
-    # warped bands stay on disk until they are copied into the product: held in
-    # memory beside the swath arrays they took a full-resolution frame to 2.7 GB.
-    singles: list[Path] = []
-    transform = projection = None
-    width = height = 0
-    for name, values, role in layers:
-        single = scratch / f"{product}_{name}.tif"
-        singles.append(single)
-        warp_swath(
-            values=values, lat=lat, lon=lon, output_path=str(single),
-            epsg=epsg, resolution=resolution, bounds=bounds,
-            resampling="near" if role == "code" else _resampling_for(options, settings),
-            scratch=scratch,
-            creation_options=["TILED=YES", "COMPRESS=NONE"],
-            num_threads=settings["gdal_num_threads"], geoloc_step=step,
-            # With nothing kept there is nothing to check: this guard asks
-            # "did the warp lose the data?", and a frame whose mask kept no
-            # pixel has none to lose. Left at 1 it turned on_empty="write"
-            # into a different exception instead of an empty product.
-            minimum_valid=(kept_count // 100 or 1) if kept_count else None,
-        )
-        dataset = gdal.Open(str(single))
-        transform, projection = dataset.GetGeoTransform(), dataset.GetProjection()
-        width, height = dataset.RasterXSize, dataset.RasterYSize
-        dataset = None
-
-    # What the result says about the swath, taken now so the swath arrays can go
-    # before the product is written: nothing after this line reads them.
+    # What the result says about the swath, taken now so that nothing but the
+    # layers and the geolocation is held when the warps begin.
     source_valid = valid_fraction(reflectances[0])
     bright_fraction = float(np.mean(bright[kept])) if kept_count else 0.0
     footprint = footprint_polygon(lat, lon)
@@ -1847,12 +1827,49 @@ def _process_rgb_product(
             },
             "table_ceiling": loading["table_ceiling"],
         }
-        loading = depth = None
+        loading = depth = values = None
     corrected = correction is not None
-    layers = [(name, None, role) for name, _values, role in layers]
-    reflectances = correction = lat = lon = bright = kept = values = None
-    zenith = rejected = land = None
+    # From here the layers hold the only references to their arrays.
+    reflectances = correction = bright = kept = None
     crop.lat = crop.lon = None
+
+    # Each band is warped on its own, onto the same grid, then stacked. The
+    # warped bands stay on disk until they are copied into the product: held in
+    # memory beside the swath arrays they took a full-resolution frame to 2.7 GB.
+    # Each layer is handed to its warp rather than lent (see SwathArrays), so it
+    # is freed once staged, and the last warp takes the geolocation as well.
+    singles: list[Path] = []
+    transform = projection = None
+    width = height = 0
+    # By index, not enumerate(): enumerate keeps the tuple it last gave out, and
+    # with it the layer's array, alive through that layer's warp.
+    for index in range(len(layers)):
+        name, values, role = layers[index]
+        layers[index] = (name, None, role)
+        swath = SwathArrays(values=values, lat=lat, lon=lon)
+        values = None
+        if index == len(layers) - 1:
+            lat = lon = None
+        single = scratch / f"{product}_{name}.tif"
+        singles.append(single)
+        warp_swath(
+            swath=swath, output_path=str(single),
+            epsg=epsg, resolution=resolution, bounds=bounds,
+            resampling="near" if role == "code" else _resampling_for(options, settings),
+            scratch=scratch,
+            creation_options=["TILED=YES", "COMPRESS=NONE"],
+            num_threads=settings["gdal_num_threads"], geoloc_step=step,
+            # With nothing kept there is nothing to check: this guard asks
+            # "did the warp lose the data?", and a frame whose mask kept no
+            # pixel has none to lose. Left at 1 it turned on_empty="write"
+            # into a different exception instead of an empty product.
+            minimum_valid=(kept_count // 100 or 1) if kept_count else None,
+        )
+        swath = None
+        dataset = gdal.Open(str(single))
+        transform, projection = dataset.GetGeoTransform(), dataset.GetProjection()
+        width, height = dataset.RasterXSize, dataset.RasterYSize
+        dataset = None
 
     float_path = Path(output_path)
     try:
@@ -1872,8 +1889,12 @@ def _process_rgb_product(
     # Float32 with a lossless codec, so the values read back are the warped ones.
     product_file = gdal.Open(str(float_path))
     first = product_file.GetRasterBand(1).ReadAsArray()
-    statistics = value_statistics(first)
     first_valid = valid_fraction(first)
+    # The statistics are of the valid values only, so the band is cut to them
+    # before value_statistics copies them again: the whole band (183 MB on a
+    # full-resolution frame) is not held beside those copies.
+    first = first[np.isfinite(first)]
+    statistics = value_statistics(first)
     first = None
     result: dict[str, Any] = {
         "product": product,
