@@ -278,11 +278,47 @@ def is_log_packed(band: Any) -> bool:
     return units.startswith(_LOG_UNITS_PREFIX)
 
 
-def read_packed(band: Any, *, decimate: int = 1, log10: bool | str = "auto") -> np.ndarray:
+def read_window(band: Any, shape: tuple[int, int] | None = None,
+                window: tuple[slice, slice] | None = None) -> np.ndarray:
+    """The band's raw pixels at ``shape`` (its own size by default), or only inside ``window``.
+
+    ``shape`` other than the band's own is GDAL's nearest-neighbour resampling
+    of the whole band, as a decimated read or a flag word on another grid needs.
+    ``window`` is ``(rows, columns)`` of that ``shape``, as
+    :func:`pysent._swath.bbox_window` gives it. At the band's own size only the
+    window is read, so the rest of the band is never in memory - which is what
+    makes a ``bbox`` on a 44-minute RR segment cheap - and the pixels are those
+    a whole read holds there. At any other size a window of the resampled
+    buffer would not land on the same source pixels, so the band is read whole
+    at ``shape`` and cut: the same result, without the saving.
+    """
+    own = (band.YSize, band.XSize)
+    full = own if shape is None else (int(shape[0]), int(shape[1]))
+    if window is not None and full == own:
+        rows, columns = window
+        raw = band.ReadAsArray(
+            int(columns.start), int(rows.start),
+            int(columns.stop - columns.start), int(rows.stop - rows.start),
+        )
+    else:
+        raw = band.ReadAsArray(buf_xsize=full[1], buf_ysize=full[0])
+        if raw is not None and window is not None:
+            raw = np.ascontiguousarray(raw[window])
+    if raw is None:
+        raise ValueError("the band could not be read")
+    return raw
+
+
+def read_packed(band: Any, *, decimate: int = 1, log10: bool | str = "auto",
+                window: tuple[slice, slice] | None = None) -> np.ndarray:
     """Read a band as float32, fill as NaN, ``scale``/``offset`` applied.
 
     ``decimate`` reads every n-th pixel by asking GDAL for a smaller buffer,
     which lets a 355-megapixel Synergy band be previewed without holding it.
+
+    ``window`` gives only ``(rows, columns)`` of the (decimated) band, bitwise
+    the values a whole read holds there; undecimated, only the window is read
+    (see :func:`read_window`).
 
     ``log10`` applies the final ``10**x`` that the OLCI water products need:
     they store ``log10(value)`` packed into a byte, so a pipeline that forgets
@@ -292,9 +328,7 @@ def read_packed(band: Any, *, decimate: int = 1, log10: bool | str = "auto") -> 
     """
     width = max(1, band.XSize // max(1, int(decimate)))
     height = max(1, band.YSize // max(1, int(decimate)))
-    raw = band.ReadAsArray(buf_xsize=width, buf_ysize=height)
-    if raw is None:
-        raise ValueError("the band could not be read")
+    raw = read_window(band, (height, width), window)
 
     nodata = band.GetNoDataValue()
     scale = band.GetScale()

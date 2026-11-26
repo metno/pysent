@@ -53,7 +53,7 @@ from typing import Any
 
 import numpy as np
 
-from ._sen3 import extract_member, open_sen3_variable, read_flag_table, read_packed
+from ._sen3 import extract_member, open_sen3_variable, read_flag_table, read_packed, read_window
 
 # Members a reflectance conversion needs beyond the radiance band itself.
 INSTRUMENT_MEMBER = "instrument_data.nc"
@@ -79,7 +79,8 @@ def radiance_member(band: int) -> tuple[str, str]:
 
 
 def tie_point_field(
-    root: str, member: str, variable: str, scratch: Path, shape: tuple[int, int]
+    root: str, member: str, variable: str, scratch: Path, shape: tuple[int, int],
+    window: tuple[slice, slice] | None = None,
 ) -> np.ndarray:
     """A tie-point field in its own units, expanded to the image shape.
 
@@ -92,6 +93,11 @@ def tie_point_field(
     The atmospheric correction needs five of these fields beside the solar
     angle, which is why this is a function rather than a line inside
     :func:`solar_zenith`.
+
+    ``window`` (``(rows, columns)`` of the image of ``shape``) gives only that
+    part: the tie grid is small and read whole, then its rows are cut and each
+    is interpolated at the window's columns alone - the same points on the same
+    line as for the whole image, so the same values.
     """
     rows, columns = shape
     dataset = open_sen3_variable(extract_member(root, member, scratch), variable)
@@ -109,20 +115,23 @@ def tie_point_field(
             tie = tie[:rows]
         else:
             tie = np.vstack([tie, np.repeat(tie[-1:], rows - tie.shape[0], axis=0)])
+    row_cut, column_cut = window if window is not None else (slice(0, rows), slice(0, columns))
     if tie.shape[1] == columns:
-        return tie.astype(np.float32)
+        return tie[row_cut, column_cut].astype(np.float32)
 
     tie_columns = np.linspace(0, columns - 1, tie.shape[1])
-    target = np.arange(columns)
-    expanded = np.empty((rows, columns), dtype=np.float32)
-    for row in range(rows):
+    target = np.arange(columns)[column_cut]
+    tie = tie[row_cut]
+    expanded = np.empty((tie.shape[0], target.size), dtype=np.float32)
+    for row in range(tie.shape[0]):
         expanded[row] = np.interp(target, tie_columns, tie[row])
     return expanded
 
 
-def solar_zenith(root: str, scratch: Path, shape: tuple[int, int]) -> np.ndarray:
+def solar_zenith(root: str, scratch: Path, shape: tuple[int, int],
+                 window: tuple[slice, slice] | None = None) -> np.ndarray:
     """Solar zenith angle in degrees, expanded from its tie-point grid."""
-    return tie_point_field(root, GEOMETRY_MEMBER, "SZA", scratch, shape)
+    return tie_point_field(root, GEOMETRY_MEMBER, "SZA", scratch, shape, window)
 
 
 def flux_row_for_band(wavelengths: np.ndarray, band: int, *, tolerance_nm: float = 12.0) -> int:
@@ -161,7 +170,8 @@ def flux_row_for_band(wavelengths: np.ndarray, band: int, *, tolerance_nm: float
     return row
 
 
-def solar_flux_per_pixel(root: str, scratch: Path, band: int, shape: tuple[int, int]) -> np.ndarray:
+def solar_flux_per_pixel(root: str, scratch: Path, band: int, shape: tuple[int, int],
+                         window: tuple[slice, slice] | None = None) -> np.ndarray:
     """Solar irradiance for each pixel of one band, via its detector index.
 
     The flux table is ``[band, detector]`` and every pixel records which
@@ -170,7 +180,13 @@ def solar_flux_per_pixel(root: str, scratch: Path, band: int, shape: tuple[int, 
 
     Which row of the table is this band's is decided by
     :func:`flux_row_for_band`, not by the band number - see there for why.
+
+    With ``window`` (``(rows, columns)`` of the image of ``shape``) only that
+    part comes back.
     """
+    full_shape = tuple(shape)
+    if window is not None:
+        shape = (window[0].stop - window[0].start, window[1].stop - window[1].start)
     local = extract_member(root, INSTRUMENT_MEMBER, scratch)
     dataset = open_sen3_variable(local, "solar_flux")
     table = dataset.GetRasterBand(1).ReadAsArray()
@@ -183,7 +199,7 @@ def solar_flux_per_pixel(root: str, scratch: Path, band: int, shape: tuple[int, 
     # array, and a decimated band needs the indices of the pixels it kept.
     # Nearest sampling, since a detector number is a label and an average of
     # two of them names a detector that saw neither pixel.
-    detector = dataset.GetRasterBand(1).ReadAsArray(buf_xsize=shape[1], buf_ysize=shape[0])
+    detector = read_window(dataset.GetRasterBand(1), full_shape, window)
     dataset = None
 
     if detector.shape != shape:
@@ -208,20 +224,32 @@ def toa_reflectance(
     *,
     decimate: int = 1,
     solar_zenith_degrees: np.ndarray | None = None,
+    window: tuple[slice, slice] | None = None,
+    image_shape: tuple[int, int] | None = None,
 ) -> np.ndarray:
     """One band as top-of-atmosphere reflectance.
 
     ``solar_zenith_degrees`` lets several bands of one scene share a single
     expansion of the tie grid, which is the expensive part.
+
+    ``window`` (``(rows, columns)`` of the image) computes only that part,
+    every pixel exactly as the whole band would give it. ``image_shape`` is the
+    image the window was found on (the geolocation's); a band of another size
+    is refused, since a window of it would be a different place.
     """
     member, variable = radiance_member(band)
     dataset = open_sen3_variable(extract_member(root, member, scratch), variable)
-    radiance = read_packed(dataset.GetRasterBand(1), decimate=decimate, log10=False)
-    dataset = None
+    source = dataset.GetRasterBand(1)
+    full_shape = (max(1, source.YSize // max(1, int(decimate))),
+                  max(1, source.XSize // max(1, int(decimate))))
+    if image_shape is not None and tuple(image_shape) != full_shape:
+        raise ValueError(f"band {band} is {full_shape} but the geolocation is {tuple(image_shape)}")
+    radiance = read_packed(source, decimate=decimate, log10=False, window=window)
+    source = dataset = None
 
-    flux = solar_flux_per_pixel(root, scratch, band, radiance.shape)
+    flux = solar_flux_per_pixel(root, scratch, band, full_shape, window)
     if solar_zenith_degrees is None:
-        solar_zenith_degrees = solar_zenith(root, scratch, radiance.shape)
+        solar_zenith_degrees = solar_zenith(root, scratch, full_shape, window)
     if solar_zenith_degrees.shape != radiance.shape:
         raise ValueError(
             f"the solar zenith angle is {solar_zenith_degrees.shape} but the band is {radiance.shape}"
@@ -241,6 +269,7 @@ def quality_mask(
     scratch: Path,
     shape: tuple[int, int],
     reject: list[str],
+    window: tuple[slice, slice] | None = None,
 ) -> tuple[np.ndarray, list[str], np.ndarray]:
     """Pixels to drop, the names this product does not define, and its bright mask.
 
@@ -248,6 +277,9 @@ def quality_mask(
     the explanation for every reflectance above one. Measured on a real frame,
     **100 %** of the pixels exceeding unity are flagged bright, and over open
     water that is not bright the fraction is zero.
+
+    With ``window`` (``(rows, columns)`` of the image of ``shape``) the masks
+    are that part only, and undecimated only that part of the flag word is read.
     """
     from ._sen3 import flag_selection
 
@@ -255,11 +287,11 @@ def quality_mask(
     dataset = open_sen3_variable(local, QUALITY_VARIABLE)
     band = dataset.GetRasterBand(1)
     table = read_flag_table(band)
-    flags = band.ReadAsArray(buf_xsize=shape[1], buf_ysize=shape[0])
+    flags = read_window(band, shape, window)
     dataset = None
 
     rejected, missing = flag_selection(flags, table, reject, allow_missing=True) if reject else (
-        np.zeros(shape, dtype=bool), [],
+        np.zeros(flags.shape, dtype=bool), [],
     )
     bright, _ = flag_selection(flags, table, ["bright"], allow_missing=True)
     return rejected, missing, bright
