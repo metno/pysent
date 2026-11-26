@@ -45,6 +45,12 @@ MANIFEST = "xfdumanifest.xml"
 _MANIFEST_FIELDS = ("productName", "productType", "baselineCollection", "processingVersion")
 _MANIFEST_TIMES = {"startTime": "start", "stopTime": "end"}
 
+# How many cells a whole-frame conversion works on at a time. The arithmetic is
+# per pixel, so doing it a strip of rows at a time gives the same bits while the
+# float64 and int64 temporaries stay a few megabytes instead of a frame's worth
+# (a full-resolution OLCI frame is 19 M pixels: 152 MB per float64 copy).
+_STRIP_CELLS = 1 << 20
+
 
 def sen3_root(input_dataset: str) -> str:
     """The ``.SEN3`` directory of a product, as a path GDAL can list.
@@ -290,22 +296,39 @@ def read_packed(band: Any, *, decimate: int = 1, log10: bool | str = "auto") -> 
     if raw is None:
         raise ValueError("the band could not be read")
 
-    values = raw.astype(np.float64)
     nodata = band.GetNoDataValue()
-    missing = np.zeros(raw.shape, dtype=bool) if nodata is None else (raw == nodata)
-
     scale = band.GetScale()
     offset = band.GetOffset()
-    if scale not in (None, 1.0):
-        values = values * float(scale)
-    if offset not in (None, 0.0):
-        values = values + float(offset)
+    scale = None if scale in (None, 1.0) else float(scale)
+    offset = None if offset in (None, 0.0) else float(offset)
     if log10 == "auto":
         log10 = is_log_packed(band)
-    if log10:
-        values = np.power(10.0, values)
 
-    return np.where(missing, np.nan, values).astype(np.float32)
+    # In float64, then rounded once to float32, a strip of rows at a time.
+    values = np.empty(raw.shape, dtype=np.float32)
+    for rows in _row_slices(raw):
+        part = raw[rows].astype(np.float64)
+        if scale is not None:
+            part *= scale
+        if offset is not None:
+            part += offset
+        if log10:
+            np.power(10.0, part, out=part)
+        if nodata is not None:
+            part[raw[rows] == nodata] = np.nan
+        values[rows] = part
+    return values
+
+
+def _row_slices(array: np.ndarray):
+    """Slices of the first axis covering ``array`` in strips of about ``_STRIP_CELLS``."""
+    if array.ndim == 0:
+        yield ()
+        return
+    per_row = max(1, array[:1].size)
+    step = max(1, _STRIP_CELLS // per_row)
+    for start in range(0, array.shape[0], step):
+        yield slice(start, start + step)
 
 
 def read_flag_table(band: Any) -> list[dict[str, Any]]:
@@ -380,11 +403,16 @@ def flag_selection(
         )
 
     selected = np.zeros(flags.shape, dtype=bool)
-    for name in names:
-        row = known.get(name)
-        if row is None:
-            continue
-        selected |= (flags.astype(np.int64) & row["mask"]) == row["value"]
+    tests = [(known[name]["mask"], known[name]["value"]) for name in names if name in known]
+    if not tests:
+        return selected, missing
+    # The word as int64 once per strip rather than the whole frame once per
+    # name: an OLCI water flag is uint64, so each name used to cost two
+    # frame-sized 8-byte arrays. Same test, same bits.
+    for rows in _row_slices(flags):
+        words = flags[rows].astype(np.int64)
+        for mask, value in tests:
+            selected[rows] |= (words & mask) == value
     return selected, missing
 
 
