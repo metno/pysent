@@ -1889,8 +1889,12 @@ def _process_rgb_product(
     # Float32 with a lossless codec, so the values read back are the warped ones.
     product_file = gdal.Open(str(float_path))
     first = product_file.GetRasterBand(1).ReadAsArray()
-    statistics = value_statistics(first)
     first_valid = valid_fraction(first)
+    # The statistics are of the valid values only, so the band is cut to them
+    # before value_statistics copies them again: the whole band (183 MB on a
+    # full-resolution frame) is not held beside those copies.
+    first = first[np.isfinite(first)]
+    statistics = value_statistics(first)
     first = None
     result: dict[str, Any] = {
         "product": product,
