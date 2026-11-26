@@ -339,6 +339,37 @@ def finish_float_product(*, path: str, settings: dict[str, Any], metadata: dict[
     dataset = None
 
 
+def _check_rgb_style(value_range: tuple[float, float], gamma: float) -> None:
+    low, high = value_range
+    if not low < high:
+        raise ValueError(f"value_range must be (low, high) with low < high, not {(low, high)}")
+    if gamma <= 0:
+        raise ValueError(f"gamma must be positive, not {gamma}")
+
+
+def _rgb_channel(band: np.ndarray, value_range: tuple[float, float], gamma: float) -> np.ndarray:
+    """One channel of :func:`rgb_bytes`: reflectance to 1..255, 0 where there is none.
+
+    Per pixel, so a strip of a band gives the same bytes as the whole band.
+    """
+    low, high = value_range
+    with np.errstate(invalid="ignore"):
+        # float32, not float64. The output is eight bits, so the extra
+        # precision buys nothing, and at full resolution each band is
+        # 67 million cells - three float64 copies came to 1.6 GB and were
+        # enough on their own to exhaust a 4 GB worker.
+        scaled = np.clip((band.astype(np.float32) - low) / (high - low), 0.0, 1.0)
+        if gamma != 1.0:
+            scaled = np.power(scaled, gamma)
+        return np.rint(
+            np.where(np.isfinite(band), scaled * (STYLED_CEILING - STYLED_FLOOR) + STYLED_FLOOR, 0)
+        ).astype(np.uint8)
+
+
+def _alpha(band: np.ndarray) -> np.ndarray:
+    return np.where(np.isfinite(band), 255, 0).astype(np.uint8)
+
+
 def rgb_bytes(
     bands: list[np.ndarray],
     value_range: tuple[float, float],
@@ -358,33 +389,40 @@ def rgb_bytes(
     """
     if len(bands) != 3:
         raise ValueError(f"a true-colour composite needs three bands, not {len(bands)}")
-    low, high = value_range
-    if not low < high:
-        raise ValueError(f"value_range must be (low, high) with low < high, not {(low, high)}")
-    if gamma <= 0:
-        raise ValueError(f"gamma must be positive, not {gamma}")
+    _check_rgb_style(value_range, gamma)
 
     rows, columns = bands[0].shape
     out = np.zeros((rows, columns, 3), dtype=np.uint8)
-    with np.errstate(invalid="ignore"):
-        for index, band in enumerate(bands):
-            # float32, not float64. The output is eight bits, so the extra
-            # precision buys nothing, and at full resolution each band is
-            # 67 million cells - three float64 copies came to 1.6 GB and were
-            # enough on their own to exhaust a 4 GB worker.
-            scaled = np.clip((band.astype(np.float32) - low) / (high - low), 0.0, 1.0)
-            if gamma != 1.0:
-                scaled = np.power(scaled, gamma)
-            out[:, :, index] = np.rint(
-                np.where(np.isfinite(band), scaled * (STYLED_CEILING - STYLED_FLOOR) + STYLED_FLOOR, 0)
-            ).astype(np.uint8)
+    for index, band in enumerate(bands):
+        out[:, :, index] = _rgb_channel(band, value_range, gamma)
     return out
+
+
+def _read_uncached(path: str, offset: int, rows: int) -> np.ndarray:
+    """Rows ``offset .. offset + rows`` of band 1 of an uncompressed GeoTIFF, around GDAL's block cache.
+
+    The product being written shares that cache. When its bands are larger than
+    the cache, GDAL flushes tiles before the other bands of them are written and
+    rewrites them later at a new offset; how many, and which, depends on what
+    else is in the cache. Reading the source through it as well would change
+    that, and with it the file's bytes - the pixels stay the same, the layout
+    does not. Direct reads leave the cache as writing from arrays leaves it.
+    """
+    from osgeo import gdal
+
+    with gdal.config_option("GTIFF_DIRECT_IO", "YES"):
+        source = gdal.Open(path)
+        band = source.GetRasterBand(1)
+        try:
+            return band.ReadAsArray(0, offset, band.XSize, rows)
+        finally:
+            band = source = None
 
 
 def write_rgb_product(
     *,
     path: str,
-    bands: list[np.ndarray],
+    bands: list[np.ndarray | str | Path],
     transform: tuple[float, ...],
     projection: str,
     settings: dict[str, Any],
@@ -396,10 +434,21 @@ def write_rgb_product(
     A true-colour composite is a picture, but the numbers behind it are still a
     measurement, so they are kept as well - honestly labelled, since a
     top-of-atmosphere reflectance derived here is not a validated product.
+
+    A band is an array or the path of a single-band raster on the output's
+    grid. A path is copied a strip of whole tile rows at a time, so the bands
+    of a full-resolution frame never have to be in memory together; the order
+    of the writes - band after band, top to bottom - is the one an array
+    gives, so the file's bytes are the same either way.
     """
     from osgeo import gdal
 
-    rows, columns = bands[0].shape
+    sources = [gdal.Open(str(band)) if isinstance(band, (str, Path)) else None for band in bands]
+    # Only the shape is needed from each; the pixels are read strip by strip.
+    first = bands[0]
+    rows, columns = (
+        (sources[0].RasterYSize, sources[0].RasterXSize) if sources[0] is not None else first.shape
+    )
     dataset = gdal.GetDriverByName("GTiff").Create(
         path, columns, rows, len(bands), gdal.GDT_Float32,
         options=creation_options(settings, float_data=True),
@@ -409,7 +458,19 @@ def write_rgb_product(
     for index, band in enumerate(bands):
         raster = dataset.GetRasterBand(index + 1)
         raster.SetNoDataValue(float("nan"))
-        raster.WriteArray(np.asarray(band, dtype=np.float32))
+        source = sources[index]
+        if source is None:
+            raster.WriteArray(np.asarray(band, dtype=np.float32))
+        else:
+            if (source.RasterYSize, source.RasterXSize) != (rows, columns):
+                raise ValueError(
+                    f"band {index + 1} is {source.RasterYSize} x {source.RasterXSize}, "
+                    f"not {rows} x {columns}"
+                )
+            source = sources[index] = None
+            for offset, count in _row_strips(rows, columns, raster.GetBlockSize()[1]):
+                strip = _read_uncached(str(band), offset, count)
+                raster.WriteArray(np.asarray(strip, dtype=np.float32), 0, offset)
         raster.SetDescription(descriptions[index])
     dataset.SetMetadata(metadata)
     dataset.FlushCache()
@@ -428,25 +489,58 @@ def write_rgb_styled(
     """The picture: an 8-bit RGB GeoTIFF with an alpha band for no data."""
     from osgeo import gdal
 
+    import tempfile
+
+    _check_rgb_style(value_range, gamma)
     source = gdal.Open(source_path)
-    bands = [source.GetRasterBand(index + 1).ReadAsArray() for index in range(3)]
+    if source.RasterCount < 3:
+        raise ValueError(f"a true-colour composite needs three bands, not {source.RasterCount}")
     transform, projection = source.GetGeoTransform(), source.GetProjection()
+    columns, rows = source.RasterXSize, source.RasterYSize
     source = None
 
-    rgb = rgb_bytes(bands, value_range, gamma=gamma)
-    alpha = np.where(np.isfinite(bands[0]), 255, 0).astype(np.uint8)
-    rows, columns = alpha.shape
-
-    with atomic_output(output_path) as temporary:
+    with atomic_output(output_path) as temporary, tempfile.TemporaryDirectory(
+        dir=Path(temporary).parent, prefix=".rgb-"
+    ) as work:
         dataset = gdal.GetDriverByName("GTiff").Create(
             str(temporary), columns, rows, 4, gdal.GDT_Byte,
             options=creation_options(settings, float_data=False) + ["PHOTOMETRIC=RGB", "ALPHA=YES"],
         )
         dataset.SetGeoTransform(transform)
         dataset.SetProjection(projection)
-        for index in range(3):
-            dataset.GetRasterBand(index + 1).WriteArray(rgb[:, :, index])
-        dataset.GetRasterBand(4).WriteArray(alpha)
+        block_rows = dataset.GetRasterBand(1).GetBlockSize()[1]
+        # Two passes, so that memory holds a strip rather than three
+        # full-resolution bands (2.7 GB on an FR frame) and the file's bytes stay
+        # the same. First the four bands are styled a strip at a time into
+        # uncompressed scratch files - per pixel, so the values are the ones the
+        # whole grid gives. Then they are copied in band after band, top to
+        # bottom, read around GDAL's block cache: the order and the cache the
+        # writes of whole arrays had. Styling straight into the picture while
+        # reading the product left the product's decompressed tiles in that
+        # cache, which pushed the picture's tiles out early and moved them in
+        # the file - same pixels, different bytes.
+        channels = [str(Path(work) / f"channel_{index}.tif") for index in range(4)]
+        scratch = [
+            gdal.GetDriverByName("GTiff").Create(
+                path, columns, rows, 1, gdal.GDT_Byte,
+                options=["TILED=YES", "COMPRESS=NONE", f"BLOCKYSIZE={block_rows}"],
+            )
+            for path in channels
+        ]
+        source = gdal.Open(source_path)
+        for offset, count in _row_strips(rows, columns, block_rows):
+            strip = [source.GetRasterBand(index + 1).ReadAsArray(0, offset, columns, count) for index in range(3)]
+            for index in range(3):
+                scratch[index].GetRasterBand(1).WriteArray(_rgb_channel(strip[index], value_range, gamma), 0, offset)
+            scratch[3].GetRasterBand(1).WriteArray(_alpha(strip[0]), 0, offset)
+            strip = None
+        source = None
+        scratch = None
+        for index, path in enumerate(channels):
+            band = dataset.GetRasterBand(index + 1)
+            for offset, count in _row_strips(rows, columns, block_rows):
+                band.WriteArray(_read_uncached(path, offset, count), 0, offset)
+            band = None
         dataset.SetMetadata({
             **metadata,
             "PYSENT_STYLE_RANGE": f"{value_range[0]:g},{value_range[1]:g}",
