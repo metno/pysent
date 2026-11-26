@@ -513,6 +513,45 @@ GEOLOCATION_STEPS = (1, 2, 8, 16, 32, 64)
 REFUSED_GEOLOCATION_STEP = 4
 
 
+# Cells per strip when the two warped bands are copied into the product: about
+# 16 MB of float32, rounded down to whole tile rows (see _combine_bands).
+_COMBINE_STRIP_CELLS = 1 << 22
+
+
+class SwathArrays:
+    """The arrays of one swath, handed to :func:`warp_swath` to be let go.
+
+    A caller that passes its arrays as ``values=``, ``lat=``, ``lon=`` keeps
+    them alive through GDAL's warp, although ``warp_swath`` has written every
+    one of them to scratch before the warp begins. One that wraps them here
+    and drops its own names gives ``warp_swath`` the only references: the
+    arrays are freed once their scratch files are written (about 0.3 GB on a
+    full-resolution OLCI frame, the swath plus its reason codes and
+    geolocation). ``warp_swath`` empties the holder, so it is used once.
+    """
+
+    __slots__ = ("values", "lat", "lon", "categorical")
+
+    def __init__(
+        self,
+        *,
+        values: np.ndarray,
+        lat: np.ndarray,
+        lon: np.ndarray,
+        categorical: np.ndarray | None = None,
+    ) -> None:
+        self.values = values
+        self.lat = lat
+        self.lon = lon
+        self.categorical = categorical
+
+    def take(self) -> tuple[Any, Any, Any, Any]:
+        """The four arrays, and the holder left empty."""
+        taken = (self.values, self.lat, self.lon, self.categorical)
+        self.values = self.lat = self.lon = self.categorical = None
+        return taken
+
+
 def _combine_bands(
     *, values_path: str, reason_path: str, output_path: str, creation_options: list[str]
 ) -> None:
@@ -542,8 +581,23 @@ def _combine_bands(
     dataset.SetProjection(values.GetProjection())
     first = dataset.GetRasterBand(1)
     first.SetNoDataValue(float("nan"))
-    first.WriteArray(values.GetRasterBand(1).ReadAsArray())
-    dataset.GetRasterBand(2).WriteArray(reasons.GetRasterBand(1).ReadAsArray())
+    # Band after band, as before, but in strips of whole tile rows rather than
+    # two whole-grid reads (2 x 183 MB on a full-resolution OLCI frame, the
+    # peak of the whole swath run). The order matters as well as the pixels:
+    # once the product outgrows GDAL_CACHEMAX, GDAL flushes tiles half
+    # written and the tiles it rewrites land at new offsets. Strips that end
+    # inside a tile row wrote the same pixels into a file 344 bytes bigger;
+    # strips of whole tile rows write the same file as the two whole reads.
+    width, height = values.RasterXSize, values.RasterYSize
+    tile_rows = max(1, first.GetBlockSize()[1])
+    rows = max(tile_rows, (_COMBINE_STRIP_CELLS // max(1, width)) // tile_rows * tile_rows)
+    for target, source in (
+        (first, values.GetRasterBand(1)),
+        (dataset.GetRasterBand(2), reasons.GetRasterBand(1)),
+    ):
+        for offset in range(0, height, rows):
+            count = min(rows, height - offset)
+            target.WriteArray(source.ReadAsArray(0, offset, width, count), 0, offset)
     dataset.FlushCache()
     dataset = None
     values = reasons = None
@@ -551,9 +605,9 @@ def _combine_bands(
 
 def warp_swath(
     *,
-    values: np.ndarray,
-    lat: np.ndarray,
-    lon: np.ndarray,
+    values: np.ndarray | None = None,
+    lat: np.ndarray | None = None,
+    lon: np.ndarray | None = None,
     output_path: str,
     epsg: int,
     resolution: float,
@@ -565,6 +619,7 @@ def warp_swath(
     geoloc_step: int = 1,
     minimum_valid: int | None = None,
     categorical: np.ndarray | None = None,
+    swath: SwathArrays | None = None,
 ) -> str:
     """Resample a swath onto a map grid and write it as a Float32 GeoTIFF.
 
@@ -577,7 +632,19 @@ def warp_swath(
     ``GEOREFERENCING_CONVENTION=PIXEL_CENTER`` - without it each sample is read
     as a pixel's top-left corner and the whole result shifts by half a source
     pixel.
+
+    The arrays come either as ``values``/``lat``/``lon``/``categorical`` or in
+    a :class:`SwathArrays` given as ``swath``, never both. Either way every
+    array is written to scratch before the first warp and this function drops
+    its references then; given as ``swath``, they are its only references and
+    are freed before GDAL starts.
     """
+    if swath is not None:
+        if values is not None or lat is not None or lon is not None or categorical is not None:
+            raise ValueError("give the arrays either as swath= or as values=, lat=, lon=, not both")
+        values, lat, lon, categorical = swath.take()
+    if values is None or lat is None or lon is None:
+        raise ValueError("warp_swath needs values, lat and lon (or a swath= holding them)")
     if categorical is not None and categorical.shape != values.shape:
         raise ValueError(
             f"the categorical band is {categorical.shape} but the values are {values.shape}"
@@ -603,6 +670,7 @@ def warp_swath(
 
     scratch = Path(scratch)
     value_path = str(scratch / "swath_values.tif")
+    reason_source_path = str(scratch / "swath_reason_values.tif")
     lat_path = str(scratch / "swath_latitude.tif")
     lon_path = str(scratch / "swath_longitude.tif")
     vrt_path = str(scratch / "swath_values.vrt")
@@ -611,6 +679,18 @@ def warp_swath(
 
     _write_geolocation_tiff(lat_path, lat[::geoloc_step, ::geoloc_step])
     _write_geolocation_tiff(lon_path, lon[::geoloc_step, ::geoloc_step])
+    lat = lon = None
+    # Every array goes to scratch before the first warp, and is let go: the
+    # warps read only the files. Nothing of the swath is held through GDAL
+    # here, and nothing at all when the caller handed it over as swath=.
+    _write_value_tiff(value_path, values)
+    values = None
+    if categorical is not None:
+        _write_value_tiff(reason_source_path, categorical)
+        categorical = None
+        has_reasons = True
+    else:
+        has_reasons = False
 
     # See GEOLOCATION_STEPS: a sample of an n x n block is read as its centre.
     sample_offset = -(geoloc_step - 1) / 2.0
@@ -639,10 +719,9 @@ def warp_swath(
         # Either a count or GDAL's own "ALL_CPUS"; both are valid here.
         options["warpOptions"] = [f"NUM_THREADS={num_threads}"]
 
-    def warp_one(array: np.ndarray, destination: str, how: str) -> None:
-        """One array onto the target grid, through its own geolocation VRT."""
-        _write_value_tiff(value_path, array)
-        vrt = gdal.Translate(vrt_path, value_path, format="VRT")
+    def warp_one(source: str, destination: str, how: str) -> None:
+        """One staged array onto the target grid, through its own geolocation VRT."""
+        vrt = gdal.Translate(vrt_path, source, format="VRT")
         vrt.SetMetadata(
             {
                 "SRS": _GEOLOCATION_SRS,
@@ -685,8 +764,8 @@ def warp_swath(
     gdal.SetConfigOption("CPL_TMPDIR", str(scratch))
 
     try:
-        if categorical is None:
-            warp_one(values, output_path, resampling)
+        if not has_reasons:
+            warp_one(value_path, output_path, resampling)
         else:
             # Two warps, not one. The values get the resampling that was asked
             # for and the companion gets nearest, because a reject code is not a
@@ -701,8 +780,8 @@ def warp_swath(
             # as dashes. The second warp costs another pass and gives those cells
             # back. Both warps are given the same bounds, resolution and CRS, so
             # the grids still agree - asserted below rather than assumed.
-            warp_one(values, warped_values_path, resampling)
-            warp_one(categorical, warped_reason_path, "near")
+            warp_one(value_path, warped_values_path, resampling)
+            warp_one(reason_source_path, warped_reason_path, "near")
             _combine_bands(
                 values_path=warped_values_path,
                 reason_path=warped_reason_path,
@@ -732,7 +811,7 @@ def warp_swath(
                 "use gives exactly this: a correctly sized raster with nothing in it, and no error."
             )
 
-    for temporary in (value_path, lat_path, lon_path, vrt_path,
+    for temporary in (value_path, reason_source_path, lat_path, lon_path, vrt_path,
                       warped_values_path, warped_reason_path):
         gdal.Unlink(temporary) if temporary.startswith("/vsi") else Path(temporary).unlink(missing_ok=True)
     return output_path

@@ -83,6 +83,7 @@ from ._swath import (
     grid_bounds,
     normalise_bbox,
     refine_for_thin_swath,
+    SwathArrays,
     valid_fraction,
     value_statistics,
     warp_swath,
@@ -1571,9 +1572,13 @@ def _process_swath_product(
     crop.lat = crop.lon = None
 
     float_path = Path(output_path)
+    # Handed over, not lent: warp_swath writes them to scratch and holds the
+    # only references, so they are freed before GDAL's warp rather than after.
+    swath = SwathArrays(values=masked, lat=lat, lon=lon, categorical=reason_codes)
+    masked = reason_codes = lat = lon = None
     with atomic_output(float_path) as temporary:
         warp_swath(
-            values=masked, lat=lat, lon=lon, output_path=str(temporary),
+            swath=swath, output_path=str(temporary),
             epsg=epsg, resolution=resolution, bounds=bounds,
             resampling=_resampling_for(options, settings), scratch=scratch,
             creation_options=creation_options(settings, float_data=True),
@@ -1588,11 +1593,10 @@ def _process_swath_product(
             # pixel has none to lose. Left at 1 it turned on_empty="write"
             # into a different exception instead of an empty product.
             minimum_valid=(kept_count // 100 or 1) if kept_count else None,
-            categorical=reason_codes,
         )
         # Nothing after the warp reads the swath: the overviews and the result
         # are made from the file on disk.
-        masked = reason_codes = lat = lon = None
+        swath = None
         finish_float_product(path=str(temporary), settings=settings, metadata=metadata)
 
     return _assemble_result(
