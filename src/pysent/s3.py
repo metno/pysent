@@ -1742,11 +1742,15 @@ def _process_rgb_product(
         # its neighbour is a different bitfield, and a plausible-looking one.
         layers.append(("quality_flags", correction["quality"].astype(np.float32), "code"))
 
-    # Each band is warped on its own, onto the same grid, then stacked.
-    warped: list[np.ndarray] = []
+    # Each band is warped on its own, onto the same grid, then stacked. The
+    # warped bands stay on disk until they are copied into the product: held in
+    # memory beside the swath arrays they took a full-resolution frame to 2.7 GB.
+    singles: list[Path] = []
     transform = projection = None
+    width = height = 0
     for name, values, role in layers:
         single = scratch / f"{product}_{name}.tif"
+        singles.append(single)
         warp_swath(
             values=values, lat=lat, lon=lon, output_path=str(single),
             epsg=epsg, resolution=resolution, bounds=bounds,
@@ -1761,21 +1765,61 @@ def _process_rgb_product(
             minimum_valid=(kept_count // 100 or 1) if kept_count else None,
         )
         dataset = gdal.Open(str(single))
-        warped.append(dataset.GetRasterBand(1).ReadAsArray())
         transform, projection = dataset.GetGeoTransform(), dataset.GetProjection()
+        width, height = dataset.RasterXSize, dataset.RasterYSize
         dataset = None
-        Path(single).unlink(missing_ok=True)
+
+    # What the result says about the swath, taken now so the swath arrays can go
+    # before the product is written: nothing after this line reads them.
+    source_valid = valid_fraction(reflectances[0])
+    bright_fraction = float(np.mean(bright[kept])) if kept_count else 0.0
+    footprint = footprint_polygon(lat, lon)
+    aerosol_summary = None
+    if correction is not None and correction["loading"] is not None:
+        loading = correction["loading"]
+        depth = loading["optical_depth_550"]
+        aerosol_summary = {
+            "optical_depth_550_median": (
+                float(np.nanmedian(depth)) if np.isfinite(depth).any() else None
+            ),
+            "source_fractions": {
+                name: float(np.mean(loading["source"] == code))
+                for code, name in loading["source_names"].items()
+            },
+            "refused_fractions": {
+                name: float(np.mean(values))
+                for name, values in (loading["refused"] or {}).items()
+            },
+            "table_ceiling": loading["table_ceiling"],
+        }
+        loading = depth = None
+    corrected = correction is not None
+    layers = [(name, None, role) for name, _values, role in layers]
+    reflectances = correction = lat = lon = bright = kept = values = None
+    zenith = rejected = land = None
+    crop.lat = crop.lon = None
 
     float_path = Path(output_path)
-    with atomic_output(float_path) as temporary:
-        write_rgb_product(
-            path=str(temporary), bands=warped, transform=transform, projection=projection,
-            settings=settings, metadata=metadata,
-            descriptions=[name for name, _values, _role in layers],
-        )
-        finish_float_product(path=str(temporary), settings=settings, metadata=metadata)
+    try:
+        with atomic_output(float_path) as temporary:
+            write_rgb_product(
+                path=str(temporary), bands=[str(single) for single in singles],
+                transform=transform, projection=projection,
+                settings=settings, metadata=metadata,
+                descriptions=[name for name, _values, _role in layers],
+            )
+            finish_float_product(path=str(temporary), settings=settings, metadata=metadata)
+    finally:
+        for single in singles:
+            single.unlink(missing_ok=True)
 
-    statistics = value_statistics(warped[0])
+    # The statistics come from the file rather than from arrays kept for them:
+    # Float32 with a lossless codec, so the values read back are the warped ones.
+    product_file = gdal.Open(str(float_path))
+    first = product_file.GetRasterBand(1).ReadAsArray()
+    statistics = value_statistics(first)
+    first_valid = valid_fraction(first)
+    first = None
     result: dict[str, Any] = {
         "product": product,
         "path": str(float_path),
@@ -1787,15 +1831,15 @@ def _process_rgb_product(
         # two products needs to know their grids differ, and why.
         "grid_refined_for_thin_swath": grid_refined,
         "bounds": [float(value) for value in bounds],
-        "width": int(warped[0].shape[1]),
-        "height": int(warped[0].shape[0]),
+        "width": int(width),
+        "height": int(height),
         "transform": [float(value) for value in transform],
         "decimate": int(decimate),
         "geoloc_step": step,
         "bands": [f"Oa{band:02d}" for band in bands],
         "wavelengths_nm": [BAND_LABEL[band] for band in bands],
-        "valid_fraction": valid_fraction(warped[0]),
-        "source_valid_fraction": valid_fraction(reflectances[0]),
+        "valid_fraction": first_valid,
+        "source_valid_fraction": source_valid,
         "value_stats": statistics,
         "units": options["units"],
         "mask_flags": list(options["mask_flags"]),
@@ -1804,7 +1848,7 @@ def _process_rgb_product(
         "unavailable_flags": missing_flags,
         "available_flags": [],
         "baseline": manifest.get("baseline", ""),
-        "bright_fraction": float(np.mean(bright[kept])) if kept_count else 0.0,
+        "bright_fraction": bright_fraction,
         "atmospheric_correction": tier,
         "style_hint": {
             "value_range": list(options["value_range"]),
@@ -1817,12 +1861,12 @@ def _process_rgb_product(
             "reject_reason_band": None, "reject_reasons": None,
         },
         "browse_hidden_reasons": [],
-        "footprint": footprint_polygon(lat, lon),
+        "footprint": footprint,
         **crop.describe(),
         "time": manifest.get("time", {}),
         "provenance": metadata,
     }
-    if correction is not None:
+    if corrected:
         from ._olci_correction import quality_bit_names
         from ._olci_uncertainty import uncertainty_note
 
@@ -1839,7 +1883,7 @@ def _process_rgb_product(
         if carries_quality:
             result["quality_band"] = len(layers)
             result["quality_bits"] = quality_bit_names()
-            quality = warped[-1]
+            quality = product_file.GetRasterBand(len(layers)).ReadAsArray()
             finite = np.isfinite(quality)
             codes = quality[finite].astype(np.uint16) if finite.any() else np.zeros(0, np.uint16)
             result["quality_fractions"] = {
@@ -1854,23 +1898,9 @@ def _process_rgb_product(
             result["uncertainty_unmeasured_fraction"] = result["quality_fractions"][
                 "uncertainty_unmeasured"
             ]
-        if correction["loading"] is not None:
-            loading = correction["loading"]
-            depth = loading["optical_depth_550"]
-            result["aerosol"] = {
-                "optical_depth_550_median": (
-                    float(np.nanmedian(depth)) if np.isfinite(depth).any() else None
-                ),
-                "source_fractions": {
-                    name: float(np.mean(loading["source"] == code))
-                    for code, name in loading["source_names"].items()
-                },
-                "refused_fractions": {
-                    name: float(np.mean(values))
-                    for name, values in (loading["refused"] or {}).items()
-                },
-                "table_ceiling": loading["table_ceiling"],
-            }
+        if aerosol_summary is not None:
+            result["aerosol"] = aerosol_summary
+    product_file = None
 
     if settings["styled"]:
         styled_path = float_path.with_name(f"{float_path.stem}_styled.tif")
