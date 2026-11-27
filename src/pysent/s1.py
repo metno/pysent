@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 import rasterio
-from osgeo import gdal
+from osgeo import gdal, osr
 from rasterio.enums import ColorInterp, Resampling
 
 from ._runtime import (
@@ -72,6 +72,16 @@ S1_SPECKLE_WINDOW = 5
 S1_STRETCH_PERCENTILES: tuple[float, float] = (1.0, 99.0)
 S1_NETCDF_IMPLEMENTATION = "sentinel_s1_quicklook"
 S1_SAFE_IMPLEMENTATION = "sentinel_s1_safe_quicklook"
+# The NetCDF product carries a lat/lon pair for every pixel. Handed to GDAL
+# whole, the geolocation warp of a 26364 x 19513 IW scene was killed at the
+# worker's 4 GB after about an hour on GDAL 3.8.4 and 3.13.3 alike, and took
+# 40 min and 4.8 GB where it was let finish. Every 16th sample is enough for
+# the 40 m grid: on that scene's own grid, 59 of 29.9 million cells change
+# validity and values move 0.011 dB on average (p99 0.063 dB), in 90 s
+# under 2 GB; GDAL 3.8.4 and 3.13.3 then agree on all but 105 cells.
+S1_NETCDF_GEOLOCATION_STEP = 16
+# Cells per strip read from each geolocation array: 64 MB of Float32.
+S1_GEOLOCATION_STRIP_CELLS = 1 << 24
 
 
 def _stretch_sentinel_s1_kernel(
@@ -559,6 +569,121 @@ def stretch_sentinel_s1_grayscale(
     }
 
 
+def _stage_sentinel_s1_geolocation(
+    subdataset: str, prefix: Path, step: int
+) -> tuple[dict[str, str], list[tuple[float, float]]]:
+    """Every ``step``-th lat/lon sample of a NetCDF subdataset, as Float64 GeoTIFFs beside ``prefix``.
+
+    Returns the ``GEOLOCATION`` metadata that points a VRT of the subdataset at
+    them, and the (lon, lat) of the full arrays' westmost, eastmost, southmost
+    and northmost samples, which bound the output as GDAL's own suggestion
+    does. The arrays are read in strips of whole rows, both at once, so no
+    more than one strip of each is ever held.
+    """
+    source = gdal.Open(subdataset)
+    geolocation = source.GetMetadata("GEOLOCATION") or {}
+    width, height = source.RasterXSize, source.RasterYSize
+    source = None
+    if not geolocation.get("X_DATASET") or not geolocation.get("Y_DATASET"):
+        raise RuntimeError(f"{subdataset} carries no geolocation arrays")
+    bands = {}
+    datasets = {}
+    for axis in ("X", "Y"):
+        datasets[axis] = gdal.Open(geolocation[f"{axis}_DATASET"])
+        if (datasets[axis].RasterXSize, datasets[axis].RasterYSize) != (width, height):
+            raise RuntimeError(
+                f"{subdataset}: the {axis} geolocation array is "
+                f"{datasets[axis].RasterXSize}x{datasets[axis].RasterYSize}, the data {width}x{height}"
+            )
+        bands[axis] = datasets[axis].GetRasterBand(int(geolocation.get(f"{axis}_BAND", "1")))
+    staged = {axis: f"{prefix}.geolocation_{axis.lower()}.tif" for axis in ("X", "Y")}
+    columns = len(range(0, width, step))
+    rows = len(range(0, height, step))
+    outputs = {
+        axis: gdal.GetDriverByName("GTiff").Create(staged[axis], columns, rows, 1, gdal.GDT_Float64)
+        for axis in ("X", "Y")
+    }
+    # A strip is a whole number of steps, about 64 MB of each Float32 array.
+    strip = max(step, (S1_GEOLOCATION_STRIP_CELLS // max(width, 1)) // step * step)
+    # West, east, south, north: (value, lon, lat) of the extreme sample so far.
+    extremes: list[tuple[float, float, float] | None] = [None, None, None, None]
+    for top in range(0, height, strip):
+        count = min(strip, height - top)
+        lon = bands["X"].ReadAsArray(0, top, width, count)
+        lat = bands["Y"].ReadAsArray(0, top, width, count)
+        for axis, data in (("X", lon), ("Y", lat)):
+            outputs[axis].GetRasterBand(1).WriteArray(data[::step, ::step].astype(np.float64), 0, top // step)
+        finite = np.isfinite(lon) & np.isfinite(lat)
+        if finite.any():
+            for slot, (values, pick, better) in enumerate(
+                ((lon, np.argmin, np.less), (lon, np.argmax, np.greater),
+                 (lat, np.argmin, np.less), (lat, np.argmax, np.greater))
+            ):
+                index = pick(np.where(finite, values, np.inf if pick is np.argmin else -np.inf))
+                value = float(values.flat[index])
+                if extremes[slot] is None or better(value, extremes[slot][0]):
+                    extremes[slot] = (value, float(lon.flat[index]), float(lat.flat[index]))
+        lon = lat = finite = None
+    for output in outputs.values():
+        output.FlushCache()
+    outputs = bands = datasets = None
+    # GDAL reads a sample of a decimated grid as the centre of its step x step
+    # block, so the grid is shifted back by half a block (_swath.py,
+    # GEOLOCATION_STEPS, has the measurement).
+    offset = str(-(step - 1) / 2.0)
+    metadata = {
+        "SRS": geolocation.get("SRS", ""),
+        "X_DATASET": staged["X"],
+        "X_BAND": "1",
+        "Y_DATASET": staged["Y"],
+        "Y_BAND": "1",
+        "PIXEL_OFFSET": offset,
+        "LINE_OFFSET": offset,
+        "PIXEL_STEP": str(step),
+        "LINE_STEP": str(step),
+        "GEOREFERENCING_CONVENTION": "PIXEL_CENTER",
+    }
+    return metadata, [(item[1], item[2]) for item in extremes if item is not None]
+
+
+def _sentinel_s1_output_bounds(
+    vrt_path: Path, geolocation_srs: str, target_epsg: str, extremes: list[tuple[float, float]]
+) -> tuple[float, float, float, float] | None:
+    """The output extent of the full-resolution geolocation, found through the decimated one.
+
+    GDAL suggests an extent from the source's edges and from the geolocation
+    arrays' extreme samples, plus a margin of half a geolocation sample: half
+    a pixel at full resolution, eight pixels at a step of 16, which would grow
+    a scene's grid by about 300 m on each side and move every cell. So the
+    extent is given: every pixel corner along the four edges, through the
+    decimated geolocation (within about 1 m of the full one), and the full
+    arrays' extremes.
+    """
+    source = gdal.Open(str(vrt_path))
+    width, height = source.RasterXSize, source.RasterYSize
+    transformer = gdal.Transformer(source, None, [f"DST_SRS={target_epsg}", "METHOD=GEOLOC_ARRAY"])
+    along_x = np.arange(width + 1, dtype=np.float64)
+    along_y = np.arange(height + 1, dtype=np.float64)
+    columns = np.concatenate([along_x, along_x, np.zeros_like(along_y), np.full_like(along_y, width)])
+    rows = np.concatenate([np.zeros_like(along_x), np.full_like(along_x, height), along_y, along_y])
+    points, success = transformer.TransformPoints(0, np.column_stack([columns, rows]).tolist())
+    transformer = source = None
+    edge = np.asarray(points, dtype=np.float64)[np.asarray(success, dtype=bool), :2]
+    if not len(edge):
+        return None
+    geographic = osr.SpatialReference()
+    geographic.SetFromUserInput(geolocation_srs or "EPSG:4326")
+    geographic.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    target = osr.SpatialReference()
+    target.SetFromUserInput(target_epsg)
+    target.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    if extremes:
+        projected = osr.CoordinateTransformation(geographic, target).TransformPoints(extremes)
+        edge = np.vstack([edge, np.asarray(projected, dtype=np.float64)[:, :2]])
+    edge = edge[np.isfinite(edge).all(axis=1)]
+    return (float(edge[:, 0].min()), float(edge[:, 1].min()), float(edge[:, 0].max()), float(edge[:, 1].max()))
+
+
 def _warp_sentinel_s1_amplitude(
     input_dataset: str,
     variable: str,
@@ -572,19 +697,45 @@ def _warp_sentinel_s1_amplitude(
     warp_memory_limit_mb: float | None = None,
 ) -> None:
     subdataset = _build_subdataset_path(input_dataset, variable)
+    scratch = warped_path.parent
+    vrt_path = warped_path.with_name(f"{warped_path.stem}.geolocation.vrt")
+    staged: dict[str, str] = {}
+    previous_threads = gdal.GetConfigOption("GDAL_NUM_THREADS")
+    previous_tmpdir = gdal.GetConfigOption("CPL_TMPDIR")
+    warped = None
     try:
         with gdal_errors():
+            staged, extremes = _stage_sentinel_s1_geolocation(
+                subdataset, warped_path.with_suffix(""), S1_NETCDF_GEOLOCATION_STEP
+            )
+            vrt = gdal.Translate(str(vrt_path), subdataset, format="VRT")
+            vrt.SetMetadata(staged, "GEOLOCATION")
+            vrt.FlushCache()
+            vrt = None
+            # The geolocation warp's hole fill writes work files to CPL_TMPDIR,
+            # else to the current directory: keep them in this product's scratch.
+            gdal.SetConfigOption("CPL_TMPDIR", str(scratch))
+            # GDAL_NUM_THREADS is 1 for the warp, which keeps its own
+            # NUM_THREADS: on GDAL 3.13 a multithreaded geolocation warp can
+            # wait forever on the shared thread pool (_swath.warp_swath).
+            gdal.SetConfigOption("GDAL_NUM_THREADS", "1")
+            bounds = _sentinel_s1_output_bounds(vrt_path, staged["SRS"], target_epsg, extremes)
             warped = gdal.Warp(
                 str(warped_path),
-                subdataset,
+                str(vrt_path),
                 options=gdal.WarpOptions(
                     format="GTiff",
                     dstSRS=target_epsg,
+                    outputBounds=bounds,
                     xRes=target_resolution,
                     yRes=target_resolution,
                     srcNodata=0,
                     dstNodata=0,
                     geoloc=True,
+                    # The exact transformer: GDAL 3.13's approximation along an
+                    # output line drops whole rows of a geolocation warp
+                    # (_swath.warp_swath).
+                    errorThreshold=0.0,
                     multithread=True,
                     resampleAlg=resample_alg,
                     outputType=gdal.GDT_Float32,
@@ -601,6 +752,13 @@ def _warp_sentinel_s1_amplitude(
             )
     except RuntimeError as exc:
         raise RuntimeError(f"GDAL warp failed for {variable}: {exc}") from exc
+    finally:
+        gdal.SetConfigOption("GDAL_NUM_THREADS", previous_threads)
+        gdal.SetConfigOption("CPL_TMPDIR", previous_tmpdir)
+        vrt_path.unlink(missing_ok=True)
+        for path in staged.values():
+            if path.endswith(".tif"):
+                Path(path).unlink(missing_ok=True)
     if warped is None:
         raise RuntimeError(f"GDAL warp failed for {variable}")
     warped = None
