@@ -84,7 +84,8 @@ def quality_bit_names() -> dict[int, str]:
 
 
 def frame_atmosphere(
-    root: str, scratch: Path, shape: tuple[int, int], *, decimate: int
+    root: str, scratch: Path, shape: tuple[int, int], *, decimate: int,
+    window: tuple[slice, slice] | None = None,
 ) -> dict[str, np.ndarray]:
     """The geometry and column fields the correction needs, on the image grid.
 
@@ -92,11 +93,15 @@ def frame_atmosphere(
     one place because every band needs the same ones and the expansion is the
     expensive part - doing it per band would multiply the cost of the whole
     correction by the band count for no gain.
+
+    ``window`` (``(rows, columns)`` of the image of ``shape``) gives only that
+    part, every value as the whole frame holds it there: the tie fields are
+    expanded at the window's points alone and the altitude is read inside it.
     """
     from ._sen3 import extract_member, find_member, open_sen3_variable, read_packed
 
     def tie(member: str, variable: str) -> np.ndarray:
-        return tie_point_field(root, member, variable, scratch, shape)
+        return tie_point_field(root, member, variable, scratch, shape, window)
 
     solar_zenith = tie(GEOMETRY_MEMBER, "SZA")
     view_zenith = tie(GEOMETRY_MEMBER, "OZA")
@@ -105,9 +110,11 @@ def frame_atmosphere(
     dataset = open_sen3_variable(
         extract_member(root, find_member(root, "geo_coordinates.nc"), scratch), "altitude"
     )
-    altitude = read_packed(dataset.GetRasterBand(1), decimate=decimate, log10=False)
+    # A window lands on the pixels the trim below would keep: both start at the
+    # top-left corner of the same read.
+    altitude = read_packed(dataset.GetRasterBand(1), decimate=decimate, log10=False, window=window)
     dataset = None
-    if altitude.shape != shape:
+    if window is None and altitude.shape != shape:
         # A decimation that does not divide evenly leaves a row or column over.
         # Trimming is right here rather than padding: altitude varies smoothly,
         # and the alternative is an arithmetic failure on a frame that is
@@ -220,92 +227,109 @@ def resolve_loading(
     }
 
 
-def correct_frame(
-    input_dataset: str,
-    root: str,
-    scratch: Path,
-    *,
-    bands: list[int],
-    shape: tuple[int, int],
-    decimate: int,
-    solar_zenith_for_toa: np.ndarray,
-    land: np.ndarray,
-    bright: np.ndarray,
-    rejected: np.ndarray,
-    tier: str = "none",
-    aerosol: Any = None,
-    aerosol_uncertainty: Any = None,
-) -> dict[str, Any]:
-    """Surface reflectance, its uncertainty and a quality band, for one frame.
+# How much of the frame is corrected at once. Every step is per pixel, so the
+# answer is the same whatever the strip; what the size decides is memory. Two
+# sizes, because the two costs are different in kind. A *read* strip re-reads
+# and re-expands every member it needs (six tie fields, the altitude, five
+# bands), so it is large, to keep the members copied out of the product few;
+# its fields cost ~52 B/px. A *compute* strip is where the forward model
+# (~590 B/px per band) and the retrieval (~2 KB per clear-water candidate) run,
+# so it is small. Both are counted in pixels rather than rows, so a narrow RR
+# segment and a wide FR frame get the same peak.
+READ_STRIP_CELLS = 1 << 21
+COMPUTE_STRIP_CELLS = 1 << 17
 
-    Returns the corrected bands in the order asked for, alongside the
-    uncertainty band per band, the shared quality band, and provenance detailed
-    enough to reproduce a pixel.
 
-    ``aerosol_uncertainty`` is the loading's own standard error, if the caller
-    has one - ``SY_2_AOD`` publishes ``AOD_*_uncertainty``, the retrieval does
-    not. Supplying it adds a propagated term to the uncertainty band in
-    quadrature. It is **not** the main term and must not be mistaken for one:
-    see :mod:`pysent._olci_uncertainty` for the measurement showing it is about
-    a tenth of the disagreement actually observed. Without it the band is the
-    measured residual alone, which is the honest floor rather than a gap.
-    """
+def _row_strips(rows: int, columns: int, cells: int):
+    """``slice``s of whole rows, each at most ``cells`` pixels (one row at least)."""
+    step = max(1, int(cells) // max(1, int(columns)))
+    for start in range(0, rows, step):
+        yield slice(start, min(rows, start + step))
+
+
+def _check_request(tier: str, aerosol: Any) -> None:
     if tier not in CORRECTION_TIERS:
         raise ValueError(
             f"atmospheric_correction must be one of {', '.join(CORRECTION_TIERS)}, "
             f"not {tier!r}"
         )
-    platform = platform_of(input_dataset)
-    atmosphere = frame_atmosphere(root, scratch, shape, decimate=decimate)
-    geometry = _geometry_only(atmosphere)
-
-    toa = {
-        band: toa_reflectance(
-            root, band, scratch, decimate=decimate,
-            solar_zenith_degrees=solar_zenith_for_toa,
+    if tier == "full" and aerosol is None:
+        raise ValueError(
+            "the 'full' tier needs an aerosol source: a number, a "
+            "(depth, angstrom) pair, 'retrieve' or 'climatological'"
         )
-        for band in bands
+
+
+def _provenance(tier: str, aerosol: Any, loading: dict[str, Any] | None) -> dict[str, str]:
+    """What the product's tags say about the correction.
+
+    The two medians are over the pixels corrected - the bbox's window when
+    there is one - so they describe the same area as the result's ``aerosol``
+    summary.
+    """
+    provenance = {
+        "atmospheric_correction": tier,
+        "uncertainty_meaning": uncertainty_note(tier),
+        "validated_solar_zenith_deg": "%g-%g" % VALIDATED_SOLAR_ZENITH_DEG,
     }
+    if loading is not None:
+        finite = np.isfinite(loading["optical_depth_550"])
+        provenance.update({
+            "aerosol_source": str(aerosol),
+            "aerosol_table_ceiling": f"{loading['table_ceiling']:g}",
+            "aerosol_optical_depth_550_median": (
+                f"{float(np.nanmedian(loading['optical_depth_550'])):.4f}"
+                if finite.any() else "none"
+            ),
+            "aerosol_angstrom_median": (
+                f"{float(np.nanmedian(loading['angstrom'])):.3f}"
+                if finite.any() else "none"
+            ),
+        })
+    return provenance
 
-    if tier == "none":
-        return {
-            "tier": tier,
-            "surfaces": {band: values.astype(np.float32) for band, values in toa.items()},
-            "uncertainties": {},
-            "quality": np.zeros(shape, dtype=np.uint16),
-            "provenance": {"atmospheric_correction": "none"},
-            "loading": None,
-        }
 
+def _strip_correction(
+    platform: str,
+    *,
+    tier: str,
+    aerosol: Any,
+    aerosol_uncertainty: Any,
+    bands: list[int],
+    atmosphere: dict[str, np.ndarray],
+    toa: dict[int, np.ndarray],
+    land: np.ndarray,
+    bright: np.ndarray,
+    rejected: np.ndarray,
+    quality: np.ndarray,
+    surfaces: dict[int, np.ndarray],
+    uncertainties: dict[int, np.ndarray],
+    loading_out: dict[str, Any] | None,
+) -> None:
+    """Correct one strip, writing into the frame's outputs (views of that strip).
+
+    The same calls, on the same per-pixel values, as one call on the whole frame
+    makes, so every value is the one the whole frame gets: only the arrays are
+    smaller.
+    """
+    shape = land.shape
+    geometry = _geometry_only(atmosphere)
     loading = None
     if tier == "full":
-        if aerosol is None:
-            raise ValueError(
-                "the 'full' tier needs an aerosol source: a number, a "
-                "(depth, angstrom) pair, 'retrieve' or 'climatological'"
-            )
-        # The retrieval needs its own bands, which are not necessarily the ones
-        # being corrected, so they are read here rather than assumed present.
-        from ._aerosol_retrieval import RETRIEVAL_BANDS
-
-        retrieval_toa = dict(toa)
-        if aerosol == "retrieve":
-            for band in RETRIEVAL_BANDS:
-                if band not in retrieval_toa:
-                    retrieval_toa[band] = toa_reflectance(
-                        root, band, scratch, decimate=decimate,
-                        solar_zenith_degrees=solar_zenith_for_toa,
-                    )
         loading = resolve_loading(
             platform,
             aerosol=aerosol,
             atmosphere=atmosphere,
-            toa=retrieval_toa,
+            toa=toa,
             water=~land & ~bright & ~rejected,
             shape=shape,
         )
-
-    quality = np.zeros(shape, dtype=np.uint16)
+        loading_out["optical_depth_550"][...] = loading["optical_depth_550"]
+        loading_out["angstrom"][...] = loading["angstrom"]
+        loading_out["source"][...] = loading["source"]
+        loading_out["haze_beyond_table"][...] = loading["haze_beyond_table"]
+        for name, values in loading["refused"].items():
+            loading_out["refused"][name][...] = values
 
     def mark(name: str, where: np.ndarray) -> None:
         """Set a bit, additively.
@@ -335,8 +359,6 @@ def correct_frame(
         )
         mark("haze_beyond_table", loading["haze_beyond_table"])
 
-    surfaces: dict[int, np.ndarray] = {}
-    uncertainties: dict[int, np.ndarray] = {}
     for band in bands:
         if tier == "gas":
             terms = {
@@ -356,7 +378,8 @@ def correct_frame(
             )
 
         surface = surface_from_toa(toa[band], **terms)
-        surfaces[band] = np.where(rejected, np.nan, surface).astype(np.float32)
+        terms = None
+        surfaces[band][...] = np.where(rejected, np.nan, surface).astype(np.float32)
 
         # The sensitivity is only worth two extra forward evaluations per band
         # when there is a loading uncertainty to multiply it by. Computing it
@@ -381,35 +404,180 @@ def correct_frame(
             depth_uncertainty=aerosol_uncertainty,
             sensitivity=sensitivity,
         )
-        uncertainties[band] = np.where(rejected, np.nan, values).astype(np.float32)
+        uncertainties[band][...] = np.where(rejected, np.nan, values).astype(np.float32)
         mark("uncertainty_inferred", why["inferred_from_neighbour"])
         mark("uncertainty_unmeasured", why["unmeasured"] & ~rejected)
         mark("negative_reflectance", np.nan_to_num(surface, nan=0.0) < 0.0)
 
-    provenance = {
-        "atmospheric_correction": tier,
-        "uncertainty_meaning": uncertainty_note(tier),
-        "validated_solar_zenith_deg": "%g-%g" % VALIDATED_SOLAR_ZENITH_DEG,
+
+def _loading_arrays(platform: str, aerosol: Any, bands: list[int], shape: tuple[int, int]) -> dict[str, Any]:
+    """The frame's loading, allocated empty: what :func:`resolve_loading` gives, at ``shape``.
+
+    The names of the refusal masks and the table's ceiling do not depend on any
+    pixel, so they are taken from the same call on no pixel at all.
+    """
+    nothing = np.zeros((0, 0))
+    atmosphere = {key: nothing for key in (
+        "pressure_hpa", "solar_zenith_deg", "view_zenith_deg",
+        "relative_azimuth_deg", "ozone_kg_m2", "water_kg_m2",
+    )}
+    from ._aerosol_retrieval import RETRIEVAL_BANDS
+
+    probe = resolve_loading(
+        platform, aerosol=aerosol, atmosphere=atmosphere,
+        toa={band: nothing for band in dict.fromkeys([*bands, *RETRIEVAL_BANDS])} if aerosol == "retrieve"
+        else {band: nothing for band in bands},
+        water=np.zeros((0, 0), dtype=bool), shape=(0, 0),
+    )
+    return {
+        "optical_depth_550": np.full(shape, np.nan, dtype=probe["optical_depth_550"].dtype),
+        "angstrom": np.full(shape, np.nan, dtype=probe["angstrom"].dtype),
+        "source": np.zeros(shape, dtype=probe["source"].dtype),
+        "source_names": probe["source_names"],
+        "source_codes": probe["source_codes"],
+        "refused": {name: np.zeros(shape, dtype=bool) for name in probe["refused"]},
+        "haze_beyond_table": np.zeros(shape, dtype=bool),
+        "table_ceiling": probe["table_ceiling"],
     }
-    if loading is not None:
-        finite = np.isfinite(loading["optical_depth_550"])
-        provenance.update({
-            "aerosol_source": str(aerosol),
-            "aerosol_table_ceiling": f"{loading['table_ceiling']:g}",
-            "aerosol_optical_depth_550_median": (
-                f"{float(np.nanmedian(loading['optical_depth_550'])):.4f}"
-                if finite.any() else "none"
-            ),
-            "aerosol_angstrom_median": (
-                f"{float(np.nanmedian(loading['angstrom'])):.3f}"
-                if finite.any() else "none"
-            ),
-        })
+
+
+def empty_correction(
+    input_dataset: str, *, bands: list[int], shape: tuple[int, int], tier: str, aerosol: Any = None,
+) -> dict[str, Any]:
+    """What :func:`correct_frame` returns for a window with no pixel in it, at ``shape``.
+
+    A bbox that misses the swath still writes its (empty) product on the box's
+    own grid, so the layers exist and are empty: the surfaces and their
+    uncertainties NaN, the quality band and the loading's codes zero, its values
+    NaN - the fill a cut of a corrected frame to no pixel gives - and the medians
+    "none", since no pixel was corrected. Nothing is read.
+    """
+    _check_request(tier, aerosol)
+    if tier == "none":
+        raise ValueError("an empty correction is only made for a correcting tier")
+    platform = platform_of(input_dataset)
+    loading = _loading_arrays(platform, aerosol, bands, shape) if tier == "full" else None
+    return {
+        "tier": tier,
+        "surfaces": {band: np.full(shape, np.nan, dtype=np.float32) for band in bands},
+        "uncertainties": {band: np.full(shape, np.nan, dtype=np.float32) for band in bands},
+        "quality": np.zeros(shape, dtype=np.uint16),
+        "provenance": _provenance(tier, aerosol, loading),
+        "loading": loading,
+    }
+
+
+def correct_frame(
+    input_dataset: str,
+    root: str,
+    scratch: Path,
+    *,
+    bands: list[int],
+    shape: tuple[int, int],
+    decimate: int,
+    solar_zenith_for_toa: np.ndarray,
+    land: np.ndarray,
+    bright: np.ndarray,
+    rejected: np.ndarray,
+    tier: str = "none",
+    aerosol: Any = None,
+    aerosol_uncertainty: Any = None,
+    window: tuple[slice, slice] | None = None,
+) -> dict[str, Any]:
+    """Surface reflectance, its uncertainty and a quality band, for one frame.
+
+    Returns the corrected bands in the order asked for, alongside the
+    uncertainty band per band, the shared quality band, and provenance detailed
+    enough to reproduce a pixel.
+
+    ``shape`` is the image's (the geolocation's). ``window`` (``(rows, columns)``
+    of it, as a bbox gives it) corrects only that part: ``solar_zenith_for_toa``,
+    ``land``, ``bright`` and ``rejected`` are then the window's, and so is every
+    array returned. The frame is corrected a strip of rows at a time
+    (:data:`READ_STRIP_CELLS`, :data:`COMPUTE_STRIP_CELLS`); every step is per
+    pixel, so each value is the one a single call on the whole frame gives, and
+    the medians in the provenance are taken on the assembled loading.
+
+    ``aerosol_uncertainty`` is the loading's own standard error, if the caller
+    has one - ``SY_2_AOD`` publishes ``AOD_*_uncertainty``, the retrieval does
+    not. Supplying it adds a propagated term to the uncertainty band in
+    quadrature. It is **not** the main term and must not be mistaken for one:
+    see :mod:`pysent._olci_uncertainty` for the measurement showing it is about
+    a tenth of the disagreement actually observed. Without it the band is the
+    measured residual alone, which is the honest floor rather than a gap. A
+    per-pixel one must be the window's shape and is cut with the strips.
+    """
+    _check_request(tier, aerosol)
+    platform = platform_of(input_dataset)
+    rows_cut, columns_cut = window if window is not None else (slice(0, shape[0]), slice(0, shape[1]))
+    out_shape = (rows_cut.stop - rows_cut.start, columns_cut.stop - columns_cut.start)
+
+    def strip_window(rows: slice) -> tuple[slice, slice]:
+        return (slice(rows_cut.start + rows.start, rows_cut.start + rows.stop), columns_cut)
+
+    def band_reflectance(band: int, rows: slice) -> np.ndarray:
+        return toa_reflectance(
+            root, band, scratch, decimate=decimate,
+            solar_zenith_degrees=solar_zenith_for_toa[rows],
+            window=strip_window(rows), image_shape=shape,
+        )
+
+    if tier == "none":
+        whole = slice(0, out_shape[0])
+        return {
+            "tier": tier,
+            "surfaces": {band: band_reflectance(band, whole).astype(np.float32) for band in bands},
+            "uncertainties": {},
+            "quality": np.zeros(out_shape, dtype=np.uint16),
+            "provenance": {"atmospheric_correction": "none"},
+            "loading": None,
+        }
+
+    # The retrieval needs its own bands, which are not necessarily the ones
+    # being corrected, so they are read here rather than assumed present.
+    from ._aerosol_retrieval import RETRIEVAL_BANDS
+
+    read_bands = list(bands)
+    if tier == "full" and aerosol == "retrieve":
+        read_bands += [band for band in RETRIEVAL_BANDS if band not in read_bands]
+
+    surfaces = {band: np.empty(out_shape, dtype=np.float32) for band in bands}
+    uncertainties = {band: np.empty(out_shape, dtype=np.float32) for band in bands}
+    quality = np.zeros(out_shape, dtype=np.uint16)
+    loading = _loading_arrays(platform, aerosol, bands, out_shape) if tier == "full" else None
+    per_pixel_error = aerosol_uncertainty is not None and np.ndim(aerosol_uncertainty) == 2
+
+    for read in _row_strips(out_shape[0], out_shape[1], READ_STRIP_CELLS):
+        atmosphere = frame_atmosphere(root, scratch, shape, decimate=decimate, window=strip_window(read))
+        toa = {band: band_reflectance(band, read) for band in read_bands}
+        for part in _row_strips(read.stop - read.start, out_shape[1], COMPUTE_STRIP_CELLS):
+            rows = slice(read.start + part.start, read.start + part.stop)
+            _strip_correction(
+                platform, tier=tier, aerosol=aerosol,
+                aerosol_uncertainty=aerosol_uncertainty[rows] if per_pixel_error else aerosol_uncertainty,
+                bands=bands,
+                atmosphere={key: values[part] for key, values in atmosphere.items()},
+                toa={band: values[part] for band, values in toa.items()},
+                land=land[rows], bright=bright[rows], rejected=rejected[rows],
+                quality=quality[rows],
+                surfaces={band: values[rows] for band, values in surfaces.items()},
+                uncertainties={band: values[rows] for band, values in uncertainties.items()},
+                loading_out=None if loading is None else {
+                    **loading,
+                    "optical_depth_550": loading["optical_depth_550"][rows],
+                    "angstrom": loading["angstrom"][rows],
+                    "source": loading["source"][rows],
+                    "haze_beyond_table": loading["haze_beyond_table"][rows],
+                    "refused": {name: values[rows] for name, values in loading["refused"].items()},
+                },
+            )
+        atmosphere = toa = None
+
     return {
         "tier": tier,
         "surfaces": surfaces,
         "uncertainties": uncertainties,
         "quality": quality,
-        "provenance": provenance,
+        "provenance": _provenance(tier, aerosol, loading),
         "loading": loading,
     }

@@ -1653,80 +1653,19 @@ def _process_rgb_product(
     lat_ds = lon_ds = None
     tier = options.get("atmospheric_correction", "none")
 
-    # With a bbox and no correction, every field is read only inside the
-    # window (the geolocation, read whole, finds it). The correction reads its
-    # own fields on the whole frame's grid, so there the bands are read whole
-    # too and cut after it, as before.
+    # With a bbox, every field is read only inside the window (the geolocation,
+    # read whole, finds it), the correction's too: nothing after this is cut.
     crop = _SwathCrop(lat, lon, product=product, settings=settings)
-    window = crop.read_window if tier == "none" else None
+    window = crop.read_window
     frame_shape = crop.full_shape
     shape = frame_shape if window is None else (
         window[0].stop - window[0].start, window[1].stop - window[1].start
     )
-
-    # One expansion of the solar-zenith tie grid, shared by the three bands:
-    # it is the expensive part and it does not depend on the band.
-    zenith = solar_zenith(root, scratch, frame_shape, window)
-
-    rejected, missing_flags, bright = quality_mask(
-        root, scratch, frame_shape, list(options["reject_flags"]), window
-    )
-
-    reflectances: list[np.ndarray] = []
-    for band in bands:
-        values = toa_reflectance(
-            root, band, scratch, decimate=decimate, solar_zenith_degrees=zenith,
-            window=window, image_shape=frame_shape if window is not None else None,
-        )
-        if values.shape != shape:
-            raise ValueError(
-                f"{product}: band {band} is {values.shape} but the geolocation is {frame_shape}"
-            )
-        # Masked where it lies: the band is this loop's own, and a masked copy
-        # beside it was one more frame per band (the same NaN either way).
-        values[rejected] = np.nan
-        reflectances.append(values)
-    values = None
-
-    # The atmospheric correction, when one was asked for. It replaces the
-    # top-of-atmosphere values rather than adding bands beside them: a product
-    # that carried both would invite a reader to difference them and call the
-    # difference an atmosphere, which is only true in the one tier that has no
-    # transmittance division.
-    correction = None
-    if tier != "none":
-        from ._olci_correction import correct_frame
-
-        land, _, _ = quality_mask(root, scratch, frame_shape, ["land"])
-        correction = correct_frame(
-            input_dataset, root, scratch,
-            bands=bands, shape=frame_shape, decimate=decimate,
-            solar_zenith_for_toa=zenith,
-            land=land, bright=bright, rejected=rejected,
-            tier=tier, aerosol=options.get("aerosol"),
-        )
-        land = None
-        reflectances = [correction["surfaces"][band] for band in bands]
-    # Nothing below reads the zenith or the quality mask.
-    zenith = rejected = None
-
-    # The crop comes after the correction, which reads its own fields on the
-    # whole frame's grid, and before anything is counted or warped. Arrays
-    # read inside the window are already cut and pass through unchanged.
     lat, lon = crop.lat, crop.lon
-    reflectances = [crop(values) for values in reflectances]
-    bright = crop(bright, False)
-    if correction is not None:
-        correction = crop.nested(correction)
 
-    kept = np.isfinite(reflectances[0])
-    kept_count = int(np.count_nonzero(kept))
-    if kept_count == 0 and settings["on_empty"] == "raise":
-        raise EmptySceneError(
-            f"{product}: no pixel of this frame survives the quality mask "
-            f"({', '.join(options['reject_flags']) or 'nothing rejected'}), so there is nothing to draw"
-        )
-
+    # The grid and the size cap need only the geolocation, so they are settled
+    # before anything else is read: a request over the cap is refused in
+    # seconds rather than after a correction that can take most of an hour.
     sampling = _ground_sampling_m(options, manifest)
     epsg, resolution = choose_grid(
         lat, lon,
@@ -1755,6 +1694,73 @@ def _process_rgb_product(
     if cells * layer_count > settings["max_output_pixels"]:
         raise _over_the_cap(
             product, f"{layer_count} bands on a {epsg} grid at {resolution:g}", cells * layer_count, settings
+        )
+
+    # One expansion of the solar-zenith tie grid, shared by the three bands:
+    # it is the expensive part and it does not depend on the band.
+    zenith = solar_zenith(root, scratch, frame_shape, window)
+
+    rejected, missing_flags, bright = quality_mask(
+        root, scratch, frame_shape, list(options["reject_flags"]), window
+    )
+
+    # The atmospheric correction, when one was asked for. It replaces the
+    # top-of-atmosphere values rather than adding bands beside them: a product
+    # that carried both would invite a reader to difference them and call the
+    # difference an atmosphere, which is only true in the one tier that has no
+    # transmittance division. It reads its own bands, so the top-of-atmosphere
+    # ones are read here only when nothing is corrected.
+    correction = None
+    reflectances: list[np.ndarray] = []
+    if tier != "none":
+        from ._olci_correction import correct_frame, empty_correction
+
+        if crop.outside:
+            # No pixel inside the bbox: the product is empty on the box's grid,
+            # and there is nothing to correct.
+            correction = empty_correction(
+                input_dataset, bands=bands, shape=lat.shape, tier=tier, aerosol=options.get("aerosol"),
+            )
+        else:
+            land, _, _ = quality_mask(root, scratch, frame_shape, ["land"], window)
+            correction = correct_frame(
+                input_dataset, root, scratch,
+                bands=bands, shape=frame_shape, decimate=decimate,
+                solar_zenith_for_toa=zenith,
+                land=land, bright=bright, rejected=rejected,
+                tier=tier, aerosol=options.get("aerosol"), window=window,
+            )
+            land = None
+        reflectances = [correction["surfaces"][band] for band in bands]
+    else:
+        for band in bands:
+            values = toa_reflectance(
+                root, band, scratch, decimate=decimate, solar_zenith_degrees=zenith,
+                window=window, image_shape=frame_shape if window is not None else None,
+            )
+            if values.shape != shape:
+                raise ValueError(
+                    f"{product}: band {band} is {values.shape} but the geolocation is {frame_shape}"
+                )
+            # Masked where it lies: the band is this loop's own, and a masked copy
+            # beside it was one more frame per band (the same NaN either way).
+            values[rejected] = np.nan
+            reflectances.append(values)
+        values = None
+    # Nothing below reads the zenith or the quality mask.
+    zenith = rejected = None
+
+    # A bbox with no pixel inside leaves the bands read whole: they become the
+    # empty mesh here. Arrays read inside the window pass through unchanged.
+    reflectances = [crop(values) for values in reflectances]
+    bright = crop(bright, False)
+
+    kept = np.isfinite(reflectances[0])
+    kept_count = int(np.count_nonzero(kept))
+    if kept_count == 0 and settings["on_empty"] == "raise":
+        raise EmptySceneError(
+            f"{product}: no pixel of this frame survives the quality mask "
+            f"({', '.join(options['reject_flags']) or 'nothing rejected'}), so there is nothing to draw"
         )
 
     step = _resolve_geoloc_step(
