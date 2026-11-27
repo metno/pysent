@@ -75,10 +75,11 @@ S1_SAFE_IMPLEMENTATION = "sentinel_s1_safe_quicklook"
 # The NetCDF product carries a lat/lon pair for every pixel. Handed to GDAL
 # whole, the geolocation warp of a 26364 x 19513 IW scene was killed at the
 # worker's 4 GB after about an hour on GDAL 3.8.4 and 3.13.3 alike, and took
-# 40 min and 4.8 GB where it was let finish. Every 16th sample is enough for
-# the 40 m grid: on that scene's own grid, 59 of 29.9 million cells change
-# validity and values move 0.011 dB on average (p99 0.063 dB), in 90 s
-# under 2 GB; GDAL 3.8.4 and 3.13.3 then agree on all but 105 cells.
+# 40-72 min and 4.6-4.8 GB where it was let finish. Every 16th sample is
+# enough for the 40 m grid: on that scene's own grid, 59 of 29.9 million cells
+# are lost and 1,950 gained at the swath edge, and values move 0.011 dB on
+# average (p99 0.063 dB), in 90 s under 2 GB; GDAL 3.8.4 and 3.13.3 then agree
+# on all but 105 cells.
 S1_NETCDF_GEOLOCATION_STEP = 16
 # Cells per strip read from each geolocation array: 64 MB of Float32.
 S1_GEOLOCATION_STRIP_CELLS = 1 << 24
