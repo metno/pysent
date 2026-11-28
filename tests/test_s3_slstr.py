@@ -195,6 +195,41 @@ def test_asking_for_kelvin_gives_kelvin(s3_slstr_lst_window, tmp_path):
     assert kelvin["value_stats"]["p50"] == pytest.approx(celsius["value_stats"]["p50"] + 273.15, abs=0.05)
 
 
+@pytest.mark.parametrize("fixture_name, product", [
+    ("s3_slstr_lst_window", "lst"),
+    ("s3_slstr_sst_window", "sst"),
+])
+@pytest.mark.parametrize("unit, label, kelvin_offset", [
+    (None, "degC", 273.15),
+    ("celsius", "degC", 273.15),
+    ("kelvin", "K", 0.0),
+    # Native is what the file holds, which for these two is kelvin.
+    ("native", "K", 0.0),
+])
+def test_the_units_label_is_what_was_written(
+    request, fixture_name, product, unit, label, kelvin_offset, tmp_path,
+):
+    """The label follows the conversion: the result, the provenance and the
+    tags on every file written say the same, and the numbers agree with it."""
+    window = request.getfixturevalue(fixture_name)
+    options = {} if unit is None else {"unit": unit}
+    result = process_sentinel_s3_safe(
+        input_dataset=str(window), output_dir=tmp_path, products={product: options},
+    )[0]
+    assert result["units"] == label
+    assert result["provenance"]["PYSENT_UNITS"] == label
+    for key in ("path", "styled_path"):
+        assert gdal.Open(result[key]).GetMetadataItem("PYSENT_UNITS") == label, key
+    kelvin = process_sentinel_s3_safe(
+        input_dataset=str(window), output_dir=tmp_path / "k",
+        products={product: {"unit": "kelvin"}},
+        processing_options={"styled": False, "thumbnail": False},
+    )[0]
+    assert result["value_stats"]["p50"] == pytest.approx(
+        kelvin["value_stats"]["p50"] - kelvin_offset, abs=0.05,
+    )
+
+
 def test_an_unknown_unit_is_refused():
     from pysent.s3 import normalize_sentinel_s3_product_map
 

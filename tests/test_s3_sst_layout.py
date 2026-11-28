@@ -124,6 +124,9 @@ def test_the_callers_other_options_survive_the_pick(single_file_product, tmp_pat
     assert result["style_hint"]["value_range"] == [0.0, 10.0]
     # Kelvin, not celsius: sea water is above 250 K and nowhere near 250 C.
     assert result["value_stats"]["p01"] > 250.0
+    # And labelled so, in the result and on the file.
+    assert result["units"] == "K"
+    assert result["provenance"]["PYSENT_UNITS"] == "K"
 
 
 def test_the_pair_layout_keeps_its_default_and_its_tags(s3_slstr_sst_window, tmp_path):
