@@ -29,7 +29,8 @@ once here, exactly as the GeoTIFF path computes them, and baked in:
     that preset's own :func:`build_sentinel_s2_vrt`.
 
 ``build_sentinel_s2_index_vrt``
-    NDVI or NDWI (:data:`S2_INDICES`) as one band: GDAL's built-in
+    A normalised difference (:data:`S2_INDICES`: NDVI, NDWI, NDSI, MNDWI,
+    NDMI, NDRE, NBR) as one band: GDAL's built-in
     ``norm_diff`` pixel function over the two bands' raw JPEG 2000 files, the
     product's radiometric offset applied in the sources, so the value is the
     index of reflectance. Coloured by default (a paletted Byte band, the ramp
@@ -678,6 +679,11 @@ def sentinel_s2_vrt_band_indices(vrt: str | Path | Sequence[str], preset: str | 
 S2_INDICES: dict[str, tuple[str, str]] = {
     "ndvi": ("B8", "B4"),  # vegetation: NIR against red
     "ndwi": ("B3", "B8"),  # open water (McFeeters 1996): green against NIR
+    "ndsi": ("B3", "B11"),  # snow: green against SWIR (the same values as mndwi)
+    "mndwi": ("B3", "B11"),  # open water (Xu 2006): green against SWIR (the same values as ndsi)
+    "ndmi": ("B8", "B11"),  # vegetation moisture: NIR against SWIR
+    "ndre": ("B8A", "B5"),  # chlorophyll (red edge): narrow NIR against red edge, on the 20 m grid
+    "nbr": ("B8", "B12"),  # burn: NIR against the longer SWIR
 }
 # Reflectance (in DN) at or below 0 is held here, so that a+b is never 0.
 S2_INDEX_REFLECTANCE_FLOOR = 0.001
@@ -692,6 +698,31 @@ S2_INDEX_RAMPS: dict[str, tuple[tuple[float, str], ...]] = {
     "ndwi": (
         (-1.0, "#4a3016"), (-0.6, "#8c6a3f"), (-0.3, "#cdb98f"), (0.0, "#efeee8"),
         (0.15, "#a9d3ea"), (0.4, "#4b98cf"), (0.7, "#1a5aa0"), (1.0, "#08275a"),
+    ),
+    # Snow above about 0.4: earth and rock in greys and browns below, white-blue above.
+    "ndsi": (
+        (-1.0, "#1f1a17"), (-0.4, "#5a4a3c"), (0.0, "#8f8578"), (0.3, "#bdb8b0"),
+        (0.4, "#9fd0ee"), (0.6, "#d6eefa"), (1.0, "#ffffff"),
+    ),
+    # Open water above about 0: built-up and bare ground in browns below.
+    "mndwi": (
+        (-1.0, "#3d2b1f"), (-0.5, "#8a6a48"), (-0.2, "#cbb994"), (0.0, "#eeeee6"),
+        (0.1, "#9ccbe6"), (0.4, "#3e86c4"), (0.7, "#16508f"), (1.0, "#071f4a"),
+    ),
+    # Dry (red-brown) through neutral at 0 to moist canopy (teal, blue); vegetation mostly 0.1-0.6.
+    "ndmi": (
+        (-1.0, "#67001f"), (-0.4, "#b2582b"), (-0.1, "#e0b36b"), (0.0, "#f2e6b8"),
+        (0.2, "#a8d5b0"), (0.4, "#4bb3b0"), (0.6, "#1f7fae"), (1.0, "#0b2d6b"),
+    ),
+    # Chlorophyll: water and bare ground below 0, green deepening over 0.1-0.6.
+    "ndre": (
+        (-1.0, "#1d3557"), (-0.2, "#7b8ea3"), (0.0, "#d8d1c0"), (0.1, "#e5d27a"),
+        (0.2, "#c6d14c"), (0.3, "#8bbd3a"), (0.45, "#3f9a2e"), (0.6, "#17661f"), (1.0, "#073a10"),
+    ),
+    # Burn scars low (dark red to orange), healthy vegetation high (green).
+    "nbr": (
+        (-1.0, "#3a0a06"), (-0.5, "#8c1c13"), (-0.2, "#d9541e"), (0.0, "#f2b45a"),
+        (0.1, "#f6e3a1"), (0.3, "#a7cf6b"), (0.5, "#4f9a3a"), (0.7, "#1f6224"), (1.0, "#0a3812"),
     ),
 }
 
@@ -769,7 +800,12 @@ def build_sentinel_s2_index_vrt(
     """Write a Sentinel-2 normalised-difference index as a one-band VRT over the SAFE zip, coloured by a ramp.
 
     ``index`` is a name from :data:`S2_INDICES`: NDVI ``(B8 - B4) / (B8 + B4)``,
-    NDWI ``(B3 - B8) / (B3 + B8)``. The index is GDAL's built-in ``norm_diff``
+    NDWI ``(B3 - B8) / (B3 + B8)``, NDSI ``(B3 - B11) / (B3 + B11)``, MNDWI
+    ``(B3 - B11) / (B3 + B11)``, NDMI ``(B8 - B11) / (B8 + B11)``, NDRE
+    ``(B8A - B5) / (B8A + B5)``, NBR ``(B8 - B12) / (B8 + B12)``. NDSI and
+    MNDWI are the same formula and give identical values; only their ramps
+    differ (snow near 0.4, water near 0). The grid is the finer band's: 10 m
+    for all but NDRE, whose two bands are 20 m. The index is GDAL's built-in ``norm_diff``
     pixel function (no Python runs on read) over the two bands' JPEG 2000
     files, not the stretched all-bands VRT: each value has the product's
     offset added first (``BOA_ADD_OFFSET``/``RADIO_ADD_OFFSET``, -1000 from

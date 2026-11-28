@@ -245,8 +245,17 @@ Caveats when adding combos:
   (`MSIL1C` vs `MSIL2A`). Validate the band is present before promoting a combo.
 - **Resolution mixing**: any 20 m/60 m band upsamples the composite's coarse channel;
   watch the `res_m`/size columns and pick resampling accordingly (§4.2).
-- **Index products** (NDVI, NDWI, NDMI…) are *not* RGB composites; they'd need a new
-  single-band code path + colormap, not just a `PRODUCTS` entry. Flag as a larger task.
+- **Index products** are *not* RGB composites: they have their own single-band path,
+  `pysent.vrt.build_sentinel_s2_index_vrt`, one VRT per index from `S2_INDICES`, in this
+  order: NDVI (B8, B4), NDWI (B3, B8), NDSI (B3, B11), MNDWI (B3, B11), NDMI (B8, B11),
+  NDRE (B8A, B5) and NBR (B8, B12), each `(a − b) / (a + b)` of reflectance (the product's
+  offset applied, reflectance held just above 0) by GDAL's `norm_diff`, coloured by its ramp
+  in `S2_INDEX_RAMPS` over −1..1, or the Float32 index itself with
+  `processing_options={"values": True}`. NDSI and MNDWI are the same formula and give
+  identical values; only the ramps differ (snow above about 0.4, water above about 0). Each
+  index lands on its finer band's grid: 10 m, except NDRE on 20 m (`resolution` in the
+  result, `PYSENT_TARGET_RESOLUTION` in the VRT). Indices with constants (EVI, SAVI) need
+  GDAL's `expression` pixel function (3.11+) and are not offered.
 
 ---
 
