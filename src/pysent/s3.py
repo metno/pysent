@@ -266,7 +266,9 @@ BAND_LABEL = {4: 490, 6: 560, 8: 665}
 SLSTR_GEOLOCATION = ("geodetic_in.nc", "latitude_in", "longitude_in")
 
 # Physical units are what gets stored. A conversion is applied before writing
-# and recorded in the provenance, so a file always says what its numbers are.
+# and recorded in the provenance, so a file always says what its numbers are:
+# the label is the conversion's, or with none (native) the product's
+# `native_units`, falling back to its `units`.
 _UNIT_CONVERSIONS: dict[str, tuple[float, float, str]] = {
     # name: (scale, offset, label)
     "native": (1.0, 0.0, ""),
@@ -291,6 +293,9 @@ S3_PRODUCTS.update({
         "geolocation": SLSTR_GEOLOCATION,
         "units": "degC",
         "unit": "celsius",
+        # What the file holds before any conversion: `unit="native"` writes
+        # these numbers, so it is what their label has to say.
+        "native_units": "K",
         # The review study's approved range (2026-11-02): the first proposal,
         # -10-45 from one June Nordic frame, put 57.4 % of a year's pictured
         # Nordic pixels in the bottom colour, because polar and winter frames
@@ -367,6 +372,9 @@ S3_PRODUCTS.update({
         "geolocation": ("*_DUAL_*.nc", "lat", "lon"),
         "units": "degC",
         "unit": "celsius",
+        # What the file holds before any conversion: `unit="native"` writes
+        # these numbers, so it is what their label has to say.
+        "native_units": "K",
         "value_range": (-2.0, 20.0),
         "log_scale": False,
         "colormap": "magma",
@@ -1154,7 +1162,8 @@ def _assemble_result(
         "valid_fraction": valid_fraction(values),
         "source_valid_fraction": source_valid,
         "value_stats": value_statistics(values),
-        "units": options["units"],
+        # The label stamped on the file, so the result cannot say otherwise.
+        "units": metadata.get("PYSENT_UNITS", options["units"]),
         "mask_flags": list(options["mask_flags"]),
         "reject_flags": list(options["reject_flags"]),
         "available_flags": [row["name"] for row in table],
@@ -1502,6 +1511,7 @@ def _process_swath_product(
     kept &= ~extra_rejected
 
     unit_scale, unit_offset, unit_label = _UNIT_CONVERSIONS[options["unit"]]
+    units = unit_label or options.get("native_units") or options["units"]
     if unit_scale != 1.0 or unit_offset != 0.0:
         # float32 throughout, as before; in place instead of two new frames.
         values = np.ascontiguousarray(values, dtype=np.float32)
@@ -1564,6 +1574,7 @@ def _process_swath_product(
         product=product, options=options, input_dataset=input_dataset, manifest=manifest,
         decimate=decimate, resolution=resolution, epsg=epsg,
         member=member, variable=variable, geoloc_step=step, bbox=crop.bbox,
+        units=units,
     )
 
     # Taken now, so nothing of the swath has to outlive the warp.
@@ -2177,7 +2188,10 @@ def _product_metadata(
     variable: str | None = None,
     geoloc_step: int | None = None,
     bbox: tuple[float, float, float, float] | None = None,
+    units: str | None = None,
 ) -> dict[str, str]:
+    # `units` is what the caller wrote, when it converted the values; the
+    # paths that never convert leave it to the table.
     return provenance(
         product=product,
         source=Path(str(input_dataset).split("?")[0]).name,
@@ -2201,7 +2215,7 @@ def _product_metadata(
         view_reason=(
             VIEW_BY_LAYOUT_REASON if options.get("view_reason") == VIEW_BY_LAYOUT_REASON else None
         ),
-        units=options["units"],
+        units=units or options["units"],
         style_range=f"{options['value_range'][0]:g},{options['value_range'][1]:g}",
         style_scale="log10" if options["log_scale"] else "linear",
         colormap=options["colormap"],
