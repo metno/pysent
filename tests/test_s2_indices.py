@@ -1,7 +1,8 @@
-"""Sentinel-2 NDVI and NDWI as one-band VRTs: GDAL's ``norm_diff`` over the raw bands, coloured by a ramp.
+"""Sentinel-2 normalised-difference indices as one-band VRTs: GDAL's ``norm_diff`` over the raw bands, coloured by a ramp.
 
-The bands are the committed window of a real scene (B4, B3) and a near-infrared
-band derived from them, written as files the SAFE lookups return; the product
+The bands are the committed window of a real scene (B4, B3), a near-infrared
+band derived from them and four 20 m bands (B5, B8A, B11, B12) derived from
+those at half the size, written as files the SAFE lookups return; the product
 metadata is a real-shaped ``MTD_MSIL2A.xml`` in a SAFE directory, so the
 offsets come through :func:`pysent.s2.read_sentinel_s2_radiometry`. Every
 value GDAL reads out of the VRT is compared with numpy's index of the same
@@ -69,13 +70,32 @@ def _make_scene(tmp_path: Path, s2_rgb: Path, monkeypatch, baseline: str = "05.1
     red[100:140, 100:180] = 600  # below the -1000 offset: reflectance held at 0
     nir[120:160, 150:220] = 900
     nir[300:310, 300:310] = red[300:310, 300:310] = green[300:310, 300:310] = 1000  # both exactly 0 reflectance: index 0, not infinity
+    # The 20 m bands: every other pixel of the 10 m ones, each with NoData and dark patches of its own.
+    coarse = {
+        "B5": 0.8 * red[::2, ::2] + 0.3 * green[::2, ::2] + 150,
+        "B8A": 0.5 * red[::2, ::2] + 0.8 * green[::2, ::2] + 400,
+        "B11": 1.1 * red[::2, ::2] + 0.2 * green[::2, ::2] + 50,
+        "B12": 0.9 * red[::2, ::2] + 100,
+    }
+    for data in coarse.values():
+        data[(red[::2, ::2] == 0) | (green[::2, ::2] == 0)] = 0
+    coarse["B11"][:, -6:] = 0
+    coarse["B5"][-5:, :] = 0
+    coarse["B11"][20:40, 30:60] = 700
+    coarse["B12"][40:60, 50:90] = 800
+    for data in coarse.values():
+        data[150:155, 150:155] = 1000  # with the 10 m bands' patch: every band exactly 0 reflectance
+    coarse_geotransform = (geotransform[0], 2 * geotransform[1], geotransform[2],
+                           geotransform[3], geotransform[4], 2 * geotransform[5])
     safe = tmp_path / "S2X_MSIL2A_TEST.SAFE"
     safe.mkdir()
     _metadata(safe, baseline)
-    sources, arrays = {}, {"B4": red, "B3": green, "B8": nir}
+    sources, arrays = {}, {"B4": red, "B3": green, "B8": nir, **coarse}
     for name, data in arrays.items():
-        path = _write(tmp_path / f"T35_{name}.tif", np.rint(data).astype(np.uint16), geotransform, wkt)
-        sources[name] = {"subdataset_name": str(path), "band_index": 1, "resolution": 10.0, "epsg": "EPSG:32635"}
+        resolution = 20.0 if name in coarse else 10.0
+        path = _write(tmp_path / f"T35_{name}.tif", np.rint(data).astype(np.uint16),
+                      coarse_geotransform if name in coarse else geotransform, wkt)
+        sources[name] = {"subdataset_name": str(path), "band_index": 1, "resolution": resolution, "epsg": "EPSG:32635"}
     monkeypatch.setattr(s2_module, "_collect_sentinel_s2_band_sources", lambda _input: dict(sources))
     monkeypatch.setattr(vrt_module, "_s2_band_file", lambda subdataset, _band: subdataset)
     return {"input": str(safe), "arrays": {k: np.rint(v).astype(np.float64) for k, v in arrays.items()}}
@@ -84,6 +104,13 @@ def _make_scene(tmp_path: Path, s2_rgb: Path, monkeypatch, baseline: str = "05.1
 @pytest.fixture
 def scene(tmp_path, s2_rgb, monkeypatch):
     return _make_scene(tmp_path, s2_rgb, monkeypatch)
+
+
+def _pair(scene, name: str) -> tuple[np.ndarray, np.ndarray]:
+    """The index's two bands on its grid, the finer band's: a 20 m band beside a 10 m one is read at 10 m, nearest."""
+    a, b = (scene["arrays"][band] for band in S2_INDICES[name])
+    size = max(a.shape[0], b.shape[0])
+    return tuple(np.repeat(np.repeat(x, size // x.shape[0], axis=0), size // x.shape[1], axis=1) for x in (a, b))
 
 
 def _reference(a: np.ndarray, b: np.ndarray, offset: float) -> np.ndarray:
@@ -106,7 +133,7 @@ def test_the_index_values_are_numpys_on_reflectance(tmp_path, scene, name):
     )
     first, second = S2_INDICES[name]
     assert result["bands"] == [first, second] and result["offsets"] == {first: -1000.0, second: -1000.0}
-    expected = _reference(scene["arrays"][first], scene["arrays"][second], -1000.0)
+    expected = _reference(*_pair(scene, name), -1000.0)
     dataset = gdal.Open(result["path"])
     band = dataset.GetRasterBand(1)
     assert band.DataType == gdal.GDT_Float32 and np.isnan(band.GetNoDataValue()) and band.GetDescription() == name
@@ -114,8 +141,11 @@ def test_the_index_values_are_numpys_on_reflectance(tmp_path, scene, name):
     np.testing.assert_array_equal(np.isnan(values), np.isnan(expected))
     np.testing.assert_allclose(values, expected, atol=1e-6, equal_nan=True)
     assert np.nanmin(values) >= -1.0 and np.nanmax(values) <= 1.0
-    assert np.isnan(values[:, :8]).all()  # B8 NoData there, in both indices
-    np.testing.assert_array_equal(values[300:310, 300:310], 0.0)
+    assert np.isfinite(values[~np.isnan(values)]).all()  # never infinity
+    if "B8" in (first, second):
+        assert np.isnan(values[:, :8]).all()  # B8 NoData there
+    patch = slice(300, 310) if values.shape[0] == 512 else slice(150, 155)
+    np.testing.assert_array_equal(values[patch, patch], 0.0)
     assert dataset.GetMetadataItem("PYSENT_INDEX") == name
     assert dataset.GetGeoTransform() == gdal.Open(result["sources"][0]).GetGeoTransform()
 
@@ -123,8 +153,7 @@ def test_the_index_values_are_numpys_on_reflectance(tmp_path, scene, name):
 @pytest.mark.parametrize("name", sorted(S2_INDICES))
 def test_the_coloured_index_is_the_encoded_value_with_the_ramps_colours(tmp_path, scene, name):
     result = build_sentinel_s2_index_vrt(input_dataset=scene["input"], index=name, output_path=tmp_path / f"{name}.vrt")
-    first, second = S2_INDICES[name]
-    expected = _reference(scene["arrays"][first], scene["arrays"][second], -1000.0)
+    expected = _reference(*_pair(scene, name), -1000.0)
     dataset = gdal.Open(result["path"])
     band = dataset.GetRasterBand(1)
     assert band.DataType == gdal.GDT_Byte and band.GetNoDataValue() == 0
@@ -147,6 +176,47 @@ def test_the_coloured_index_is_the_encoded_value_with_the_ramps_colours(tmp_path
     assert [tuple(table.GetColorEntry(i)) for i in range(256)] == [tuple(int(c) for c in row) for row in palette]
     assert result["ramp"] == [list(stop) for stop in S2_INDEX_RAMPS[name]]
     assert result["encoding"] == {"nodata": 0, "min_value": 1, "max_value": 255, "min_index": -1.0, "max_index": 1.0}
+
+
+def test_the_table_keeps_ndvi_and_ndwi_first_then_the_five_in_order():
+    """A map server lists one layer per index in this order (mapping-api's ``INDEX_LAYERS``)."""
+    assert list(S2_INDICES) == ["ndvi", "ndwi", "ndsi", "mndwi", "ndmi", "ndre", "nbr"]
+    assert S2_INDICES["ndvi"] == ("B8", "B4") and S2_INDICES["ndwi"] == ("B3", "B8")
+    assert list(S2_INDEX_RAMPS) == list(S2_INDICES)
+
+
+@pytest.mark.parametrize(
+    ("name", "resolution", "size"),
+    [("ndvi", 10.0, 512), ("ndwi", 10.0, 512), ("ndsi", 10.0, 512), ("mndwi", 10.0, 512),
+     ("ndmi", 10.0, 512), ("ndre", 20.0, 256), ("nbr", 10.0, 512)],
+)
+@pytest.mark.parametrize("values", [False, True])
+def test_each_index_lands_on_its_finer_bands_grid(tmp_path, scene, name, resolution, size, values):
+    result = build_sentinel_s2_index_vrt(
+        input_dataset=scene["input"], index=name, output_path=tmp_path / f"{name}.vrt",
+        processing_options={"values": values},
+    )
+    assert result["resolution"] == resolution and (result["width"], result["height"]) == (size, size)
+    dataset = gdal.Open(result["path"])
+    assert (dataset.RasterXSize, dataset.RasterYSize) == (size, size)
+    assert dataset.GetGeoTransform()[1] == resolution
+    assert float(dataset.GetMetadataItem("PYSENT_TARGET_RESOLUTION")) == resolution
+    first, second = S2_INDICES[name]
+    assert dataset.GetMetadataItem("PYSENT_INDEX_FORMULA") == f"({first} - {second}) / ({first} + {second})"
+
+
+@pytest.mark.parametrize("values", [False, True])
+def test_ndsi_and_mndwi_read_the_same_values(tmp_path, scene, values):
+    """The same formula under two names (snow, water): identical pixels, only the colours differ."""
+    read = {}
+    for name in ("ndsi", "mndwi"):
+        result = build_sentinel_s2_index_vrt(
+            input_dataset=scene["input"], index=name, output_path=tmp_path / f"{name}.vrt",
+            processing_options={"values": values},
+        )
+        read[name] = gdal.Open(result["path"]).ReadAsArray()
+    np.testing.assert_array_equal(read["ndsi"], read["mndwi"])
+    assert S2_INDEX_RAMPS["ndsi"] != S2_INDEX_RAMPS["mndwi"]
 
 
 def test_a_zoomed_out_read_is_the_index_of_the_pixels_it_picks(tmp_path, scene):
